@@ -61,6 +61,16 @@ def entry_velocity_state(model,qpos,qvel,target_vx,velocity_limits):
         'scope':'Initial state only; no forces or state edits after reset'}
 
 
+def compare_rollout_positions(first,second):
+    """Compare the shared timeline without hiding an early-stop mismatch."""
+    if first.ndim!=3 or second.ndim!=3 or first.shape[1:]!=second.shape[1:]:
+        raise ValueError('Position batches must have matching environment and joint dimensions')
+    common=min(len(first),len(second))
+    if not common:raise ValueError('Empty physical rollout')
+    per_step=np.max(np.abs(first[:common]-second[:common]),axis=(1,2))
+    return float(per_step.max()),per_step,len(first)==len(second)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ckpt",type=Path,required=True)
@@ -73,7 +83,7 @@ def main():
     p.add_argument("--seconds",type=float,default=2.)
     p.add_argument("--seed",type=int,default=0)
     p.add_argument("--phase",choices=("takeoff","full"),default="full")
-    p.add_argument("--warmstart",type=Path)
+    p.add_argument("--warmstart",type=Path,help="Parameter vector, or an (N,D) grid for zero-iteration timing ablations")
     p.add_argument("--initial-command-margin",type=float,default=0.,help="Move the first position command inward for joints starting at a soft boundary; no state or actuator edits")
     p.add_argument("--tail-of",type=Path,help="Freeze a takeoff solution and search aerial/landing residuals instead")
     p.add_argument("--device",default="cpu")
@@ -91,8 +101,20 @@ def main():
     p.add_argument("--hard-penalty-linear",type=float,default=0.,help="Additional exact-penalty term to avoid trading small hard-limit violations for score")
     p.add_argument("--local-refinement",action="store_true",help="Refine a warm start with smaller steps, top 1/16 elites and a best-anchored mean")
     p.add_argument("--floor-penalty-linear",type=float,default=0.,help="Penalize nonfoot clearance below 5 mm and foot compression beyond 5 mm")
+    p.add_argument("--checkpoint-grid",type=Path,nargs='+',help="Evaluate immutable checkpoints in the same environment; zero iterations only")
+    p.add_argument("--landing-ckpt",type=Path,help="Diagnostic phase-specific frozen landing controller")
+    p.add_argument("--landing-switch-times",type=float,nargs='+',default=[1.2])
+    p.add_argument("--landing-policy-blend",type=float,default=.12)
+    p.add_argument("--consistent-retiming",action="store_true",help="Resample future poses and velocities with one continuous physical-time clock")
     args=p.parse_args()
     assert args.population%args.num_envs==0
+    if args.checkpoint_grid and (args.iterations or any(c.name=='ckpt_latest.pt' for c in args.checkpoint_grid)):
+        p.error('Checkpoint comparison needs immutable files and zero search iterations')
+    if args.landing_ckpt:
+        if args.checkpoint_grid or args.landing_ckpt.name=='ckpt_latest.pt':p.error('Use one immutable landing controller')
+        if min(args.landing_switch_times)<=0 or args.landing_policy_blend<0 or args.num_envs%len(args.landing_switch_times):
+            p.error('Landing switch grid needs positive times and equal replicas')
+        if len(args.landing_switch_times)>1 and args.iterations:p.error('Landing timing grid requires zero iterations')
     air_grid=None
     if args.baseline_air_scales:
         air_grid=np.array([float(s) for s in args.baseline_air_scales.split(',')])
@@ -125,6 +147,12 @@ def main():
     from supermimic.eval.benchmark import load_policy_from_checkpoint
     device=torch.device(args.device)
     policy,cfg=load_policy_from_checkpoint(args.ckpt,str(device))
+    landing_policy=None
+    if args.landing_ckpt:
+        landing_policy,landing_cfg=load_policy_from_checkpoint(args.landing_ckpt,str(device))
+        if landing_cfg["env"].get("anchor_obs",False)!=cfg["env"].get("anchor_obs",False):
+            raise ValueError('Landing controller observation settings differ')
+    landing_times=torch.as_tensor(np.resize(args.landing_switch_times,args.num_envs),dtype=torch.float32,device=device)
     env=make_env(SuperMimicEnvCfgArgs(npz_files=[str(args.source)],num_envs=args.num_envs,
         action_noise_std=0.,obs_noise=False,reset_noise=False,domain_randomization=False,
         sampling_mode="start",record_transitions=False,episode_length_s=1e5,
@@ -135,6 +163,18 @@ def main():
     original_update=cmd._update_command
     clock={"step":0,"preparation":torch.full((args.num_envs,),reference_preparation,device=device),"initial_frame":0,
            "air_scale":torch.ones(args.num_envs,device=device)}
+    if args.consistent_retiming:
+        from supermimic.data.reference_retiming import reference_clock,retimed_goal_window
+        def sample_clock(times):
+            return reference_clock(times,clock["preparation"][:,None],clock["air_scale"][:,None],
+                reference_preparation,reference_flight,(frames-1)/fps)
+        def goal_window(frame,k):
+            # Native reset observations anticipate the next physical control
+            # tick. Future samples must preserve that lead after retiming.
+            times=(clock["step"]+1+torch.arange(k,device=device,dtype=torch.float32))[None,:]*env.step_dt
+            reference_times,rates=sample_clock(times)
+            return retimed_goal_window(cmd.library,reference_times*fps,rates)
+        cmd.library.goal_window=goal_window
     def warped_update(env_ids=None):
         original_update(env_ids)
         if env_ids is None:
@@ -146,7 +186,11 @@ def main():
             air_frame=torch.where(after<=air_duration,takeoff+after/clock["air_scale"]*fps,
                                   landing+(after-air_duration)*fps)
             frame=torch.where(t<=prep,t/prep*takeoff,air_frame).round().long()
-            cmd.frame[:]=torch.minimum(frame+clock["initial_frame"],cmd.library.clip_last[0])
+            if args.consistent_retiming:
+                reference_times,_=sample_clock(torch.full((1,1),t+env.step_dt,device=device))
+                cmd.frame[:]=torch.minimum((reference_times[:,0]*fps).round().long(),cmd.library.clip_last[0])
+            else:
+                cmd.frame[:]=torch.minimum(frame+clock["initial_frame"],cmd.library.clip_last[0])
             cmd._refresh_ref()
             cmd.update_relative_body_poses()
     cmd._update_command=warped_update
@@ -187,8 +231,14 @@ def main():
     if args.tail_of:
         assert args.phase=="full" and fixed_preparation.shape==(dimension,)
     mean=np.zeros(dimension);mean[0]=1. if args.tail_of else reference_preparation
+    parameter_grid=None
     if args.warmstart:
-        mean[:]=np.load(args.warmstart)["parameters"]
+        initial=np.load(args.warmstart)["parameters"]
+        if initial.ndim==2:
+            if args.iterations or initial.shape[1]!=dimension or args.num_envs%len(initial):
+                p.error('Parameter grid requires zero iterations, matching dimensions and equal replicas')
+            parameter_grid=initial;mean[:]=initial[0]
+        else:mean[:]=initial
     covariance=np.diag(np.r_[.04 if args.local_refinement else .1,
         np.full(dimension-1,.08 if args.local_refinement else .25)]**2)
     lo=np.r_[.6 if args.tail_of else .45,np.full(dimension-1,-1.5)]
@@ -217,6 +267,7 @@ def main():
     (args.out/"configuration.json").write_text(json.dumps({
         "arguments":{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         "checkpoint_sha256":hashlib.sha256(args.ckpt.read_bytes()).hexdigest(),
+        "landing_checkpoint_sha256":hashlib.sha256(args.landing_ckpt.read_bytes()).hexdigest() if args.landing_ckpt else None,
         "source_sha256":hashlib.sha256(args.source.read_bytes()).hexdigest(),
         "physics":f"Unmodified project make_env on {device}; only local design-process reset requests suppressed",
         "joint_acceptance":"Actual mechanical joint ranges at each physics step; soft limits retained as a separate regularizer",
@@ -225,7 +276,7 @@ def main():
         "groups":groups,"residual_units":"fraction of actuator effort, mapped to existing position actions",
         "fixed_preparation_sha256":hashlib.sha256(args.tail_of.read_bytes()).hexdigest() if args.tail_of else None,
         "optimization_variables":"aerial guide time scale and air/landing residuals" if args.tail_of else "preparation duration and support/swing residuals",
-        "not_a_trained_policy":True},indent=2))
+        "not_a_trained_policy":True},indent=2,default=str))
 
     @torch.no_grad()
     def rollout(parameters):
@@ -242,19 +293,24 @@ def main():
         clock["air_scale"]=torch.tensor(parameters[:,0] if args.tail_of else np.ones(args.num_envs),dtype=torch.float32,device=device)
         cmd.forced_frame[:]=0
         obs,_=env.reset()
+        ids=torch.arange(args.num_envs,device=device)
         if args.entry_vx is not None:
             from supermimic.envs.state_io import StateIO
             io=StateIO(env);state=io.read()
             velocity,entry=entry_velocity_state(m,state[0,:m.nq].cpu().numpy(),
                 state[0,m.nq:].cpu().numpy(),args.entry_vx,velocity_limit)
             state[:,m.nq:]=torch.as_tensor(velocity,dtype=state.dtype,device=device)
-            ids=torch.arange(args.num_envs,device=device)
             io.write(ids,state)
+            (args.out/"entry-initial-condition.json").write_text(json.dumps(entry,indent=2))
+        if args.consistent_retiming:
+            reference_times,_=sample_clock(torch.full((1,1),env.step_dt,device=device))
+            cmd.frame[:]=torch.minimum((reference_times[:,0]*fps).round().long(),cmd.library.clip_last[0])
+            cmd._refresh_ref()
+        if args.entry_vx is not None or args.consistent_retiming:
             cmd.update_relative_body_poses();env.sim.sense()
             env.observation_manager.reset(ids)
             obs=env.observation_manager.compute(update_history=True,env_ids=ids)
             env.obs_buf=obs
-            (args.out/"entry-initial-condition.json").write_text(json.dumps(entry,indent=2))
         clock["initial_frame"]=int(cmd.frame[0])
         clock["step"]=0
         active_physics["record"]=True
@@ -301,6 +357,11 @@ def main():
                 tail*=torch.clamp(1-(after-air_duration)/.4,0,1)[:,None]
                 residual+=tail
             action=policy(obs["policy"],obs["goal"])+residual
+            if landing_policy is not None:
+                fraction=(torch.clamp((step*.02-landing_times)/args.landing_policy_blend,0,1)
+                    if args.landing_policy_blend else (step*.02>=landing_times).to(torch.float32))
+                landing_action=landing_policy(obs["policy"],obs["goal"])+residual
+                action=torch.lerp(action,landing_action,fraction[:,None])
             if bounded_indices:
                 indices=torch.tensor(bounded_indices,device=device)
                 scale_t=torch.as_tensor(action_scale[bounded_indices],dtype=action.dtype,device=device)
@@ -419,12 +480,14 @@ def main():
                 "airborne_forward_rotation_rad":air_rotation,
                 "takeoff_candidate_passed":bool(takeoff_passed),"single_left_support_at_launch":bool(single_at_launch),
                 "physical_candidate_passed":bool(passed),"approved_for_training":False})
+            if landing_policy is not None:reports[-1]["landing_switch_time_s"]=float(landing_times[e])
         physical_trace=tuple(np.stack([r[k] for r in physics_trace]) for k in range(3)) if physics_trace else None
         return reports,(np.array(states),np.array(velocities),np.array(actions),records,initial_state,physical_trace)
 
     try:
         # Establish the exact-controller baseline before searching.
         baseline_parameters=np.tile(mean,(args.num_envs,1))
+        if parameter_grid is not None:baseline_parameters=np.tile(parameter_grid,(args.num_envs//len(parameter_grid),1))
         if air_grid is not None:baseline_parameters[:,0]=np.resize(air_grid,args.num_envs)
         baseline,payload=rollout(baseline_parameters)
         (args.out/"baseline.json").write_text(json.dumps(baseline[0],indent=2))
@@ -436,26 +499,42 @@ def main():
                 actuator_force=payload[5][2][:,0],fps=np.array([1/m.opt.timestep]),
                 initial_qpos=payload[4]["qpos"][0]-np.r_[origins[0],np.zeros(m.nq-3)],
                 initial_qvel=payload[4]["qvel"][0])
-        if air_grid is not None:
+        if parameter_grid is not None or air_grid is not None or (landing_policy is not None and len(args.landing_switch_times)>1):
             positions=payload[0].copy();positions[:,:,:3]-=origins[None,:,:]
             np.savez(args.out/"timing-grid-trajectories.npz",qpos=positions,qvel=payload[1],actions=payload[2],
-                air_scales=baseline_parameters[:,0],fps=np.array([50.]))
+                air_scales=baseline_parameters[:,0] if args.tail_of else np.ones(args.num_envs),
+                landing_switch_times=landing_times.cpu().numpy(),parameters=baseline_parameters,fps=np.array([50.]))
         print("BASELINE",json.dumps(baseline[0]),flush=True)
         repeat,repeat_payload=rollout(baseline_parameters)
         (args.out/"reset-repeat-all.json").write_text(json.dumps(repeat))
-        error=float(np.max(np.abs(payload[0]-repeat_payload[0])))
-        per_step=np.max(np.abs(payload[0]-repeat_payload[0]),axis=(1,2))
+        error,per_step,equal_length=compare_rollout_positions(payload[0],repeat_payload[0])
         initial_errors={k:float(np.abs(payload[4][k]-repeat_payload[4][k]).max()) for k in payload[4]}
         initial_passed=max(initial_errors.values())<1e-5
         np.savez(args.out/"reset-repeat-trajectory.npz",qpos=repeat_payload[0],qvel=repeat_payload[1])
         (args.out/"reset-reproducibility.json").write_text(json.dumps({"maximum_qpos_error":error,
             "maximum_qpos_error_by_step":per_step.tolist(),
+            "rollout_frame_counts":[len(payload[0]),len(repeat_payload[0])],"equal_length":equal_length,
             "initial_state_errors":initial_errors,"initial_state_check_passed":initial_passed,
             "candidate_validation_required":"Three independent successful full physical rollouts before export or training; GPU numerical trajectory differences are not treated as success.",
-            "passed":error<1e-3,"scope":"Same controller, goals, initial state and reset; whole rollout compared"},indent=2))
+            "passed":equal_length and error<1e-3,"scope":"Same controller, goals, initial state and reset; common timeline compared, unequal durations explicitly fail reproducibility"},indent=2))
         assert initial_passed, "Initial state or first policy action differs across resets; design search rejected"
         if device.type=="cpu":
-            assert error<1e-3, "Repeated deterministic CPU resets disagree; design search rejected"
+            assert equal_length and error<1e-3, "Repeated deterministic CPU resets disagree; design search rejected"
+        if args.checkpoint_grid:
+            anchor_obs=cfg["env"].get("anchor_obs",False)
+            for checkpoint in args.checkpoint_grid:
+                policy,candidate_cfg=load_policy_from_checkpoint(checkpoint,str(device))
+                if candidate_cfg["env"].get("anchor_obs",False)!=anchor_obs:
+                    raise ValueError('Checkpoint observation settings differ; comparison rejected')
+                reports,recording=rollout(baseline_parameters)
+                folder=args.out/"checkpoint-grid"/checkpoint.stem;folder.mkdir(parents=True,exist_ok=False)
+                with checkpoint.open('rb') as f:digest=hashlib.file_digest(f,'sha256').hexdigest()
+                (folder/"reports.json").write_text(json.dumps({'checkpoint':str(checkpoint),
+                    'checkpoint_sha256':digest,'reports':reports,'approved_for_training':False},indent=2))
+                positions=recording[0].copy();positions[:,:,:3]-=origins[None,:,:]
+                np.savez(folder/"trajectories.npz",qpos=positions,qvel=recording[1],
+                    actions=recording[2],fps=np.array([50.]))
+                print('CHECKPOINT',str(checkpoint),json.dumps(reports[0]),flush=True)
         for iteration in range(args.iterations):
             iteration_start=time.monotonic()
             population=np.clip(rng.multivariate_normal(mean,covariance,args.population),lo,hi)
