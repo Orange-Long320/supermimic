@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import time
+from types import SimpleNamespace
 from pathlib import Path
 import mujoco
 import numpy as np
@@ -19,6 +20,7 @@ def curve(start,end,duration,velocity=None):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--integration-aware',action='store_true')
     p.add_argument('--source',type=Path,required=True);p.add_argument('--equilibrium',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True);p.add_argument('--seconds',type=float,default=2.5)
     p.add_argument('--push-seconds',type=float,default=.5);p.add_argument('--rise',type=float,default=.16)
@@ -55,7 +57,7 @@ def main():
     env=make_env(SuperMimicEnvCfgArgs(npz_files=[str(args.source)],num_envs=1,action_noise_std=0.,
         obs_noise=False,reset_noise=False,domain_randomization=False,sampling_mode='start',
         record_transitions=False,episode_length_s=1e5),'cpu')
-    traces=[];metrics_trace=[];solutions=[];controls=[];phases=[];accelerations=[]
+    traces=[];metrics_trace=[];solutions=[];controls=[];phases=[];accelerations=[];velocity_accelerations=[]
     status='failed';error=None;started=time.monotonic();controller=None
     try:
         env.command_manager.get_term('motion').forced_frame[:]=0;env.reset()
@@ -89,10 +91,17 @@ def main():
         effort=np.array([PROFILE['effort_limit'][n] for n in names]);velocity=np.array([PROFILE['velocity_limit'][n] for n in names])
         q0=state[0,:m.nq].numpy().copy();foot=m.body('robot/left_ankle_roll_link').id
         controller=NativeContactController(m,q0,effort,velocity,foot)
+        controller.integration_aware=args.integration_aware
         controller.foot_task_weight=args.foot_task_weight
         controller.com_task_weight=np.array([2.,2.,args.vertical_task_weight])
         controller.momentum_task_weight=np.array([.1,args.pitch_momentum_weight,.1])
         metrics=BatchedDesignMetrics(m,torch.device('cpu'));lo,hi=m.jnt_range[1:].T
+        observation=mujoco.MjData(m)
+        def observe(q,v):
+            observation.qpos[:]=q;observation.qvel[:]=v;mujoco.mj_forward(m,observation)
+            arrays={key:torch.as_tensor(np.array(getattr(observation,key)),dtype=torch.float32)[None]
+                    for key in ['xpos','xquat','cvel','geom_xpos','geom_xmat','qvel']}
+            return metrics(SimpleNamespace(**arrays))[0].numpy()
         com0=controller.com_ref.copy();push=reference.duration if reference else args.push_seconds;delay=args.delay;deadline=delay+push
         launch=com0+np.array([args.advance,0,args.rise]);launch_velocity=np.array([args.launch_vx,0,args.launch_vz])
         midpoint=com0+np.array([args.advance*(.55 if args.entry_vx else .2),0,-args.crouch])
@@ -136,7 +145,7 @@ def main():
         def checked_step(*a,**kw):
             nonlocal airborne,release,air_count,rotation_sum,last_rotation,flight_curve,unfold,unfold_curve,landed,fold_duration
             t=len(traces)*dt;q=env.sim.data.qpos[0].numpy().copy();v=env.sim.data.qvel[0].numpy().copy()
-            measured=metrics(env.sim.data)[0].numpy();d=controller.data;d.qpos[:]=q;d.qvel[:]=v;mujoco.mj_forward(m,d)
+            measured=observe(q,v);d=controller.data;d.qpos[:]=q;d.qvel[:]=v;mujoco.mj_forward(m,d)
             _,cj,hj=controller.jacobians(d);com=d.subtree_com[controller.root].copy();cv=cj@v;h=hj@v
             air_count=air_count+1 if min(measured[7:9])>.005 and t>delay else 0
             if airborne is None and air_count>=3:
@@ -211,9 +220,10 @@ def main():
             result=original_step(*a,**kw)
             qnext=env.sim.data.qpos[0].numpy().copy();vnext=env.sim.data.qvel[0].numpy().copy()
             rotation=Rotation.from_quat(qnext[3:7][[1,2,3,0]]);rotation_sum+=(rotation*last_rotation.inv()).as_rotvec()[1];last_rotation=rotation
-            values=metrics(env.sim.data)[0].numpy();actual_tau=env.sim.data.actuator_force[0].numpy()
+            values=observe(qnext,vnext);actual_tau=env.sim.data.actuator_force[0].numpy()
             traces.append(np.r_[qnext,vnext]);controls.append(target);phases.append(phase)
-            accelerations.append([controller.previous*20,env.sim.data.qacc[0].numpy().copy()])
+            accelerations.append([getattr(controller,'last_explicit_acceleration',controller.previous*20),env.sim.data.qacc[0].numpy().copy()])
+            velocity_accelerations.append([controller.previous*20,(vnext-v)/dt])
             metrics_trace.append(np.r_[values,np.maximum(np.maximum(lo-qnext[7:],qnext[7:]-hi),0).max(),
                 (abs(actual_tau)/effort).max(),(abs(vnext[6:])/velocity).max(),rotation_sum])
             return result
@@ -223,7 +233,8 @@ def main():
     except Exception as exc:error=str(exc)
     finally:
         if traces:np.savez(args.out/'trajectory.npz',state=np.asarray(traces),metrics=np.asarray(metrics_trace),
-            servo_target=np.asarray(controls),phase=np.asarray(phases),predicted_and_actual_acceleration=np.asarray(accelerations),fps=np.array([200.]))
+            servo_target=np.asarray(controls),phase=np.asarray(phases),predicted_and_actual_acceleration=np.asarray(accelerations),
+            predicted_and_observed_velocity_acceleration=np.asarray(velocity_accelerations),fps=np.array([200.]))
         report={'status':status,'error':error,'elapsed_s':time.monotonic()-started,'physical_steps':len(traces),
             'approved_for_training':False,'configuration':{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
             'pid':os.getpid(),'source_sha256':hashlib.sha256(program_source.encode()).hexdigest(),'module_sha256':snapshots,

@@ -1,10 +1,12 @@
 """Closed-loop single-support hold using bounded whole-body inverse dynamics."""
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import sys
 import time
+from types import SimpleNamespace
 from pathlib import Path
 import mujoco
 import numpy as np
@@ -17,6 +19,7 @@ def main():
     p.add_argument('--source',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
     p.add_argument('--initial-foot-height',type=float,help='Initial support-sole height only; no state edits after the first step')
     p.add_argument('--equilibrium',type=Path,help='Use an independently calibrated initial pose, before physics starts')
+    p.add_argument('--integration-aware',action='store_true')
     p.add_argument('--native-inverse',action='store_true',help='Use the native compliant-contact inverse instead of a rigid support approximation')
     p.add_argument('--com-z-offset',type=float,default=0.,help='Smooth COM lift over 0.2 to 0.8 seconds')
     p.add_argument('--physics-feedback',action='store_true',help='Recompute commands at each native physics step')
@@ -25,11 +28,29 @@ def main():
     p.add_argument('--reference-joint-weight',type=float,default=.1)
     p.add_argument('--foot-task-weight',type=float,default=.05)
     p.add_argument('--reference-root-weight',type=float,default=0.)
+    p.add_argument('--vertical-demand',type=float,help='Diagnostic desired upward acceleration; unchanged native motors')
+    p.add_argument('--lock-root-orientation',action='store_true')
+    p.add_argument('--foot-floor',type=float)
+    p.add_argument('--pitch-momentum',type=float,default=0.)
+    p.add_argument('--pitch-weight',type=float,default=0.)
+    p.add_argument('--free-joint-weight',type=float,default=.02)
+    p.add_argument('--root-weight',type=float,default=1.)
+    p.add_argument('--swing-hip',type=float)
+    p.add_argument('--bounded-release',action='store_true')
+    p.add_argument('--entry-vx',type=float,default=0.)
+    p.add_argument('--entry-vz',type=float,default=0.)
+    p.add_argument('--entry-hy',type=float,default=0.)
+    p.add_argument('--free-knee-weight',type=float)
+    p.add_argument('--release-on-knee',type=float,default=.12)
+    p.add_argument('--release-after',type=float,default=.4)
     p.add_argument('--seconds',type=float,default=1.);args=p.parse_args()
+    if args.integration_aware and not args.native_inverse:p.error('Integration-aware control requires native inverse dynamics')
     args.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
     program_source=Path(__file__).read_bytes();(args.out/'probe-source.py').write_bytes(program_source)
     configuration={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}
     configuration.update(pid=os.getpid(),interpreter=sys.executable,cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'))
+    for relative in ['src/supermimic/policy/joint_prediction.py','src/supermimic/policy/whole_body.py','src/supermimic/data/design_metrics.py','src/supermimic/data/entry_state.py']:
+        (args.out/Path(relative).name).write_bytes(Path(relative).read_bytes())
     (args.out/'configuration.json').write_text(json.dumps(configuration,indent=2))
     from supermimic.envs import SuperMimicEnvCfgArgs,make_env
     from supermimic.envs.state_io import StateIO
@@ -39,7 +60,7 @@ def main():
     env=make_env(SuperMimicEnvCfgArgs(npz_files=[str(args.source)],num_envs=1,action_noise_std=0.,
         obs_noise=False,reset_noise=False,domain_randomization=False,sampling_mode='start',
         record_transitions=False,episode_length_s=1e5),'cpu')
-    states=[];measurements=[];reactions=[];controls=[];solutions=[];accelerations=[];controller=None
+    states=[];measurements=[];reactions=[];controls=[];solutions=[];accelerations=[];velocity_accelerations=[];controller=None
     status='failed';error=None;started=time.monotonic()
     try:
         cmd=env.command_manager.get_term('motion');cmd.forced_frame[:]=0;env.reset()
@@ -48,8 +69,24 @@ def main():
             with np.load(args.equilibrium) as equilibrium:
                 if equilibrium['joint_names'].tolist()!=list(PROFILE['joint_names']):raise ValueError('Equilibrium joint order differs')
                 state[0,:m.nq]=torch.as_tensor(equilibrium['qpos'],dtype=state.dtype)
+        entry_audit=None
+        if any([args.entry_vx,args.entry_vz,args.entry_hy]):
+            from supermimic.data.entry_state import entry_velocity_state
+            limits=np.array([PROFILE['velocity_limit'][n] for n in PROFILE['joint_names']])
+            incoming,entry_audit=entry_velocity_state(m,state[0,:m.nq].numpy(),np.zeros(m.nv),args.entry_vx,limits,
+                com_velocity=[args.entry_vx,0.,args.entry_vz],angular_momentum=[0.,args.entry_hy,0.])
+            state[0,m.nq:]=torch.tensor(incoming,dtype=state.dtype)
         io.write(torch.tensor([0]),state)
         metrics=BatchedDesignMetrics(m,torch.device('cpu'))
+        observation=mujoco.MjData(m)
+        def observed_metrics(q,v):
+            # mj_step caches body/geometry fields before the final integration.
+            # Independent FK aligns every metric with the recorded post-step state.
+            observation.qpos[:]=q;observation.qvel[:]=v;mujoco.mj_forward(m,observation)
+            arrays={key:torch.as_tensor(np.array(getattr(observation,key)),dtype=torch.float32)[None]
+                    for key in ['xpos','xquat','cvel','geom_xpos','geom_xmat','qvel']}
+            return metrics(SimpleNamespace(**arrays))[0].numpy()
+
         original_foot_height=float(metrics(env.sim.data)[0,7])
         if args.initial_foot_height is not None:
             state[:,2]+=args.initial_foot_height-original_foot_height
@@ -66,13 +103,27 @@ def main():
         if args.native_inverse:
             from supermimic.policy.native_inverse import NativeContactController
             controller_class=NativeContactController
+        (args.out/'controller-source.py').write_text(inspect.getsource(sys.modules[controller_class.__module__]))
         controller=controller_class(m,state[0,:m.nq].numpy(),effort,velocity,foot)
+        controller.integration_aware=args.integration_aware
         controller.foot_task_weight=args.foot_task_weight
         if args.native_inverse:
             weights=np.full(len(names),.01)
             for i,name in enumerate(names):
                 if name.startswith('waist_'):weights[i]=args.waist_posture_weight
             controller.joint_task_weight=weights
+        if args.vertical_demand is not None:
+            if not args.native_inverse or args.support_reference:raise ValueError('Vertical diagnostic requires native inverse without a guide')
+            controller.com_task_weight=np.array([2.,2.,2.])
+            controller.momentum_task_weight=np.array([.1,args.pitch_weight,.1])
+            controller.joint_task_weight=np.array([.02 if n.startswith('left_') else args.free_joint_weight for n in names])
+            if args.free_knee_weight is not None:controller.joint_task_weight[names.index('right_knee_joint')]=args.free_knee_weight
+            controller.root_acceleration_weight=args.root_weight
+            controller.stabilize_support=False
+            controller.foot_geometry_floor=args.foot_floor
+            controller.root_acceleration_hard=args.lock_root_orientation
+        initial_rotation=Rotation.from_quat(state[0,3:7].numpy()[[1,2,3,0]])
+        release_time=None
         reference=None
         if args.support_reference:
             if not args.native_inverse:raise ValueError('Coordinated reference requires native inverse dynamics')
@@ -92,7 +143,43 @@ def main():
         env.termination_manager.compute=lambda:torch.zeros(1,dtype=torch.bool)
         original_step=env.sim.step
         def command(time_s):
+            nonlocal release_time
             q=env.sim.data.qpos[0].numpy().copy();v=env.sim.data.qvel[0].numpy().copy()
+            if args.vertical_demand is not None:
+                knee=names.index('left_knee_joint') if 'left_knee_joint' in names else next(i for i,n in enumerate(names) if n.startswith('left_knee'))
+                # Only commands change after the initial state; release is a motor retraction command.
+                if release_time is None and (q[7+knee]<args.release_on_knee or time_s>=args.release_after):release_time=time_s
+                controller.data.qpos[:]=q;controller.data.qvel[:]=v;mujoco.mj_forward(m,controller.data)
+                _,com_jac,h_jac=controller.jacobians(controller.data)
+                if release_time is not None:
+                    target=controller.qref[7:].copy()
+                    for i,n in enumerate(names):
+                        if n.startswith('left_hip_pitch'):target[i]=-.8
+                        elif n.startswith('left_knee'):target[i]=1.8
+                        elif n.startswith('right_knee'):target[i]=2.2
+                        elif 'elbow' in n:target[i]=-1.4
+                    if args.bounded_release:
+                        controller.root_acceleration_hard=False;controller.foot_geometry_floor=None
+                        if hasattr(controller,'root_acceleration_ref'):del controller.root_acceleration_ref
+                        qref=q.copy();qref[7:]=target
+                        tau,report=controller.solve(q,v,com_target=controller.data.subtree_com[controller.root].copy(),
+                            com_velocity=com_jac@v,com_acceleration=np.array([0.,0.,-9.81]),
+                            momentum_target=h_jac@v,qref=qref)
+                        solutions.append({'time':time_s,'phase':'bounded_retraction',**report})
+                        return q[7:]+(tau+kd*v[6:])/kp
+                    solutions.append({'time':time_s,'phase':'retraction'})
+                    return target
+                current=Rotation.from_quat(q[3:7][[1,2,3,0]])
+                controller.root_acceleration_ref=60*(current.inv()*initial_rotation).as_rotvec()-15*v[3:6]
+                target_v=np.array([0.,0.,(com_jac@v)[2]])
+                posture=controller.qref.copy()
+                if args.swing_hip is not None:
+                    u=np.clip(time_s/.15,0,1);u=u*u*(3-2*u)
+                    i=7+names.index('right_hip_pitch_joint');posture[i]=(1-u)*posture[i]+u*args.swing_hip
+                tau,report=controller.solve(q,v,com_target=controller.com_ref,com_velocity=target_v,
+                    com_acceleration=np.array([0.,0.,args.vertical_demand]),momentum_target=np.array([0.,args.pitch_momentum,0.]),qref=posture)
+                solutions.append({'time':time_s,'phase':'vertical_push',**report})
+                return q[7:]+(tau+kd*v[6:])/kp
             if reference is not None:
                 r=reference.sample(time_s-.2)
                 controller.foot_position=r['foot_position'];controller.foot_rotation=Rotation.from_quat(r['foot_quat'])
@@ -119,14 +206,18 @@ def main():
             solutions.append({'time':time_s,**report})
             return q[7:]+(tau+kd*v[6:])/kp
         def capture(*a,**kw):
+            velocity_before=env.sim.data.qvel[0].numpy().copy()
             if args.physics_feedback:
                 target=command(len(states)*float(m.opt.timestep))
                 env.sim.data.ctrl[0]=torch.tensor(target,dtype=env.sim.data.ctrl.dtype)
             result=original_step(*a,**kw)
-            accelerations.append(np.stack([controller.previous[:m.nv]*20.,env.sim.data.qacc[0].numpy().copy()]))
+            predicted=np.full(m.nv,np.nan) if release_time is not None and not args.bounded_release else controller.previous[:m.nv]*20.
+            explicit=getattr(controller,'last_explicit_acceleration',predicted)
+            accelerations.append(np.stack([explicit,env.sim.data.qacc[0].numpy().copy()]))
+            velocity_accelerations.append(np.stack([predicted,(env.sim.data.qvel[0].numpy()-velocity_before)/float(m.opt.timestep)]))
             q=env.sim.data.qpos[0].numpy().copy();v=env.sim.data.qvel[0].numpy().copy()
             tau=env.sim.data.actuator_force[0].numpy().copy()
-            states.append(np.r_[q,v]);measurements.append(np.r_[metrics(env.sim.data)[0].numpy(),
+            states.append(np.r_[q,v]);measurements.append(np.r_[observed_metrics(q,v),
                 np.maximum(np.maximum(low-q[7:],q[7:]-high),0).max(),(abs(tau)/effort).max()])
             reactions.append(env.sim.data.qfrc_constraint[0].numpy().copy())
             controls.append(env.sim.data.ctrl[0].numpy().copy())
@@ -141,11 +232,16 @@ def main():
     finally:
         if states:np.savez(args.out/'trajectory.npz',state=np.array(states),metrics=np.array(measurements),
             generalized_constraint_force=np.array(reactions),servo_target=np.array(controls),
-            predicted_and_actual_acceleration=np.array(accelerations),fps=np.array([200.]))
+            predicted_and_actual_acceleration=np.array(accelerations),
+            predicted_and_observed_velocity_acceleration=np.array(velocity_accelerations),fps=np.array([200.]))
         a=np.array(measurements)
         report={'status':status,'error':error,'elapsed_s':time.monotonic()-started,'physical_steps':len(states),
             'source':str(args.source),'approved_for_training':False,'purpose':__doc__,'solutions':solutions}
+        report['entry_audit']=entry_audit if 'entry_audit' in locals() else None
+        report['release_time_s']=release_time if 'release_time' in locals() else None
         report['configuration']=configuration;report['source_sha256']=hashlib.sha256(program_source).hexdigest()
+        report['integration_aware']=args.integration_aware
+        report['metric_state_alignment']='Independent native FK from each recorded post-step qpos/qvel'
         report['controller']='native_contact_inverse' if args.native_inverse else 'rigid_contact_inverse'
         report['com_z_offset_m']=args.com_z_offset
         report['feedback_interval_s']=float(m.opt.timestep) if args.physics_feedback else env.step_dt

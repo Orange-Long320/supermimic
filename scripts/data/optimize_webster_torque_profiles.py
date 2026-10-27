@@ -16,6 +16,9 @@ def main():
     p.add_argument('--hy',type=float,default=0.);p.add_argument('--seed',type=int,default=0)
     p.add_argument('--warmstart',type=Path)
     p.add_argument('--template',type=Path,help='Refine an actual recorded native-control prefix')
+    p.add_argument('--template-steps',type=int,help='Use only this many recorded physics steps as the motor prefix')
+    p.add_argument('--swing-hip-span',type=float,default=.6)
+    p.add_argument('--state-aligned-metrics',action='store_true',help='Refresh derived fields after integration before measuring')
     p.add_argument('--residual-std',type=float,default=.15)
     p.add_argument('--exploration-fraction',type=float,default=.15)
     p.add_argument('--bang-bang',action='store_true',help='Separate extension and rotation/unloading torque phases')
@@ -51,6 +54,9 @@ def main():
             q0=template_initial[:m.nq];incoming=template_initial[m.nq:]
             with np.load(args.template/'trajectory.npz') as z:
                 template=z['servo_target'].copy();template_state=z['state'].copy();template_dt=1/float(z['fps'][0])
+            if args.template_steps is not None:
+                if not 2<=args.template_steps<=len(template):raise ValueError('Invalid template prefix length')
+                template=template[:args.template_steps];template_state=template_state[:args.template_steps]
             template_duration=len(template)*template_dt
             entry={'scope':'Original initial state of recorded prefix; no state edits after reset',
                 'template':str(args.template),'initial_state_sha256':hashlib.sha256((args.template/'initial-state.npz').read_bytes()).hexdigest(),
@@ -101,7 +107,8 @@ def main():
                 target[:,balance]+=param[:,11:14]*eff_t[balance]/kp_t[balance]
             target=torch.where((t>=end_time)[:,None],tuck_t[None],target)
             env.sim.data.ctrl[:]=target;result=original_step(*a,**kw)
-            qnext=env.sim.data.qpos[:,7:];vnext=env.sim.data.qvel[:,6:];tau=env.sim.data.actuator_force[:]
+            qnext=env.sim.data.qpos[:,7:];vnext=env.sim.data.qvel[:,6:];tau=env.sim.data.actuator_force[:].clone()
+            if args.state_aligned_metrics:env.sim.forward()
             values=metrics(env.sim.data);hard=torch.maximum(low_t-qnext,qnext-high_t).clamp(min=0).amax(1)
             physical=torch.stack([hard,(abs(vnext)/lim_t).amax(1),(abs(tau)/eff_t).amax(1)],dim=1)
             maxima[:]=torch.where(active[:,None],torch.maximum(maxima,physical),maxima)
@@ -126,7 +133,9 @@ def main():
         if template_t is not None:
             lower=np.r_[.7,np.full(6,-.5),-.6,-.4,-.6,-.25,np.full(3,-.2)]
             upper=np.r_[1.5,np.full(6,.5),.6,.4,.6,.25,np.full(3,.2)]
+            upper[7]=args.swing_hip_span
             mean=np.r_[1.,np.zeros(13)];std=np.r_[.15,np.full(6,.15),.2,.15,.2,.1,np.full(3,.05)]*args.residual_std/.15
+            std[7]=max(std[7],args.swing_hip_span/3)
         if args.warmstart:mean=np.asarray(json.loads(args.warmstart.read_text())['parameters'])
         def evaluate(parameters):
             state_trace.clear();metric_trace.clear();force_trace.clear();control_trace.clear();clock.update(i=0,parameters=tensor(parameters))

@@ -27,3 +27,18 @@ def test_bounds_cover_random_forward_and_reversing_paths():
     for acceleration in [lo,hi,(lo+hi)/2]:
         path=q+t*v+.5*acceleration*t*t
         assert np.max(abs(path))<=1.+1e-10
+
+
+def test_fast_braking_can_replan_before_reaching_the_opposite_stop():
+    from supermimic.policy.joint_prediction import replanned_acceleration_bounds
+    q=np.array([.23258]);v=np.array([2.597]);lo=np.array([-.241799]);hi=-lo
+    minimum,maximum,h=replanned_acceleration_bounds(q,v,lo,hi,np.array([14.456]),.005)
+    assert .01<=h<.08
+    a=maximum
+    t=np.linspace(0,h,1001)[:,None]
+    continuous=q+t*v+.5*t*t*a
+    assert continuous.min()>=lo[0]-1e-10 and continuous.max()<=hi[0]+1e-10
+    for _ in range(round(h/.005)):
+        v=v+.005*a;q=q+.005*v
+        assert (q>=lo-1e-10).all() and (q<=hi+1e-10).all()
+        assert (abs(v)<=14.456).all()
