@@ -106,6 +106,9 @@ def main():
     p.add_argument("--landing-switch-times",type=float,nargs='+',default=[1.2])
     p.add_argument("--landing-policy-blend",type=float,default=.12)
     p.add_argument("--consistent-retiming",action="store_true",help="Resample future poses and velocities with one continuous physical-time clock")
+    p.add_argument("--physics-command-projection",action="store_true",help="Experimental 5 ms acceleration-based motor-command projection")
+    p.add_argument("--projection-frequency",type=float,default=35.)
+    p.add_argument("--projection-margin",type=float,default=.04)
     args=p.parse_args()
     assert args.population%args.num_envs==0
     if args.checkpoint_grid and (args.iterations or any(c.name=='ckpt_latest.pt' for c in args.checkpoint_grid)):
@@ -251,7 +254,24 @@ def main():
     original_step=env.sim.step
     active_physics={"record":False}
     physics_trace=[]
+    projection={"inertia":None,"interventions":np.zeros(len(names),dtype=np.int64),
+                "infeasible":np.zeros(len(names),dtype=np.int64)}
+    if args.physics_command_projection:
+        from supermimic.policy.joint_projection import project_joint_commands
+        assert np.allclose(m.actuator_gainprm[:,0],kp)
+        assert np.allclose(m.actuator_biasprm[:,1],-kp) and np.allclose(m.actuator_biasprm[:,2],-kd)
+        tensor=lambda x:torch.as_tensor(x,dtype=torch.float32,device=device)
+        projection_constants=[tensor(x) for x in [kp,kd,effort,hard_lower,hard_upper]]
     def checked_step(*step_args,**step_kwargs):
+        if args.physics_command_projection and active_physics["record"]:
+            kp_t,kd_t,effort_t,low_t,high_t=projection_constants
+            control,changed,infeasible=project_joint_commands(env.sim.data.ctrl[:],
+                env.sim.data.qpos[:,7:],env.sim.data.qvel[:,6:],env.sim.data.qacc[:,6:],
+                env.sim.data.actuator_force[:],kp_t,kd_t,effort_t,projection["inertia"],low_t,high_t,
+                args.projection_margin,args.projection_frequency)
+            env.sim.data.ctrl[:]=control
+            projection["interventions"]+=changed.sum(0).cpu().numpy()
+            projection["infeasible"]+=infeasible.sum(0).cpu().numpy()
         result=original_step(*step_args,**step_kwargs)
         if active_physics["record"]:
             q=env.sim.data.qpos.cpu().numpy()
@@ -313,6 +333,11 @@ def main():
             env.obs_buf=obs
         clock["initial_frame"]=int(cmd.frame[0])
         clock["step"]=0
+        if args.physics_command_projection:
+            d.qpos[:]=env.sim.data.qpos[0].cpu().numpy();mujoco.mj_forward(m,d)
+            mass=np.zeros((m.nv,m.nv));mujoco.mj_fullM(m,d,mass)
+            projection["inertia"]=tensor(1/np.diag(np.linalg.inv(mass))[6:])
+            projection["interventions"][:]=0;projection["infeasible"][:]=0
         active_physics["record"]=True
         offsets=torch.tensor(prep_parameters[:,1:].reshape(args.num_envs,3,len(groups)),dtype=torch.float32,device=device)
         tail_offsets=torch.tensor(parameters[:,1:].reshape(args.num_envs,3,len(groups)),dtype=torch.float32,device=device) if args.tail_of else None
@@ -415,6 +440,13 @@ def main():
                     if args.phase=="takeoff":physics_mask[e]=False
             if args.phase=="takeoff" and completed_air.all():break
         active_physics["record"]=False
+        if args.physics_command_projection:
+            (args.out/"command-projection.json").write_text(json.dumps({
+                "joint_names":names,"initial_free_body_effective_inertia":projection["inertia"].cpu().tolist(),
+                "intervention_counts":projection["interventions"].tolist(),
+                "infeasible_acceleration_bound_counts":projection["infeasible"].tolist(),
+                "approximation":"Fixed initial inverse-mass diagonal plus previous-step observed acceleration; no safety guarantee",
+                "physical_model_unchanged":True},indent=2))
         reports=[]
         for e,rows in enumerate(records):
             pitch=np.unwrap([r["pitch"] for r in rows])
