@@ -32,6 +32,9 @@ def main():
     p.add_argument("--joint-bounds",choices=("hard","soft"),default="hard",
                    help="Use actual mechanical ranges; soft limits are a separate posture penalty")
     p.add_argument("--joint-margin",type=float,default=.02)
+    p.add_argument("--tuck-hip",type=float,default=-2.)
+    p.add_argument("--tuck-knee",type=float,default=2.1)
+    p.add_argument("--tuck-waist",type=float,default=0.)
     p.add_argument("--projection-iterations",type=int,default=2)
     p.add_argument("--root-orientation-slack",type=float,default=.6,
                    help="Allow contact IK to adjust torso orientation (radians per axis)")
@@ -233,10 +236,11 @@ def main():
         v_launch=(3*q[takeoff,7:]-4*q[takeoff-1,7:]+q[takeoff-2,7:])*fps/2
         tuck=q[takeoff,7:].copy()
         for side in feet:
-            tuck[j(f"{side}_hip_pitch_joint")-7]=-2.
-            tuck[j(f"{side}_knee_joint")-7]=2.1
+            tuck[j(f"{side}_hip_pitch_joint")-7]=args.tuck_hip
+            tuck[j(f"{side}_knee_joint")-7]=args.tuck_knee
             tuck[j(f"{side}_ankle_pitch_joint")-7]=-.4
             tuck[j(f"{side}_elbow_joint")-7]=-1.4
+        tuck[j("waist_pitch_joint")-7]=args.tuck_waist
         tuck=np.clip(tuck,lower,upper)
         joint_curve=CubicHermiteSpline([0,.4*air_duration,.6*air_duration,air_duration],
             np.array([q[takeoff,7:],tuck,tuck,landing[7:]]),
@@ -272,6 +276,7 @@ def main():
     np.savetxt(args.out/"webster.csv",np.c_[q[:,:3],q[:,[4,5,6,3]],q[:,7:]],delimiter=",",fmt="%.10f")
     convert_csv_to_npz(args.out/"webster.csv",args.out/"webster.npz",fps,fps)
     report={"purpose":"Robot-designed kinematic guide, not a trained policy or dynamic feasibility certificate",
+        "arguments":{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         "approved_for_training":False,"ready_sha256":hashlib.sha256(args.ready_config.read_bytes()).hexdigest(),
         "frames":len(q),"takeoff_frame":takeoff,"landing_frame":land,"preparation_seconds":duration,
         "flight_seconds":air_duration,"launch_com_velocity":[horizontal_velocity,0,vertical_velocity],

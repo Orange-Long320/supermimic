@@ -17,6 +17,18 @@ import torch
 from scipy.spatial import ConvexHull
 
 
+def support_metrics(rows,first_air):
+    """Require the final push, not merely an early pose, to use the left leg."""
+    single=[i for i,r in enumerate(rows) if r["feet"]["left"]<.01 and r["feet"]["right"]>.04]
+    window=list(range(max(0,first_air-8),first_air)) if first_air is not None else []
+    last=next((i for i in reversed(window) if min(rows[i]["feet"].values())<.01),None)
+    valid=(len(window)>=4 and last in single and sum(i in single for i in window)>=4
+           and all(rows[i]["feet"]["right"]>.04 for i in window))
+    prelaunch=rows[:first_air] if first_air is not None else rows
+    deficit=float(np.mean([max(.04-r["feet"]["right"],0) for r in (prelaunch or rows[:1])]))
+    return single,bool(valid),deficit
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ckpt",type=Path,required=True)
@@ -245,7 +257,7 @@ def main():
                     "vz":float(measure[1]),"momentum":measure[2:5].tolist(),
                     "com_speed":float(measure[5]),"root_angular_speed":float(measure[6]),
                     "feet":feet,"nonfoot_height":nonfoot,"pitch":float(measure[10]),"up_z":float(measure[11])})
-                if min(feet.values())>.02 and measure[1]>.8 and nonfoot>.005:
+                if min(feet.values())>.02 and measure[1]>0. and nonfoot>.005:
                     air_run[e]+=1
                 else:air_run[e]=0
                 if air_run[e]>=3:
@@ -257,8 +269,9 @@ def main():
         for e,rows in enumerate(records):
             pitch=np.unwrap([r["pitch"] for r in rows])
             air=[i for i,r in enumerate(rows) if min(r["feet"].values())>.02 and r["nonfoot_height"]>.005]
-            single=[i for i,r in enumerate(rows) if r["feet"]["left"]<.01 and r["feet"]["right"]>.04]
-            positive_air=[i for i in air if rows[i]["vz"]>.8]
+            first_air=next((i for i in range(len(rows)-2) if all(j in air for j in range(i,i+3))),None)
+            single,single_at_launch,right_deficit=support_metrics(rows,first_air)
+            positive_air=[i for i in air if rows[i]["vz"]>0.]
             longest_air=run=0
             for i in range(len(rows)):
                 run=run+1 if i in positive_air else 0
@@ -286,9 +299,9 @@ def main():
                 cost+=np.mean([r["com_speed"]**2*4+max(.85-r["up_z"],0)**2*10
                     +r["root_angular_speed"]**2*.5
                     +max(min(r["feet"].values())-.01,0)**2*200 for r in rows[-10:]])
-            cost+=10 if len(single)<4 else 0
-            first_air=next((i for i in range(len(rows)-2) if all(j in air for j in range(i,i+3))),None)
-            single_at_launch=first_air is not None and sum(i in single for i in range(max(0,first_air-8),first_air))>=4
+            # The free leg must stay up during the push. An early single-leg
+            # pose followed by a two-leg jump is not a Webster takeoff.
+            cost+=500*right_deficit+(0 if single_at_launch else 30)
             launch_row=rows[min(first_air+2,len(rows)-1)] if first_air is not None else None
             takeoff_passed=(completed_air[e] and single_at_launch and physical["hard"]<1e-4
                 and launch_row["vz"]>1.5 and launch_row["momentum"][1]>20
@@ -308,6 +321,7 @@ def main():
                 and physical["minimum_nonfoot_height"]>.005 and physical["foot_penetration"]<.005)
             reports.append({"cost":float(cost),"maxima":physical,"air_frames":len(air),
                 "consecutive_ascending_air_frames":longest_air,"single_left_support_frames":len(single),
+                "mean_prelaunch_right_foot_clearance_deficit_m":right_deficit,
                 "objective_event":{"time":event["time"],"vz":event["vz"],"momentum":event["momentum"],"feet":event["feet"]},
                 "maximum_forward_rotation_rad":float(pitch.max()-pitch[0]),"final":rows[-1],
                 "airborne_forward_rotation_rad":air_rotation,
@@ -320,9 +334,11 @@ def main():
         baseline_parameters=np.tile(mean,(args.num_envs,1))
         baseline,payload=rollout(baseline_parameters)
         (args.out/"baseline.json").write_text(json.dumps(baseline[0],indent=2))
+        (args.out/"baseline-all.json").write_text(json.dumps(baseline))
         np.savez(args.out/"baseline-trajectory.npz",qpos=payload[0][:,0],qvel=payload[1][:,0],actions=payload[2][:,0],fps=np.array([50.]))
         print("BASELINE",json.dumps(baseline[0]),flush=True)
         repeat,repeat_payload=rollout(baseline_parameters)
+        (args.out/"reset-repeat-all.json").write_text(json.dumps(repeat))
         error=float(np.max(np.abs(payload[0]-repeat_payload[0])))
         per_step=np.max(np.abs(payload[0]-repeat_payload[0]),axis=(1,2))
         initial_errors={k:float(np.abs(payload[4][k]-repeat_payload[4][k]).max()) for k in payload[4]}
