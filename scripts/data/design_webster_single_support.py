@@ -12,6 +12,7 @@ import mujoco
 import numpy as np
 from scipy.interpolate import BPoly, CubicHermiteSpline
 from scipy.optimize import least_squares
+from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation
 
 
@@ -24,6 +25,8 @@ def main():
     p.add_argument("--launch-com-z",type=float,default=.68)
     p.add_argument("--crouch-com-z",type=float,default=.50)
     p.add_argument("--projection-iterations",type=int,default=2)
+    p.add_argument("--root-orientation-slack",type=float,default=.6,
+                   help="Allow contact IK to adjust torso orientation (radians per axis)")
     args=p.parse_args()
     from supermimic.data.motion_convert import load_g1_model,convert_csv_to_npz
     from supermimic.data.centroidal_projection import project_flight
@@ -48,6 +51,30 @@ def main():
         return d.subtree_com[root].copy(),foot,float(sole)
     ready[2]+=.005-fk(ready)[2]
     com_ready,anchors,_=fk(ready)
+    # The inherited ankle orientation leaves the main sole face tilted by
+    # several degrees. Flatten the largest downward hull face, rather than
+    # preserving that orientation and balancing on its lowest edge.
+    flattening={}
+    for side,body in feet.items():
+        for g,vertices in meshes:
+            if m.geom_bodyid[g]!=body:continue
+            hull=ConvexHull(vertices.astype(float));tri=vertices[hull.simplices]
+            areas=np.linalg.norm(np.cross(tri[:,1]-tri[:,0],tri[:,2]-tri[:,0]),axis=1)/2
+            planes,inverse=np.unique(np.round(hull.equations,5),axis=0,return_inverse=True)
+            area=np.bincount(inverse,weights=areas)
+            world_normals=planes[:,:3]@d.geom_xmat[g].reshape(3,3).T
+            eligible=np.flatnonzero(world_normals[:,2]<-.8)
+            if not len(eligible):raise ValueError(f"No downward sole face: {side}")
+            normal=world_normals[eligible[np.argmax(area[eligible])]]
+            normal/=np.linalg.norm(normal)
+            correction=Rotation.align_vectors(np.array([[0.,0.,-1.]]),normal[None])[0]
+            position,orientation=anchors[side]
+            world=vertices@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
+            new_orientation=correction*orientation
+            moved=correction.apply(world-position)+position
+            new_position=position.copy();new_position[2]+=.005-moved[:,2].min()
+            anchors[side]=(new_position,new_orientation)
+            flattening[side]=float(correction.magnitude())
     indices={s:np.array([j(f"{s}_{n}_joint") for n in ["hip_pitch","hip_roll","hip_yaw","knee","ankle_pitch","ankle_roll"]]) for s in feet}
     errors=[]
     def fit_pose(reference,target,active,previous=None):
@@ -57,22 +84,38 @@ def main():
         if previous is not None:
             delta=np.r_[np.full(3,.08),np.full(len(columns)-3,.35)]
             lo=np.maximum(lo,previous[columns]-delta);hi=np.minimum(hi,previous[columns]+delta)
+        # Fixing torso orientation as well as sole pose and COM overconstrains
+        # the bounded leg chain. Solve orientation too, with a posture prior.
+        count=len(columns)
+        orientation=Rotation.from_quat(reference[[4,5,6,3]])
+        slack=args.root_orientation_slack
+        lo=np.r_[lo,np.full(3,-slack)];hi=np.r_[hi,np.full(3,slack)]
+        def unpack(x):
+            row=reference.copy();row[columns]=x[:count]
+            row[3:7]=(orientation*Rotation.from_rotvec(x[count:])).as_quat()[[3,0,1,2]]
+            return row
         def residual(x):
-            row=reference.copy();row[columns]=x
+            row=unpack(x)
             com,foot,_=fk(row)
             values=[(com-target)*2000]
             for side in active:
                 position,rotation=foot[side];want_position,want_rotation=anchors[side]
                 values += [(position-want_position)*2000,(want_rotation.inv()*rotation).as_rotvec()*300]
-            values += [(x-reference[columns])*.03]
+            values += [(x[:count]-reference[columns])*.03,x[count:]*.1]
             return np.concatenate(values)
-        initial=np.clip(reference[columns],lo,hi)
+        initial=np.r_[reference[columns],np.zeros(3)]
+        if previous is not None:
+            initial[:count]=previous[columns]
+            initial[count:]=(orientation.inv()*Rotation.from_quat(previous[[4,5,6,3]])).as_rotvec()
+        initial=np.clip(initial,lo,hi)
         fit=least_squares(residual,initial,bounds=(lo,hi),max_nfev=60,
                           ftol=1e-9,xtol=1e-9,gtol=1e-8)
-        row=reference.copy();row[columns]=fit.x
+        row=unpack(fit.x)
         physical=residual(fit.x)[:3+6*len(active)]
         errors.append({"com_error_m":float(np.linalg.norm(physical[:3])/2000),
-            "maximum_scaled_constraint":float(np.abs(physical).max()),"nfev":int(fit.nfev)})
+            "maximum_scaled_constraint":float(np.abs(physical).max()),"nfev":int(fit.nfev),
+            "root_orientation_adjustment_rad":float(np.linalg.norm(fit.x[count:])),
+            "foot_position_error_m":max(float(np.linalg.norm(physical[3+6*k:6+6*k])/2000) for k in range(len(active)))})
         return row
     start=ready.copy()
     start[j("right_hip_pitch_joint")]=.2;start[j("right_knee_joint")]=1.2
@@ -190,6 +233,7 @@ def main():
         "frames":len(q),"takeoff_frame":takeoff,"landing_frame":land,"preparation_seconds":duration,
         "flight_seconds":air_duration,"launch_com_velocity":[horizontal_velocity,0,vertical_velocity],
         "centroidal_fits":shoot,"initial_static_contact_feasible":bool(static.success),
+        "sole_anchor_flattening_rad":flattening,
         "initial_static_peak_motor_ratio":float(static.x[-1]) if static.success else None,
         "maximum_ik_com_error_m":max(e["com_error_m"] for e in errors),
         "maximum_ik_scaled_constraint":max(e["maximum_scaled_constraint"] for e in errors),

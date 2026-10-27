@@ -33,8 +33,30 @@ def main():
     p.add_argument("--initial-command-margin",type=float,default=0.,help="Move the first position command inward for joints starting at a soft boundary; no state or actuator edits")
     p.add_argument("--tail-of",type=Path,help="Freeze a takeoff solution and search aerial/landing residuals instead")
     p.add_argument("--device",default="cpu")
+    p.add_argument("--takeoff-frame",type=int)
+    p.add_argument("--landing-frame",type=int)
     args=p.parse_args()
     assert args.population%args.num_envs==0
+    # Redesigned preparations have different contact frames. Never silently
+    # replay them with the old 30/55-frame clock.
+    metadata={}
+    for filename in ("GUIDE_ONLY.json","contacts.json"):
+        path=args.source.parent/filename
+        if path.exists():metadata.update(json.loads(path.read_text()))
+    takeoff=args.takeoff_frame
+    landing=args.landing_frame
+    if takeoff is None:takeoff=metadata.get("takeoff_reference_frame",metadata.get("takeoff_frame"))
+    if landing is None:landing=metadata.get("landing_reference_frame",metadata.get("landing_frame"))
+    if takeoff is None or landing is None:
+        p.error("Contact timing is required: supply sibling contact metadata or both contact-frame arguments")
+    with np.load(args.source) as source:
+        fps=float(source["fps"].reshape(-1)[0])
+        frames=len(source["joint_pos"])
+    if abs(fps-50)>1e-6 or not 0<takeoff<landing<frames:
+        p.error("Expected a 50 Hz guide with valid ordered takeoff and landing frames")
+    args.takeoff_frame=int(takeoff);args.landing_frame=int(landing)
+    reference_preparation=takeoff/fps
+    reference_flight=(landing-takeoff)/fps
     args.out.mkdir(parents=True,exist_ok=False)
     torch.set_num_threads(1)
     from supermimic.robots.dimensions import PROFILE
@@ -50,7 +72,7 @@ def main():
     original_compute=env.termination_manager.compute
     env.termination_manager.compute=lambda:torch.zeros_like(original_compute())
     original_update=cmd._update_command
-    clock={"step":0,"preparation":torch.full((args.num_envs,),.6,device=device),"initial_frame":0,
+    clock={"step":0,"preparation":torch.full((args.num_envs,),reference_preparation,device=device),"initial_frame":0,
            "air_scale":torch.ones(args.num_envs,device=device)}
     def warped_update(env_ids=None):
         original_update(env_ids)
@@ -59,10 +81,10 @@ def main():
             t=clock["step"]*.02
             prep=clock["preparation"]
             after=torch.clamp(t-prep,min=0)
-            air_duration=.5*clock["air_scale"]
-            air_frame=torch.where(after<=air_duration,30+after/clock["air_scale"]*50,
-                                  55+(after-air_duration)*50)
-            frame=torch.where(t<=prep,t/prep*30,air_frame).round().long()
+            air_duration=reference_flight*clock["air_scale"]
+            air_frame=torch.where(after<=air_duration,takeoff+after/clock["air_scale"]*fps,
+                                  landing+(after-air_duration)*fps)
+            frame=torch.where(t<=prep,t/prep*takeoff,air_frame).round().long()
             cmd.frame[:]=torch.minimum(frame+clock["initial_frame"],cmd.library.clip_last[0])
             cmd._refresh_ref()
             cmd.update_relative_body_poses()
@@ -100,7 +122,7 @@ def main():
     fixed_preparation=np.load(args.tail_of)["parameters"].copy() if args.tail_of else None
     if args.tail_of:
         assert args.phase=="full" and fixed_preparation.shape==(dimension,)
-    mean=np.zeros(dimension);mean[0]=1. if args.tail_of else .6
+    mean=np.zeros(dimension);mean[0]=1. if args.tail_of else reference_preparation
     if args.warmstart:
         mean[:]=np.load(args.warmstart)["parameters"]
     covariance=np.diag(np.r_[.1,np.full(dimension-1,.25)]**2)
