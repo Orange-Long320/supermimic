@@ -157,6 +157,7 @@ def main():
         "physics":f"Unmodified project make_env on {device}; only local design-process reset requests suppressed",
         "joint_acceptance":"Actual mechanical joint ranges at each physics step; soft limits retained as a separate regularizer",
         "hard_joint_ranges_rad":m.jnt_range[1:].tolist(),
+        "takeoff_objective":"Continuous ascending flight; grounded extension is a fallback proxy with an explicit flight deficit penalty",
         "groups":groups,"residual_units":"fraction of actuator effort, mapped to existing position actions",
         "fixed_preparation_sha256":hashlib.sha256(args.tail_of.read_bytes()).hexdigest() if args.tail_of else None,
         "optimization_variables":"aerial guide time scale and air/landing residuals" if args.tail_of else "preparation duration and support/swing residuals",
@@ -257,8 +258,21 @@ def main():
             pitch=np.unwrap([r["pitch"] for r in rows])
             air=[i for i,r in enumerate(rows) if min(r["feet"].values())>.02 and r["nonfoot_height"]>.005]
             single=[i for i,r in enumerate(rows) if r["feet"]["left"]<.01 and r["feet"]["right"]>.04]
-            event_cost=min((r["vz"]-args.target_vz)**2*4+np.sum((np.array(r["momentum"])-[0,args.target_hy,0])**2)/64
-                +sum(max(.025-h,0)*60 for h in r["feet"].values()) for r in rows if .25<=r["time"]<=1.2)
+            positive_air=[i for i in air if rows[i]["vz"]>.8]
+            longest_air=run=0
+            for i in range(len(rows)):
+                run=run+1 if i in positive_air else 0
+                longest_air=max(longest_air,run)
+            # A rising COM with both feet still planted is not a takeoff.
+            # Prefer the measured ascending flight event and explicitly score
+            # continuous air; do not optimize a grounded extension proxy.
+            event_rows=[rows[i] for i in positive_air] or [r for r in rows if r["time"]>=.25]
+            def event_error(r):
+                return ((r["vz"]-args.target_vz)**2*4+np.sum((np.array(r["momentum"])-[0,args.target_hy,0])**2)/64
+                    +sum(max(.025-h,0)*60 for h in r["feet"].values()))
+            event=min(event_rows,key=event_error)
+            event_cost=event_error(event)
+            event_cost+=30*(1-min(longest_air,3)/3)**2
             physical=maxima[e]
             # For a completed takeoff, stats stop at that event. Full-clip
             # checks always use every 5 ms physics step, not only video frames.
@@ -292,7 +306,9 @@ def main():
                 and landed
                 and physical["hard"]<1e-4 and physical["speed"]<=1 and physical["effort"]<=1.00001
                 and physical["minimum_nonfoot_height"]>.005 and physical["foot_penetration"]<.005)
-            reports.append({"cost":float(cost),"maxima":physical,"air_frames":len(air),"single_left_support_frames":len(single),
+            reports.append({"cost":float(cost),"maxima":physical,"air_frames":len(air),
+                "consecutive_ascending_air_frames":longest_air,"single_left_support_frames":len(single),
+                "objective_event":{"time":event["time"],"vz":event["vz"],"momentum":event["momentum"],"feet":event["feet"]},
                 "maximum_forward_rotation_rad":float(pitch.max()-pitch[0]),"final":rows[-1],
                 "airborne_forward_rotation_rad":air_rotation,
                 "takeoff_candidate_passed":bool(takeoff_passed),"single_left_support_at_launch":bool(single_at_launch),

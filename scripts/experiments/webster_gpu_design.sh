@@ -31,7 +31,7 @@ cp src/supermimic/data/design_metrics.py "$SM_RUN/metrics-source.py"
 cp "${BASH_SOURCE[0]}" "$SM_RUN/launch.sh"
 sha256sum "$SM_CHECKPOINT" "$SM_GUIDE" scripts/data/optimize_webster_policy_cpu.py \
   src/supermimic/data/design_metrics.py > "$SM_RUN/inputs.sha256"
-SM_SECONDS=1.2
+SM_SECONDS=1.6
 [[ "$SM_PHASE" != full ]] || SM_SECONDS=3
 SM_CMD=(nice -n 19 timeout --signal=TERM --kill-after=30 2100
   bash scripts/run_local.sh scripts/robot.py x2_ultra scripts/data/optimize_webster_policy_cpu.py
