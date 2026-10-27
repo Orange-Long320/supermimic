@@ -58,6 +58,7 @@ def main():
     p.add_argument("--initial-command-margin",type=float,default=0.,help="Move the first position command inward for joints starting at a soft boundary; no state or actuator edits")
     p.add_argument("--initial-knot",action="store_true",help="Search the initial residual command as well as the three preparation knots")
     p.add_argument("--tail-of",type=Path,help="Freeze a takeoff solution and search aerial/landing residuals instead")
+    p.add_argument("--joint-phases",action="store_true",help="Use tail-of only as initialization; jointly search preparation and aerial commands")
     p.add_argument("--device",default="cpu")
     p.add_argument("--takeoff-frame",type=int)
     p.add_argument("--landing-frame",type=int)
@@ -72,6 +73,8 @@ def main():
     p.add_argument("--record-physics",action="store_true",help="Save every 5 ms qpos/qvel/actuator force for independent audits")
     p.add_argument("--hard-penalty-linear",type=float,default=0.,help="Additional exact-penalty term to avoid trading small hard-limit violations for score")
     p.add_argument("--local-refinement",action="store_true",help="Refine a warm start with smaller steps, top 1/16 elites and a best-anchored mean")
+    p.add_argument("--residual-sigma",type=float,help="Initial search deviation in normalized motor-effort fractions")
+    p.add_argument("--clock-sigma",type=float,help="Initial search deviation for the preparation duration or air scale")
     p.add_argument("--search-groups",help="Comma-separated first joint names of residual groups to optimize; retain all other warm-start coefficients")
     p.add_argument("--floor-penalty-linear",type=float,default=0.,help="Penalize nonfoot clearance below 5 mm and foot compression beyond 5 mm")
     p.add_argument("--high-frequency-geometry",action="store_true",help="Audit post-integration foot/body geometry at every 5 ms physics step")
@@ -82,6 +85,7 @@ def main():
     p.add_argument("--landing-ckpt",type=Path,help="Diagnostic phase-specific frozen landing controller")
     p.add_argument("--landing-switch-times",type=float,nargs='+',default=[1.2])
     p.add_argument("--landing-policy-blend",type=float,default=.12)
+    p.add_argument("--landing-guide-delay",type=float,help="Override absolute switch times: take over this many seconds after the retimed guide landing")
     p.add_argument("--consistent-retiming",action="store_true",help="Resample future poses and velocities with one continuous physical-time clock")
     p.add_argument("--physics-command-projection",action="store_true",help="Experimental 5 ms acceleration-based motor-command projection")
     p.add_argument("--projection-frequency",type=float,default=35.)
@@ -89,6 +93,9 @@ def main():
     args=p.parse_args()
     if args.air_rotation_weight<0 or args.air_rotation_target<=0 or not 0<args.landing_window_seconds<=args.seconds:
         p.error('Invalid airborne-rotation objective or landing window')
+    if any(x is not None and x<=0 for x in [args.residual_sigma,args.clock_sigma]):p.error('Search deviations must be positive')
+    if args.joint_phases and (not args.tail_of or args.phase!='full' or args.baseline_air_scales):p.error('Joint phases require full phase, a preparation seed, and no air-scale-only grid')
+    if args.landing_guide_delay is not None and (not args.landing_ckpt or args.landing_guide_delay<0 or len(args.landing_switch_times)!=1):p.error('Guide-relative landing needs one landing policy and a nonnegative delay')
     assert args.population%args.num_envs==0
     if args.checkpoint_grid and (args.iterations or any(c.name=='ckpt_latest.pt' for c in args.checkpoint_grid)):
         p.error('Checkpoint comparison needs immutable files and zero search iterations')
@@ -211,34 +218,49 @@ def main():
     origins=env.scene.env_origins.cpu().numpy()
     rng=np.random.default_rng(args.seed)
     base_dimension=1+3*len(groups)
-    dimension=base_dimension+(len(groups) if args.initial_knot and not args.tail_of else 0)
+    fixed_preparation=np.load(args.tail_of)["parameters"].copy() if args.tail_of else None
+    if args.tail_of:
+        assert args.phase=="full" and fixed_preparation.shape in [(base_dimension,),(base_dimension+len(groups),)]
+    preparation_dimension=len(fixed_preparation) if args.tail_of else base_dimension+(len(groups) if args.initial_knot else 0)
+    dimension=preparation_dimension+base_dimension if args.joint_phases else base_dimension if args.tail_of else preparation_dimension
+    clock_indices=[0,preparation_dimension] if args.joint_phases else [0]
+    blocks=[(1,3)]
+    if (not args.tail_of or args.joint_phases) and preparation_dimension>base_dimension:blocks.append((base_dimension,1))
+    if args.joint_phases:blocks.append((preparation_dimension+1,3))
     search_mask=np.ones(dimension,dtype=bool)
     if args.search_groups:
         labels=[g[0][0] for g in groups];selected=args.search_groups.split(',')
         if not selected or any(n not in labels for n in selected):p.error('Unknown residual group; use first joint names shown in configuration groups')
-        search_mask[1:]=False
+        search_mask[:]=False;search_mask[clock_indices]=True
         for name in selected:
             group=labels.index(name)
-            for knot in range(3):search_mask[1+knot*len(groups)+group]=True
-            if dimension>base_dimension:search_mask[base_dimension+group]=True
-    fixed_preparation=np.load(args.tail_of)["parameters"].copy() if args.tail_of else None
-    if args.tail_of:
-        assert args.phase=="full" and fixed_preparation.shape in [(base_dimension,),(base_dimension+len(groups),)]
+            for start_column,knots in blocks:
+                for knot in range(knots):search_mask[start_column+knot*len(groups)+group]=True
     mean=np.zeros(dimension);mean[0]=1. if args.tail_of else reference_preparation
+    if args.joint_phases:mean[:preparation_dimension]=fixed_preparation;mean[preparation_dimension]=1.
     parameter_grid=None
     if args.warmstart:
         initial=np.load(args.warmstart)["parameters"]
-        if initial.shape[-1]==base_dimension and dimension>base_dimension:
+        if args.joint_phases and initial.shape[-1]==base_dimension:
+            prefix=np.broadcast_to(fixed_preparation,(*initial.shape[:-1],preparation_dimension))
+            initial=np.concatenate([prefix,initial],axis=-1)
+        elif not args.tail_of and initial.shape[-1]==base_dimension and dimension>base_dimension:
             initial=np.pad(initial,[(0,0)]*(initial.ndim-1)+[(0,dimension-base_dimension)])
         if initial.ndim==2:
             if args.iterations or initial.shape[1]!=dimension or args.num_envs%len(initial):
                 p.error('Parameter grid requires zero iterations, matching dimensions and equal replicas')
             parameter_grid=initial;mean[:]=initial[0]
-        else:mean[:]=initial
-    covariance=np.diag(np.r_[.04 if args.local_refinement else .1,
-        np.full(dimension-1,.08 if args.local_refinement else .25)]**2)
+        else:
+            if initial.shape!=(dimension,):p.error('Warm-start parameter dimensions do not match the selected phase layout')
+            mean[:]=initial
+    clock_sigma=args.clock_sigma if args.clock_sigma is not None else (.04 if args.local_refinement else .1)
+    residual_sigma=args.residual_sigma if args.residual_sigma is not None else (.08 if args.local_refinement else .25)
+    sigma=np.full(dimension,residual_sigma);sigma[clock_indices]=clock_sigma
+    covariance=np.diag(sigma**2)
     lo=np.r_[.6 if args.tail_of else .45,np.full(dimension-1,-1.5)]
     hi=np.r_[1.4 if args.tail_of else 1.2,np.full(dimension-1,1.5)]
+    if args.joint_phases:lo[0]=.45;hi[0]=1.2;lo[preparation_dimension]=.6;hi[preparation_dimension]=1.4
+    covariance_floor=np.full(dimension,.01);covariance_floor[clock_indices]=.003
     start=time.monotonic()
     evaluations=0
     best=None
@@ -300,8 +322,10 @@ def main():
         "takeoff_objective":"Continuous ascending flight; grounded extension is a fallback proxy with an explicit flight deficit penalty",
         "groups":groups,"residual_units":"fraction of actuator effort, mapped to existing position actions",
         "fixed_preparation_sha256":hashlib.sha256(args.tail_of.read_bytes()).hexdigest() if args.tail_of else None,
-        "optimization_variables":"aerial guide time scale and air/landing residuals" if args.tail_of else "preparation duration and support/swing residuals",
-        "initial_knot_searched":bool(args.initial_knot and not args.tail_of),
+        "optimization_variables":"preparation, aerial timing and all residual phases" if args.joint_phases else "aerial guide time scale and air/landing residuals" if args.tail_of else "preparation duration and support/swing residuals",
+        "preparation_frozen":bool(args.tail_of and not args.joint_phases),
+        "preparation_parameter_dimension":preparation_dimension,"clock_parameter_indices":clock_indices,
+        "initial_knot_searched":bool((not args.tail_of or args.joint_phases) and preparation_dimension>base_dimension),
         "fixed_preparation_has_initial_knot":bool(fixed_preparation is not None and len(fixed_preparation)>base_dimension),
         "searched_parameter_indices":np.flatnonzero(search_mask).tolist(),
         "not_a_trained_policy":True},indent=2,default=str))
@@ -318,9 +342,11 @@ def main():
         active_physics["record"]=False
         physics_trace.clear()
         clock["initial_frame"]=0
-        prep_parameters=np.tile(fixed_preparation,(args.num_envs,1)) if args.tail_of else parameters
+        prep_parameters=parameters[:,:preparation_dimension] if args.joint_phases else np.tile(fixed_preparation,(args.num_envs,1)) if args.tail_of else parameters
+        air_parameters=parameters[:,preparation_dimension:] if args.joint_phases else parameters if args.tail_of else None
         clock["preparation"]=torch.tensor(prep_parameters[:,0],dtype=torch.float32,device=device)
-        clock["air_scale"]=torch.tensor(parameters[:,0] if args.tail_of else np.ones(args.num_envs),dtype=torch.float32,device=device)
+        clock["air_scale"]=torch.tensor(air_parameters[:,0] if air_parameters is not None else np.ones(args.num_envs),dtype=torch.float32,device=device)
+        if args.landing_guide_delay is not None:landing_times.copy_(clock['preparation']+reference_flight*clock['air_scale']+args.landing_guide_delay)
         cmd.forced_frame[:]=0
         obs,_=env.reset()
         ids=torch.arange(args.num_envs,device=device)
@@ -350,7 +376,7 @@ def main():
             projection["interventions"][:]=0;projection["infeasible"][:]=0
         active_physics["record"]=True
         offsets=torch.tensor(prep_parameters[:,1:base_dimension].reshape(args.num_envs,3,len(groups)),dtype=torch.float32,device=device)
-        tail_offsets=torch.tensor(parameters[:,1:].reshape(args.num_envs,3,len(groups)),dtype=torch.float32,device=device) if args.tail_of else None
+        tail_offsets=torch.tensor(air_parameters[:,1:].reshape(args.num_envs,3,len(groups)),dtype=torch.float32,device=device) if air_parameters is not None else None
         initial_action=policy(obs["policy"],obs["goal"])
         initial_state={"qpos":env.sim.data.qpos.cpu().numpy().copy(),
                        "qvel":env.sim.data.qvel.cpu().numpy().copy(),
@@ -559,7 +585,7 @@ def main():
         if parameter_grid is not None or air_grid is not None or (landing_policy is not None and len(args.landing_switch_times)>1):
             positions=payload[0].copy();positions[:,:,:3]-=origins[None,:,:]
             np.savez(args.out/"timing-grid-trajectories.npz",qpos=positions,qvel=payload[1],actions=payload[2],
-                air_scales=baseline_parameters[:,0] if args.tail_of else np.ones(args.num_envs),
+                air_scales=baseline_parameters[:,preparation_dimension] if args.joint_phases else baseline_parameters[:,0] if args.tail_of else np.ones(args.num_envs),
                 landing_switch_times=landing_times.cpu().numpy(),parameters=baseline_parameters,fps=np.array([50.]))
         print("BASELINE",json.dumps(baseline[0]),flush=True)
         repeat,repeat_payload=rollout(baseline_parameters)
@@ -619,7 +645,7 @@ def main():
             outcomes.sort(key=lambda x:x[0])
             elite=np.array([r[1] for r in outcomes[:max(2,len(outcomes)//(16 if args.local_refinement else 4))]])
             mean=(.25*mean+.5*elite.mean(axis=0)+.25*best[1]) if args.local_refinement else .3*mean+.7*elite.mean(axis=0)
-            covariance=.7*covariance+.3*np.cov(elite,rowvar=False)+np.diag(np.r_[.003,np.full(dimension-1,.01)]**2)
+            covariance=.7*covariance+.3*np.cov(elite,rowvar=False)+np.diag(covariance_floor**2)
             record={"iteration":iteration,"evaluations":evaluations,"elapsed_s":time.monotonic()-start,**best[2]}
             record["iteration_elapsed_s"]=time.monotonic()-iteration_start
             record["device"]=str(device)
@@ -630,6 +656,9 @@ def main():
             with (args.out/"progress.jsonl").open("a") as f:f.write(json.dumps(record)+"\n")
             print(json.dumps(record),flush=True)
             if best[2]["physical_candidate_passed"] or (args.phase=="takeoff" and best[2]["takeoff_candidate_passed"]) or time.monotonic()-start>args.max_seconds:break
+        if args.joint_phases and best is not None:
+            np.savez(args.out/'best-preparation.npz',parameters=best[1][:preparation_dimension])
+            np.savez(args.out/'best-air.npz',parameters=best[1][preparation_dimension:])
         (args.out/"completed.json").write_text(json.dumps({"elapsed_s":time.monotonic()-start,"evaluations":evaluations,
             "physical_candidate_passed":best[2]["physical_candidate_passed"] if best else False,
             "takeoff_candidate_passed":best[2]["takeoff_candidate_passed"] if best else False,"approved_for_training":False},indent=2))
