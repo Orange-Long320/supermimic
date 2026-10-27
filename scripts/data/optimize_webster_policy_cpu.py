@@ -29,6 +29,38 @@ def support_metrics(rows,first_air):
     return single,bool(valid),deficit
 
 
+def entry_velocity_state(model,qpos,qvel,target_vx,velocity_limits):
+    """Change incoming translation while preserving H and planted-foot velocity."""
+    d=mujoco.MjData(model);d.qpos[:]=qpos;d.qvel[:]=qvel;mujoco.mj_forward(model,d)
+    root=int(model.jnt_bodyid[0]);com=np.zeros((3,model.nv));momentum=np.zeros_like(com)
+    mujoco.mj_jacSubtreeCom(model,d,com,root);mujoco.mj_angmomMat(model,d,momentum,root)
+    matrices=[com,momentum];rhs=[np.array([target_vx,*(com@qvel)[1:]])-com@qvel,np.zeros(3)]
+    contacts=[]
+    for g in range(model.ngeom):
+        if 'foot_' not in model.geom(g).name:continue
+        k=model.geom_dataid[g];a,n=model.mesh_vertadr[k],model.mesh_vertnum[k]
+        world=model.mesh_vert[a:a+n]@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
+        if world[:,2].min()>.012:continue
+        body=int(model.geom_bodyid[g])
+        jp,jr=np.zeros_like(com),np.zeros_like(com)
+        mujoco.mj_jacBody(model,d,jp,jr,body)
+        jac=np.r_[jp,jr];matrices.append(jac);rhs.append(-jac@qvel)
+        contacts.append(model.body(body).name)
+    if not contacts:raise ValueError('Incoming-speed experiment requires a planted support foot')
+    matrix=np.concatenate(matrices);target=np.concatenate(rhs)
+    delta=np.linalg.lstsq(matrix,target,rcond=1e-10)[0];velocity=qvel+delta
+    error=float(abs(matrix@delta-target).max())
+    ratio=float((abs(velocity[6:])/velocity_limits).max())
+    if error>1e-6 or ratio>1:raise ValueError(f'Invalid incoming state: constraint error={error}, joint speed ratio={ratio}')
+    mass=np.zeros((model.nv,model.nv));mujoco.mj_fullM(model,d,mass)
+    return velocity,{'target_com_vx':target_vx,'initial_com_velocity':(com@velocity).tolist(),
+        'original_com_velocity':(com@qvel).tolist(),'original_momentum':(momentum@qvel).tolist(),
+        'initial_momentum':(momentum@velocity).tolist(),'stationary_support_bodies':contacts,
+        'maximum_constraint_error':error,'maximum_joint_speed_ratio':ratio,
+        'original_kinetic_energy_j':float(qvel@mass@qvel/2),'initial_kinetic_energy_j':float(velocity@mass@velocity/2),
+        'scope':'Initial state only; no forces or state edits after reset'}
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ckpt",type=Path,required=True)
@@ -49,8 +81,23 @@ def main():
     p.add_argument("--landing-frame",type=int)
     p.add_argument("--target-vz",type=float,default=2.4)
     p.add_argument("--target-hy",type=float,default=25.)
+    p.add_argument("--entry-vx",type=float,help="Initial COM world-x speed; preserve centroidal H and zero planted-foot velocity")
+    p.add_argument("--joint-stop-margin",type=float,help="Diagnostic predictive servo guard inside mechanical joint ranges; no state clipping")
+    p.add_argument("--joint-stop-horizon",type=float,default=.1)
+    p.add_argument("--baseline-air-scales",help="Comma-separated aerial timing ablation; requires --tail-of and zero search iterations")
+    p.add_argument("--bounded-target-joints",help="Diagnostic servo-target bounds for named joints; does not clamp simulated state")
+    p.add_argument("--bounded-target-margin",type=float,default=.04)
+    p.add_argument("--record-physics",action="store_true",help="Save every 5 ms qpos/qvel/actuator force for independent audits")
+    p.add_argument("--hard-penalty-linear",type=float,default=0.,help="Additional exact-penalty term to avoid trading small hard-limit violations for score")
+    p.add_argument("--local-refinement",action="store_true",help="Refine a warm start with smaller steps, top 1/16 elites and a best-anchored mean")
+    p.add_argument("--floor-penalty-linear",type=float,default=0.,help="Penalize nonfoot clearance below 5 mm and foot compression beyond 5 mm")
     args=p.parse_args()
     assert args.population%args.num_envs==0
+    air_grid=None
+    if args.baseline_air_scales:
+        air_grid=np.array([float(s) for s in args.baseline_air_scales.split(',')])
+        if not args.tail_of or args.iterations or np.any(air_grid<=0) or args.num_envs%len(air_grid):
+            p.error('Aerial grid needs a frozen preparation, zero iterations and equal replicas per positive scale')
     # Redesigned preparations have different contact frames. Never silently
     # replay them with the old 30/55-frame clock.
     metadata={}
@@ -109,6 +156,7 @@ def main():
     names=PROFILE["joint_names"]
     assert [m.joint(int(j)).name.rsplit("/",1)[-1] for j in m.actuator_trnid[:,0]]==list(names)
     kp=np.array([PROFILE["stiffness"][n] for n in names])
+    kd=np.array([PROFILE["damping"][n] for n in names])
     effort=np.array([PROFILE["effort_limit"][n] for n in names])
     velocity_limit=np.array([PROFILE["velocity_limit"][n] for n in names])
     scale=PROFILE["action_scale"]
@@ -129,6 +177,7 @@ def main():
     half=.45*np.diff(m.jnt_range[1:],axis=1).ravel()
     lower,upper=centre-half,centre+half
     hard_lower,hard_upper=m.jnt_range[1:].T
+    bounded_indices=[names.index(n) for n in args.bounded_target_joints.split(',')] if args.bounded_target_joints else []
     from supermimic.data.design_metrics import BatchedDesignMetrics
     metrics=BatchedDesignMetrics(m,device)
     origins=env.scene.env_origins.cpu().numpy()
@@ -140,7 +189,8 @@ def main():
     mean=np.zeros(dimension);mean[0]=1. if args.tail_of else reference_preparation
     if args.warmstart:
         mean[:]=np.load(args.warmstart)["parameters"]
-    covariance=np.diag(np.r_[.1,np.full(dimension-1,.25)]**2)
+    covariance=np.diag(np.r_[.04 if args.local_refinement else .1,
+        np.full(dimension-1,.08 if args.local_refinement else .25)]**2)
     lo=np.r_[.6 if args.tail_of else .45,np.full(dimension-1,-1.5)]
     hi=np.r_[1.4 if args.tail_of else 1.2,np.full(dimension-1,1.5)]
     start=time.monotonic()
@@ -150,12 +200,14 @@ def main():
     physics_mask=np.ones(args.num_envs,dtype=bool)
     original_step=env.sim.step
     active_physics={"record":False}
+    physics_trace=[]
     def checked_step(*step_args,**step_kwargs):
         result=original_step(*step_args,**step_kwargs)
         if active_physics["record"]:
             q=env.sim.data.qpos.cpu().numpy()
             v=env.sim.data.qvel.cpu().numpy()
             f=env.sim.data.actuator_force.cpu().numpy()
+            if args.record_physics:physics_trace.append((q.copy(),v.copy(),f.copy()))
             limits=np.c_[np.maximum(np.maximum(lower-q[:,7:],q[:,7:]-upper),0).max(axis=1),
                 np.maximum(np.maximum(hard_lower-q[:,7:],q[:,7:]-hard_upper),0).max(axis=1),
                 (np.abs(v[:,6:])/velocity_limit).max(axis=1),(np.abs(f)/effort).max(axis=1)]
@@ -183,12 +235,26 @@ def main():
         physics_limits[:]=0
         physics_mask[:]=True
         active_physics["record"]=False
+        physics_trace.clear()
         clock["initial_frame"]=0
         prep_parameters=np.tile(fixed_preparation,(args.num_envs,1)) if args.tail_of else parameters
         clock["preparation"]=torch.tensor(prep_parameters[:,0],dtype=torch.float32,device=device)
         clock["air_scale"]=torch.tensor(parameters[:,0] if args.tail_of else np.ones(args.num_envs),dtype=torch.float32,device=device)
         cmd.forced_frame[:]=0
         obs,_=env.reset()
+        if args.entry_vx is not None:
+            from supermimic.envs.state_io import StateIO
+            io=StateIO(env);state=io.read()
+            velocity,entry=entry_velocity_state(m,state[0,:m.nq].cpu().numpy(),
+                state[0,m.nq:].cpu().numpy(),args.entry_vx,velocity_limit)
+            state[:,m.nq:]=torch.as_tensor(velocity,dtype=state.dtype,device=device)
+            ids=torch.arange(args.num_envs,device=device)
+            io.write(ids,state)
+            cmd.update_relative_body_poses();env.sim.sense()
+            env.observation_manager.reset(ids)
+            obs=env.observation_manager.compute(update_history=True,env_ids=ids)
+            env.obs_buf=obs
+            (args.out/"entry-initial-condition.json").write_text(json.dumps(entry,indent=2))
         clock["initial_frame"]=int(cmd.frame[0])
         clock["step"]=0
         active_physics["record"]=True
@@ -235,6 +301,29 @@ def main():
                 tail*=torch.clamp(1-(after-air_duration)/.4,0,1)[:,None]
                 residual+=tail
             action=policy(obs["policy"],obs["goal"])+residual
+            if bounded_indices:
+                indices=torch.tensor(bounded_indices,device=device)
+                scale_t=torch.as_tensor(action_scale[bounded_indices],dtype=action.dtype,device=device)
+                default=torch.as_tensor([PROFILE["default_joint_pos"][names[i]] for i in bounded_indices],dtype=action.dtype,device=device)
+                target=default+action[:,indices]*scale_t
+                target=torch.clamp(target,
+                    min=torch.as_tensor(hard_lower[bounded_indices]+args.bounded_target_margin,dtype=action.dtype,device=device),
+                    max=torch.as_tensor(hard_upper[bounded_indices]-args.bounded_target_margin,dtype=action.dtype,device=device))
+                action[:,indices]=(target-default)/scale_t
+            if args.joint_stop_margin is not None:
+                pos=env.sim.data.qpos[:,7:];vel=env.sim.data.qvel[:,6:]
+                f=lambda a:torch.as_tensor(a,dtype=pos.dtype,device=device)
+                default=f(np.array([PROFILE["default_joint_pos"][n] for n in names]))
+                scale_t=f(action_scale);ratio=f(kd/kp)
+                target=default+action*scale_t
+                predicted=pos+args.joint_stop_horizon*vel
+                inner_lower=f(hard_lower+args.joint_stop_margin)
+                inner_upper=f(hard_upper-args.joint_stop_margin)
+                target=torch.where(predicted<inner_lower,
+                    torch.maximum(target,inner_lower-ratio*torch.minimum(vel,torch.zeros_like(vel))),target)
+                target=torch.where(predicted>inner_upper,
+                    torch.minimum(target,inner_upper-ratio*torch.maximum(vel,torch.zeros_like(vel))),target)
+                action=(target-default)/scale_t
             obs,_,_,_,_=env.step(action)
             q=env.sim.data.qpos.cpu().numpy().copy()
             v=env.sim.data.qvel.cpu().numpy().copy()
@@ -292,6 +381,9 @@ def main():
             for k,key in enumerate(("soft","hard","speed","effort")):
                 physical[key]=max(physical[key],float(physics_limits[e,k]))
             cost=event_cost+physical["hard"]**2*10000+physical["soft"]**2*20+max(physical["speed"]-1,0)**2*20
+            cost+=args.hard_penalty_linear*physical["hard"]
+            cost+=args.floor_penalty_linear*(max(.005-physical["minimum_nonfoot_height"],0)
+                +max(physical["foot_penetration"]-.005,0))
             cost+=physical["nonfoot_penetration"]**2*2000+physical["foot_penetration"]**2*2000
             if args.phase=="full":
                 cost+=max(5.7-pitch.max()+pitch[0],0)**2*2
@@ -327,15 +419,27 @@ def main():
                 "airborne_forward_rotation_rad":air_rotation,
                 "takeoff_candidate_passed":bool(takeoff_passed),"single_left_support_at_launch":bool(single_at_launch),
                 "physical_candidate_passed":bool(passed),"approved_for_training":False})
-        return reports,(np.array(states),np.array(velocities),np.array(actions),records,initial_state)
+        physical_trace=tuple(np.stack([r[k] for r in physics_trace]) for k in range(3)) if physics_trace else None
+        return reports,(np.array(states),np.array(velocities),np.array(actions),records,initial_state,physical_trace)
 
     try:
         # Establish the exact-controller baseline before searching.
         baseline_parameters=np.tile(mean,(args.num_envs,1))
+        if air_grid is not None:baseline_parameters[:,0]=np.resize(air_grid,args.num_envs)
         baseline,payload=rollout(baseline_parameters)
         (args.out/"baseline.json").write_text(json.dumps(baseline[0],indent=2))
         (args.out/"baseline-all.json").write_text(json.dumps(baseline))
         np.savez(args.out/"baseline-trajectory.npz",qpos=payload[0][:,0],qvel=payload[1][:,0],actions=payload[2][:,0],fps=np.array([50.]))
+        if payload[5] is not None:
+            positions=payload[5][0][:,0].copy();positions[:,:3]-=origins[0]
+            np.savez(args.out/"baseline-physics.npz",qpos=positions,qvel=payload[5][1][:,0],
+                actuator_force=payload[5][2][:,0],fps=np.array([1/m.opt.timestep]),
+                initial_qpos=payload[4]["qpos"][0]-np.r_[origins[0],np.zeros(m.nq-3)],
+                initial_qvel=payload[4]["qvel"][0])
+        if air_grid is not None:
+            positions=payload[0].copy();positions[:,:,:3]-=origins[None,:,:]
+            np.savez(args.out/"timing-grid-trajectories.npz",qpos=positions,qvel=payload[1],actions=payload[2],
+                air_scales=baseline_parameters[:,0],fps=np.array([50.]))
         print("BASELINE",json.dumps(baseline[0]),flush=True)
         repeat,repeat_payload=rollout(baseline_parameters)
         (args.out/"reset-repeat-all.json").write_text(json.dumps(repeat))
@@ -376,8 +480,8 @@ def main():
                         (args.out/"best-frames.json").write_text(json.dumps(payload[3][e]))
                 if time.monotonic()-start>args.max_seconds:break
             outcomes.sort(key=lambda x:x[0])
-            elite=np.array([r[1] for r in outcomes[:max(2,len(outcomes)//4)]])
-            mean=.3*mean+.7*elite.mean(axis=0)
+            elite=np.array([r[1] for r in outcomes[:max(2,len(outcomes)//(16 if args.local_refinement else 4))]])
+            mean=(.25*mean+.5*elite.mean(axis=0)+.25*best[1]) if args.local_refinement else .3*mean+.7*elite.mean(axis=0)
             covariance=.7*covariance+.3*np.cov(elite,rowvar=False)+np.diag(np.r_[.003,np.full(dimension-1,.01)]**2)
             record={"iteration":iteration,"evaluations":evaluations,"elapsed_s":time.monotonic()-start,**best[2]}
             record["iteration_elapsed_s"]=time.monotonic()-iteration_start
