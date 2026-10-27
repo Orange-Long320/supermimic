@@ -74,6 +74,10 @@ def main():
     p.add_argument("--local-refinement",action="store_true",help="Refine a warm start with smaller steps, top 1/16 elites and a best-anchored mean")
     p.add_argument("--search-groups",help="Comma-separated first joint names of residual groups to optimize; retain all other warm-start coefficients")
     p.add_argument("--floor-penalty-linear",type=float,default=0.,help="Penalize nonfoot clearance below 5 mm and foot compression beyond 5 mm")
+    p.add_argument("--high-frequency-geometry",action="store_true",help="Audit post-integration foot/body geometry at every 5 ms physics step")
+    p.add_argument("--air-rotation-weight",type=float,default=0.,help="Weight the rotation deficit in the first continuous airborne segment")
+    p.add_argument("--air-rotation-target",type=float,default=3.8)
+    p.add_argument("--landing-window-seconds",type=float,default=.2)
     p.add_argument("--checkpoint-grid",type=Path,nargs='+',help="Evaluate immutable checkpoints in the same environment; zero iterations only")
     p.add_argument("--landing-ckpt",type=Path,help="Diagnostic phase-specific frozen landing controller")
     p.add_argument("--landing-switch-times",type=float,nargs='+',default=[1.2])
@@ -83,6 +87,8 @@ def main():
     p.add_argument("--projection-frequency",type=float,default=35.)
     p.add_argument("--projection-margin",type=float,default=.04)
     args=p.parse_args()
+    if args.air_rotation_weight<0 or args.air_rotation_target<=0 or not 0<args.landing_window_seconds<=args.seconds:
+        p.error('Invalid airborne-rotation objective or landing window')
     assert args.population%args.num_envs==0
     if args.checkpoint_grid and (args.iterations or any(c.name=='ckpt_latest.pt' for c in args.checkpoint_grid)):
         p.error('Checkpoint comparison needs immutable files and zero search iterations')
@@ -117,6 +123,7 @@ def main():
     reference_preparation=takeoff/fps
     reference_flight=(landing-takeoff)/fps
     args.out.mkdir(parents=True,exist_ok=False)
+    (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     torch.set_num_threads(1)
     from supermimic.robots.dimensions import PROFILE
     from supermimic.envs import SuperMimicEnvCfgArgs,make_env
@@ -171,6 +178,7 @@ def main():
             cmd.update_relative_body_poses()
     cmd._update_command=warped_update
     m=env.sim.mj_model
+    mujoco.mj_saveModel(m,str(args.out/'native-model.mjb'))
     d=mujoco.MjData(m)
     root=int(m.jnt_bodyid[0])
     names=PROFILE["joint_names"]
@@ -235,6 +243,7 @@ def main():
     evaluations=0
     best=None
     physics_limits=np.zeros((args.num_envs,4))
+    physics_geometry=np.zeros((args.num_envs,3));physics_geometry[:,2]=1e3
     physics_mask=np.ones(args.num_envs,dtype=bool)
     original_step=env.sim.step
     active_physics={"record":False}
@@ -267,6 +276,12 @@ def main():
                 np.maximum(np.maximum(hard_lower-q[:,7:],q[:,7:]-hard_upper),0).max(axis=1),
                 (np.abs(v[:,6:])/velocity_limit).max(axis=1),(np.abs(f)/effort).max(axis=1)]
             physics_limits[physics_mask]=np.maximum(physics_limits[physics_mask],limits[physics_mask])
+            if args.high_frequency_geometry:
+                env.sim.forward()
+                measured=metrics(env.sim.data).cpu().numpy()
+                bounds=np.c_[np.maximum(-measured[:,9],0),np.maximum(-measured[:,7:9].min(axis=1),0),measured[:,9]]
+                physics_geometry[physics_mask,:2]=np.maximum(physics_geometry[physics_mask,:2],bounds[physics_mask,:2])
+                physics_geometry[physics_mask,2]=np.minimum(physics_geometry[physics_mask,2],bounds[physics_mask,2])
         return result
     env.sim.step=checked_step
     (args.out/"configuration.json").write_text(json.dumps({
@@ -277,6 +292,7 @@ def main():
         "physics":f"Unmodified project make_env on {device}; only local design-process reset requests suppressed",
         "joint_acceptance":"Actual mechanical joint ranges at each physics step; soft limits retained as a separate regularizer",
         "metric_state_alignment":"Post-integration derived fields refreshed before each control-frame geometry measurement",
+        "geometry_acceptance_frequency_hz":1/float(m.opt.timestep) if args.high_frequency_geometry else 50,
         "hard_joint_ranges_rad":m.jnt_range[1:].tolist(),
         "takeoff_objective":"Continuous ascending flight; grounded extension is a fallback proxy with an explicit flight deficit penalty",
         "groups":groups,"residual_units":"fraction of actuator effort, mapped to existing position actions",
@@ -293,6 +309,7 @@ def main():
         evaluations+=len(parameters)
         clock["step"]=0
         physics_limits[:]=0
+        physics_geometry[:,:2]=0;physics_geometry[:,2]=1e3
         physics_mask[:]=True
         active_physics["record"]=False
         physics_trace.clear()
@@ -467,17 +484,22 @@ def main():
             # checks always use every 5 ms physics step, not only video frames.
             for k,key in enumerate(("soft","hard","speed","effort")):
                 physical[key]=max(physical[key],float(physics_limits[e,k]))
+            if args.high_frequency_geometry:
+                physical['nonfoot_penetration']=max(physical['nonfoot_penetration'],float(physics_geometry[e,0]))
+                physical['foot_penetration']=max(physical['foot_penetration'],float(physics_geometry[e,1]))
+                physical['minimum_nonfoot_height']=min(physical['minimum_nonfoot_height'],float(physics_geometry[e,2]))
             cost=event_cost+physical["hard"]**2*10000+physical["soft"]**2*20+max(physical["speed"]-1,0)**2*20
             cost+=args.hard_penalty_linear*physical["hard"]
             cost+=args.floor_penalty_linear*(max(.005-physical["minimum_nonfoot_height"],0)
                 +max(physical["foot_penetration"]-.005,0))
             cost+=physical["nonfoot_penetration"]**2*2000+physical["foot_penetration"]**2*2000
             if args.phase=="full":
+                landing_window=rows[-max(1,round(args.landing_window_seconds*50)):]
                 cost+=max(5.7-pitch.max()+pitch[0],0)**2*2
                 cost+=max(.8-rows[-1]["up_z"],0)**2*10+max(.55-rows[-1]["com_z"],0)**2*50
                 cost+=np.mean([r["com_speed"]**2*4+max(.85-r["up_z"],0)**2*10
                     +r["root_angular_speed"]**2*.5
-                    +max(min(r["feet"].values())-.01,0)**2*200 for r in rows[-10:]])
+                    +max(min(r["feet"].values())-.01,0)**2*200 for r in landing_window])
             # The free leg must stay up during the push. An early single-leg
             # pose followed by a two-leg jump is not a Webster takeoff.
             cost+=500*right_deficit+(0 if single_at_launch else 30)
@@ -486,12 +508,14 @@ def main():
                 and launch_row["vz"]>1.5 and launch_row["momentum"][1]>20
                 and physical["speed"]<=1 and physical["effort"]<=1.00001
                 and physical["minimum_nonfoot_height"]>.005 and physical["foot_penetration"]<.005)
+            landing_window=rows[-max(1,round(args.landing_window_seconds*50)):]
             landed=all(r["up_z"]>.85 and r["com_z"]>.55 and r["com_speed"]<.5 and r["root_angular_speed"]<1
-                and min(r["feet"].values())<.01 for r in rows[-10:])
+                and min(r["feet"].values())<.01 for r in landing_window)
             air_end=first_air
             if first_air is not None:
                 while air_end+1 in air:air_end+=1
             air_rotation=float(pitch[air_end]-pitch[first_air]) if first_air is not None else 0.
+            if args.phase=='full':cost+=args.air_rotation_weight*max(args.air_rotation_target-air_rotation,0)**2
             passed=(args.phase=="full" and len(air)>=4 and single_at_launch and pitch.max()-pitch[0]>5.5
                 and air_rotation>3.5
                 and min(rows[i]["up_z"] for i in air)<-.7 and rows[-1]["up_z"]>.85
@@ -504,6 +528,7 @@ def main():
                 "objective_event":{"time":event["time"],"vz":event["vz"],"momentum":event["momentum"],"feet":event["feet"]},
                 "maximum_forward_rotation_rad":float(pitch.max()-pitch[0]),"final":rows[-1],
                 "airborne_forward_rotation_rad":air_rotation,
+                "landing_window_seconds":args.landing_window_seconds,"landing_window_passed":bool(landed),
                 "takeoff_candidate_passed":bool(takeoff_passed),"single_left_support_at_launch":bool(single_at_launch),
                 "physical_candidate_passed":bool(passed),"approved_for_training":False})
             if landing_policy is not None:reports[-1]["landing_switch_time_s"]=float(landing_times[e])
