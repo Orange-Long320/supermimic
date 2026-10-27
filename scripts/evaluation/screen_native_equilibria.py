@@ -39,8 +39,9 @@ def main():
                 assert z['joint_names'].tolist()==names
                 poses.append(z['qpos']);torques.append(z['required_motor_torque'])
         pose=np.asarray(poses);state[:,:m.nq]=torch.tensor(pose,dtype=state.dtype,device=args.device)
-        state[:,:3]+=env.scene.env_origins;state[:,m.nq:]=0
+        state[:,m.nq:]=0
         io.write(torch.arange(len(cases),device=args.device),state)
+        torch.testing.assert_close(io.read()[:,:m.nq],torch.tensor(pose,dtype=state.dtype,device=args.device),rtol=0,atol=2e-5)
         kp=np.asarray([PROFILE['stiffness'][n] for n in names]);effort=np.asarray([PROFILE['effort_limit'][n] for n in names])
         target=torch.tensor(pose[:,7:]+np.asarray(torques)/kp,dtype=state.dtype,device=args.device)
         metrics=BatchedDesignMetrics(m,args.device);original_step=env.sim.step;traces=[];measurements=[]

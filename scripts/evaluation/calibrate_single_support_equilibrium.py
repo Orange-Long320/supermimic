@@ -18,11 +18,17 @@ def main():
     p.add_argument('--candidate-index',type=int,default=0)
     p.add_argument('--fixed-pressure-grid',action='store_true',help='Balance each fixed foot attitude independently; keep individual states for dynamic screening')
     p.add_argument('--pressure-angles',type=float,nargs='+',default=[-.02,-.012,-.006,.006,.012,.02])
+    p.add_argument('--posture',nargs=2,action='append',default=[],metavar=('JOINT','POSITION'),help='Initial free-leg/arm pose before native static balancing')
     p.add_argument('--out',type=Path,required=True);args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
     (args.out/'calibration-source.py').write_text(Path(__file__).read_text())
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));d=mujoco.MjData(m)
     state=np.load(args.initial)['state'][0];q0=state[:m.nq].copy()
+    for name,value in args.posture:
+        joint=m.joint(name if name.startswith('robot/') else 'robot/'+name);value=float(value)
+        if not m.jnt_range[joint.id,0]+.025<=value<=m.jnt_range[joint.id,1]-.025:
+            raise ValueError(f'Initial posture is outside the design joint margin: {name}')
+        q0[m.jnt_qposadr[joint.id]]=value
     d.qpos[:]=q0;mujoco.mj_forward(m,d)
     foot=m.body('robot/left_ankle_roll_link').id
     foot_position=d.xpos[foot].copy();foot_rotation=Rotation.from_matrix(d.xmat[foot].reshape(3,3))
