@@ -48,8 +48,11 @@ class NativeContactController(SingleSupportController):
     """Enforce unactuated-base dynamics and motor limits through mj_inverse."""
     def solve(self,qpos,qvel,com_target=None,com_velocity=None,com_acceleration=None,momentum_target=None,qref=None,
               joint_velocity=None,joint_acceleration=None,momentum_rate=None):
-        m=self.model;d=self.data;d.qpos[:]=qpos;d.qvel[:]=qvel;mujoco.mj_forward(m,d)
+        m=self.model;d=self.data;d.qpos[:]=qpos;d.qvel[:]=qvel
+        if hasattr(self,'servo_seed'):d.ctrl[:]=self.servo_seed
+        mujoco.mj_forward(m,d)
         integration_map=implicitfast_acceleration_map(m,d) if getattr(self,'integration_aware',False) else np.eye(m.nv)
+        forward_seed=np.linalg.solve(integration_map,d.qacc.copy())/20. if hasattr(self,'servo_seed') else None
         foot,com,angular=self.jacobians(d)
         epsilon=1e-6;f=self.future;f.qpos[:]=qpos
         mujoco.mj_integratePos(m,f.qpos,qvel,epsilon);f.qvel[:]=qvel;mujoco.mj_forward(m,f)
@@ -139,15 +142,42 @@ class NativeContactController(SingleSupportController):
             geometry_matrix=point_jac*acc;geometry_lower=bound-point_drift
             constraints.append({'type':'ineq','fun':lambda x:geometry_matrix@x-geometry_lower,
                                 'jac':lambda x:geometry_matrix})
+        velocity_rows=[];velocity_lower=[]
+        if grounded:
+            dt=float(m.opt.timestep)
+            if getattr(self,'minimum_foot_pitch_rate',None) is not None:
+                velocity_rows.append(foot[4]*acc*dt)
+                velocity_lower.append(self.minimum_foot_pitch_rate-foot[4]@qvel-drift[0][4]*dt)
+            for dof,value in getattr(self,'minimum_joint_velocities',{}).items():
+                if not 6<=dof<m.nv:raise ValueError('Expected an actuated joint velocity constraint')
+                velocity_rows.append(np.eye(m.nv)[dof]*acc*dt);velocity_lower.append(value-qvel[dof])
+        velocity_matrix=np.asarray(velocity_rows);velocity_rhs=np.asarray(velocity_lower)
+        if len(velocity_rows):
+            constraints.append({'type':'ineq','fun':lambda x:velocity_matrix@x-velocity_rhs,
+                                'jac':lambda x:velocity_matrix})
         initial=np.zeros(m.nv) if self.previous is None else self.previous
         initial=np.clip(initial,lb,ub)
         result=minimize(lambda x:.5*x@hessian@x-linear@x,initial,jac=lambda x:hessian@x-linear,
             method='SLSQP',bounds=Bounds(lb,ub),constraints=constraints,options={'maxiter':80,'ftol':1e-9})
-        forces=inverse(result.x);eq_error=float(abs(forces[:6]).max());motor=float(abs(forces[6:]).max())
-        bound_error=float(np.maximum(np.maximum(lb-result.x,result.x-ub),0).max())
-        root_acc_error=float(abs(result.x[3:6]*acc-self.root_acceleration_ref).max()) if getattr(self,'root_acceleration_hard',False) else 0.
-        geometry_error=float(np.maximum(geometry_lower-geometry_matrix@result.x,0).max()) if geometry_matrix is not None else 0.
-        feasible=(root_acc_error<=1e-5 and geometry_error<=1e-5 and np.isfinite(forces).all() and np.isfinite(result.x).all() and eq_error<=1e-5 and motor<=1.00001 and bound_error<=1e-7)
+        def assess(candidate):
+            result=candidate
+            forces=inverse(result.x);eq_error=float(abs(forces[:6]).max());motor=float(abs(forces[6:]).max())
+            bound_error=float(np.maximum(np.maximum(lb-result.x,result.x-ub),0).max())
+            root_acc_error=float(abs(result.x[3:6]*acc-self.root_acceleration_ref).max()) if getattr(self,'root_acceleration_hard',False) else 0.
+            geometry_error=float(np.maximum(geometry_lower-geometry_matrix@result.x,0).max()) if geometry_matrix is not None else 0.
+            velocity_error=float(np.maximum(velocity_rhs-velocity_matrix@result.x,0).max()) if len(velocity_rows) else 0.
+            feasible=(velocity_error<=1e-5 and root_acc_error<=1e-5 and geometry_error<=1e-5 and np.isfinite(forces).all() and np.isfinite(result.x).all() and eq_error<=1e-5 and motor<=1.00001 and bound_error<=1e-7)
+            return forces,eq_error,motor,bound_error,root_acc_error,geometry_error,feasible
+        first_result=result;forward_retry=False
+        forces,eq_error,motor,bound_error,root_acc_error,geometry_error,feasible=assess(result)
+        if (not feasible or (not result.success and int(result.status) not in (8,9))) and forward_seed is not None:
+            retry=minimize(lambda x:.5*x@hessian@x-linear@x,np.clip(forward_seed,lb,ub),jac=lambda x:hessian@x-linear,
+                method='SLSQP',bounds=Bounds(lb,ub),constraints=constraints,options={'maxiter':120,'ftol':1e-9})
+            checked=assess(retry)
+            if checked[-1] and (retry.success or int(retry.status) in (8,9)):
+                result=retry;forces,eq_error,motor,bound_error,root_acc_error,geometry_error,feasible=checked;forward_retry=True
+            else:
+                forces,eq_error,motor,bound_error,root_acc_error,geometry_error,feasible=assess(first_result)
         if not feasible or (not result.success and int(result.status) not in (8,9)):
             self.failure={'solver_message':str(result.message),'root_force_residual_normalized':eq_error,'motor_ratio':motor,'root_acceleration_residual':root_acc_error,'geometry_acceleration_residual':geometry_error}
             self.failure_arrays={'qpos':qpos,'qvel':qvel,'qacc':integration_map@(result.x*acc),'optimization_acceleration':result.x*acc,'normalized_inverse_force':forces}
@@ -155,9 +185,10 @@ class NativeContactController(SingleSupportController):
         self.previous=result.x.copy()
         self.last_explicit_acceleration=integration_map@(result.x*acc)
         return forces[6:]*self.effort,{'equality_residual':eq_error,'motor_ratio':motor,'iterations':int(result.nit),
-            'solver_converged':bool(result.success),'solver_status':int(result.status),'bound_residual':bound_error,
+            'forward_seed_retry':forward_retry,'first_solver_status':int(first_result.status),'solver_converged':bool(result.success),'solver_status':int(result.status),'bound_residual':bound_error,
             'objective_scale':objective_scale,'prediction_horizon_s':horizon,'integration_aware':bool(getattr(self,'integration_aware',False)),'root_acceleration_residual':root_acc_error,
             'geometry_acceleration_residual':geometry_error,
+            'support_velocity_residual':float(np.maximum(velocity_rhs-velocity_matrix@result.x,0).max()) if len(velocity_rows) else 0.,
             'com_acceleration_error':float(np.linalg.norm(com@(result.x*acc)-desired_com)),
             'desired_com_acceleration':(desired_com+drift[1]).tolist(),
             'achieved_com_acceleration':(com@(result.x*acc)+drift[1]).tolist(),

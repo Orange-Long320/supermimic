@@ -25,6 +25,7 @@ def main():
     from supermimic.data.design_metrics import BatchedDesignMetrics
     from supermimic.robots.dimensions import PROFILE
     torch.set_num_threads(1)
+    program=Path(__file__).read_bytes();(args.out/'screen-source.py').write_bytes(program)
     report=json.loads((args.calibration/'result.json').read_text())
     cases=[x for x in report['trials'] if x['strict_geometry_static_feasible']]
     if not cases:raise ValueError('No statically feasible candidates to screen')
@@ -47,6 +48,7 @@ def main():
         metrics=BatchedDesignMetrics(m,args.device);original_step=env.sim.step;traces=[];measurements=[]
         def step(*a,**kw):
             env.sim.data.ctrl[:]=target;result=original_step(*a,**kw)
+            env.sim.forward()
             traces.append(torch.cat([env.sim.data.qpos[:],env.sim.data.qvel[:]],dim=-1).cpu().numpy().copy())
             measurements.append(metrics(env.sim.data).cpu().numpy().copy());return result
         env.sim.step=step;env.termination_manager.compute=lambda:torch.zeros(len(cases),dtype=torch.bool,device=args.device)
@@ -56,9 +58,9 @@ def main():
         np.savez(args.out/'trajectory.npz',state=a,metrics=values,fps=np.array([200.]))
         output={'purpose':__doc__,'device':args.device,'pid':os.getpid(),'seconds':args.seconds,'cases':cases,
             'state_edits_after_start':False,'approved_for_training':False,
-            'source_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'source_sha256':hashlib.sha256(program).hexdigest(),'metric_state_alignment':'Post-integration derived fields refreshed before measurement',
             'note':'Constant native motor targets over a short interval; passing requires longer feedback validation.'}
-        (args.out/'result.json').write_text(json.dumps(output,indent=2));(args.out/'screen-source.py').write_bytes(Path(__file__).read_bytes())
+        (args.out/'result.json').write_text(json.dumps(output,indent=2))
         print(json.dumps({'count':len(cases),'screen_passed':sum(x['screen']['screen_passed'] for x in cases),'best':cases[0]}),flush=True)
     finally:env.close()
 

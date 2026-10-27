@@ -91,7 +91,7 @@ def main():
         seeds=[np.asarray(saved['adjustments'])]
     for seed in seeds:
         regularization=1e-4;reserve_phase=True
-        if args.candidate_from or args.fixed_pressure_grid:result=SimpleNamespace(x=seed.copy(),nfev=0,cost=0.)
+        if args.candidate_from or args.fixed_pressure_grid:result=SimpleNamespace(x=np.clip(seed,lower,upper),nfev=0,cost=0.)
         else:
             result=least_squares(residual,np.clip(seed,lower,upper),jac=jacobian,bounds=(lower,upper),
                 xtol=1e-12,ftol=1e-12,gtol=1e-12,max_nfev=400)
