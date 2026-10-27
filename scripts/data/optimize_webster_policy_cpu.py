@@ -244,6 +244,12 @@ def main():
     best=None
     physics_limits=np.zeros((args.num_envs,4))
     physics_geometry=np.zeros((args.num_envs,3));physics_geometry[:,2]=1e3
+    from supermimic.data.design_limits import joint_limit_statistics
+    limit_constants=[torch.as_tensor(x,dtype=torch.float64,device=device) for x in
+                     [lower,upper,hard_lower,hard_upper,velocity_limit,effort]]
+    device_limits=torch.zeros((args.num_envs,4),dtype=torch.float64,device=device)
+    device_geometry=torch.zeros((args.num_envs,3),dtype=torch.float64,device=device);device_geometry[:,2]=1e3
+    device_mask=torch.ones(args.num_envs,dtype=torch.bool,device=device)
     physics_mask=np.ones(args.num_envs,dtype=bool)
     original_step=env.sim.step
     active_physics={"record":False}
@@ -268,20 +274,16 @@ def main():
             projection["infeasible"]+=infeasible.sum(0).cpu().numpy()
         result=original_step(*step_args,**step_kwargs)
         if active_physics["record"]:
-            q=env.sim.data.qpos.cpu().numpy()
-            v=env.sim.data.qvel.cpu().numpy()
-            f=env.sim.data.actuator_force.cpu().numpy()
-            if args.record_physics:physics_trace.append((q.copy(),v.copy(),f.copy()))
-            limits=np.c_[np.maximum(np.maximum(lower-q[:,7:],q[:,7:]-upper),0).max(axis=1),
-                np.maximum(np.maximum(hard_lower-q[:,7:],q[:,7:]-hard_upper),0).max(axis=1),
-                (np.abs(v[:,6:])/velocity_limit).max(axis=1),(np.abs(f)/effort).max(axis=1)]
-            physics_limits[physics_mask]=np.maximum(physics_limits[physics_mask],limits[physics_mask])
+            q=env.sim.data.qpos;v=env.sim.data.qvel;f=env.sim.data.actuator_force
+            if args.record_physics:physics_trace.append(tuple(x.cpu().numpy().copy() for x in [q,v,f]))
+            limits=joint_limit_statistics(q,v,f,*limit_constants)
+            device_limits.copy_(torch.where(device_mask[:,None],torch.maximum(device_limits,limits),device_limits))
             if args.high_frequency_geometry:
                 env.sim.forward()
-                measured=metrics(env.sim.data).cpu().numpy()
-                bounds=np.c_[np.maximum(-measured[:,9],0),np.maximum(-measured[:,7:9].min(axis=1),0),measured[:,9]]
-                physics_geometry[physics_mask,:2]=np.maximum(physics_geometry[physics_mask,:2],bounds[physics_mask,:2])
-                physics_geometry[physics_mask,2]=np.minimum(physics_geometry[physics_mask,2],bounds[physics_mask,2])
+                measured=metrics(env.sim.data)
+                bounds=torch.stack([(-measured[:,9]).clamp(min=0),(-measured[:,7:9].amin(dim=1)).clamp(min=0),measured[:,9]],dim=1).to(torch.float64)
+                device_geometry[:,:2].copy_(torch.where(device_mask[:,None],torch.maximum(device_geometry[:,:2],bounds[:,:2]),device_geometry[:,:2]))
+                device_geometry[:,2].copy_(torch.where(device_mask,torch.minimum(device_geometry[:,2],bounds[:,2]),device_geometry[:,2]))
         return result
     env.sim.step=checked_step
     (args.out/"configuration.json").write_text(json.dumps({
@@ -293,6 +295,7 @@ def main():
         "joint_acceptance":"Actual mechanical joint ranges at each physics step; soft limits retained as a separate regularizer",
         "metric_state_alignment":"Post-integration derived fields refreshed before each control-frame geometry measurement",
         "geometry_acceptance_frequency_hz":1/float(m.opt.timestep) if args.high_frequency_geometry else 50,
+        "limit_statistics":"Float64 device-side reductions; transferred once per rollout, or trace samples when explicitly recording",
         "hard_joint_ranges_rad":m.jnt_range[1:].tolist(),
         "takeoff_objective":"Continuous ascending flight; grounded extension is a fallback proxy with an explicit flight deficit penalty",
         "groups":groups,"residual_units":"fraction of actuator effort, mapped to existing position actions",
@@ -310,6 +313,7 @@ def main():
         clock["step"]=0
         physics_limits[:]=0
         physics_geometry[:,:2]=0;physics_geometry[:,2]=1e3
+        device_limits.zero_();device_geometry[:,:2].zero_();device_geometry[:,2]=1e3;device_mask.fill_(True)
         physics_mask[:]=True
         active_physics["record"]=False
         physics_trace.clear()
@@ -418,6 +422,7 @@ def main():
                 target=torch.where(predicted>inner_upper,
                     torch.minimum(target,inner_upper-ratio*torch.maximum(vel,torch.zeros_like(vel))),target)
                 action=(target-default)/scale_t
+            if args.phase=='takeoff':device_mask.copy_(torch.as_tensor(physics_mask,device=device))
             obs,_,_,_,_=env.step(action)
             q=env.sim.data.qpos.cpu().numpy().copy()
             v=env.sim.data.qvel.cpu().numpy().copy()
@@ -451,6 +456,7 @@ def main():
                     if args.phase=="takeoff":physics_mask[e]=False
             if args.phase=="takeoff" and completed_air.all():break
         active_physics["record"]=False
+        physics_limits[:]=device_limits.cpu().numpy();physics_geometry[:]=device_geometry.cpu().numpy()
         if args.physics_command_projection:
             (args.out/"command-projection.json").write_text(json.dumps({
                 "joint_names":names,"initial_free_body_effective_inertia":projection["inertia"].cpu().tolist(),
