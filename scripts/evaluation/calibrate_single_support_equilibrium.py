@@ -16,7 +16,10 @@ def main():
     p.add_argument('--support-reserve-goal',type=float,help='Seek a lower static support-leg motor fraction before final force-balance polishing')
     p.add_argument('--candidate-from',type=Path,help='Polish a recorded candidate while preserving its contact attitude')
     p.add_argument('--candidate-index',type=int,default=0)
+    p.add_argument('--fixed-pressure-grid',action='store_true',help='Balance each fixed foot attitude independently; keep individual states for dynamic screening')
+    p.add_argument('--pressure-angles',type=float,nargs='+',default=[-.02,-.012,-.006,.006,.012,.02])
     p.add_argument('--out',type=Path,required=True);args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
+    (args.out/'calibration-source.py').write_text(Path(__file__).read_text())
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));d=mujoco.MjData(m)
     state=np.load(args.initial)['state'][0];q0=state[:m.nq].copy()
@@ -73,6 +76,8 @@ def main():
     pressure_angles=[(roll,pitch) for roll in [-.003,.003] for pitch in [-.003,.003]]
     if args.support_reserve_goal is not None:pressure_angles += [(-.025,-.03),(-.02,.02),(.02,-.03),(.02,.02)]
     seeds=[np.array([z,roll,pitch,.06,-.035]) for z in [-.006,-.012] for roll,pitch in pressure_angles]
+    if args.fixed_pressure_grid:
+        seeds=[np.array([-.006,roll,pitch,.06,-.035]) for roll in args.pressure_angles for pitch in args.pressure_angles]
     if args.candidate_from:
         saved=json.loads(args.candidate_from.read_text())['trials'][args.candidate_index]
         if saved['parameter_names']!=['foot_z','foot_roll','foot_pitch','left_ankle_pitch','left_ankle_roll']:
@@ -80,7 +85,7 @@ def main():
         seeds=[np.asarray(saved['adjustments'])]
     for seed in seeds:
         regularization=1e-4;reserve_phase=True
-        if args.candidate_from:result=SimpleNamespace(x=seed.copy(),nfev=0,cost=0.)
+        if args.candidate_from or args.fixed_pressure_grid:result=SimpleNamespace(x=seed.copy(),nfev=0,cost=0.)
         else:
             result=least_squares(residual,np.clip(seed,lower,upper),jac=jacobian,bounds=(lower,upper),
                 xtol=1e-12,ftol=1e-12,gtol=1e-12,max_nfev=400)
@@ -125,9 +130,16 @@ def main():
             t[0]['heights']['nonfoot']<.005 or t[0]['maximum_motor_ratio']>1,
             1000*t[0]['root_force_residual_normalized']+t[0]['maximum_support_motor_ratio']))
     best,q,force=trials[0]
+    if args.fixed_pressure_grid:
+        for index,(item,pose,wrench) in enumerate(trials):
+            name=f'candidate-{index:03d}.npz';item['state_file']=name
+            np.savez(args.out/name,qpos=pose,qvel=np.zeros(m.nv),required_motor_torque=wrench[6:],
+                joint_names=np.array(PROFILE['joint_names']))
     np.savez(args.out/'equilibrium.npz',qpos=q,qvel=np.zeros(m.nv),required_motor_torque=force[6:],
         joint_names=np.array(PROFILE['joint_names']))
     report={'purpose':__doc__,'model_sha256':hashlib.sha256(args.model.read_bytes()).hexdigest(),
+        'initial_sha256':hashlib.sha256(args.initial.read_bytes()).hexdigest(),
+        'configuration':{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         'support_reserve_goal':args.support_reserve_goal,
         'candidate_source':str(args.candidate_from) if args.candidate_from else None,'candidate_index':args.candidate_index,
         'mass_kg':mass,'best':best,'trials':[t[0] for t in trials],'approved_for_training':False,

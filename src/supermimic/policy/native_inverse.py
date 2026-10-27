@@ -4,6 +4,7 @@ import numpy as np
 from scipy.optimize import Bounds,minimize
 from scipy.spatial.transform import Rotation
 from supermimic.policy.whole_body import SingleSupportController
+from supermimic.policy.joint_prediction import position_acceleration_bounds
 
 
 class NativeContactController(SingleSupportController):
@@ -25,8 +26,13 @@ class NativeContactController(SingleSupportController):
         reference_v=np.zeros(m.nv-6) if joint_velocity is None else joint_velocity
         reference_a=np.zeros(m.nv-6) if joint_acceleration is None else joint_acceleration
         desired_joint=reference_a+60*(posture[7:]-qpos[7:])+15*(reference_v-qvel[6:])
-        acc=20.;task=np.r_[com*acc*2.,angular*acc/10.,np.eye(m.nv)[6:]*acc/100.]
-        target_task=np.r_[desired_com*2.,desired_momentum/10.,desired_joint/100.]
+        joint_weight=np.broadcast_to(getattr(self,'joint_task_weight',.01),(m.nv-6,))
+        acc=20.;task=np.r_[com*acc*2.,angular*acc/10.,np.eye(m.nv)[6:]*acc*joint_weight[:,None]]
+        target_task=np.r_[desired_com*2.,desired_momentum/10.,desired_joint*joint_weight]
+        if hasattr(self,'root_acceleration_ref'):
+            weight=float(getattr(self,'root_acceleration_weight',1.))
+            task=np.r_[task,np.eye(m.nv)[3:6]*acc*weight]
+            target_task=np.r_[target_task,np.asarray(self.root_acceleration_ref)*weight]
         grounded=bool(len(self.contact_points(d)))
         if grounded:
             if not getattr(self,'grounded',True):
@@ -43,10 +49,9 @@ class NativeContactController(SingleSupportController):
         self.grounded=grounded
         hessian=task.T@task+np.eye(m.nv)*1e-6;linear=task.T@target_task
         horizon=.08;lower,upper=m.jnt_range[1:].T
-        minimum=np.maximum(2*(lower+self.margin-qpos[7:]-horizon*qvel[6:])/horizon**2,
-                           (-self.velocity_limits-qvel[6:])/horizon)
-        maximum=np.minimum(2*(upper-self.margin-qpos[7:]-horizon*qvel[6:])/horizon**2,
-                           (self.velocity_limits-qvel[6:])/horizon)
+        minimum,maximum=position_acceleration_bounds(qpos[7:],qvel[6:],lower+self.margin,upper-self.margin,horizon)
+        minimum=np.maximum(minimum,(-self.velocity_limits-qvel[6:])/horizon)
+        maximum=np.minimum(maximum,(self.velocity_limits-qvel[6:])/horizon)
         if np.any(minimum>maximum):raise RuntimeError('Joint predictive bounds already infeasible')
         lb=np.r_[np.full(6,-100.),minimum/acc];ub=np.r_[np.full(6,100.),maximum/acc]
         scale=np.r_[np.full(3,m.body_mass.sum()*9.81),np.full(3,m.body_mass.sum()*9.81*.7),self.effort]
