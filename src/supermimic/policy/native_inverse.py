@@ -27,14 +27,16 @@ class NativeContactController(SingleSupportController):
         reference_a=np.zeros(m.nv-6) if joint_acceleration is None else joint_acceleration
         desired_joint=reference_a+60*(posture[7:]-qpos[7:])+15*(reference_v-qvel[6:])
         joint_weight=np.broadcast_to(getattr(self,'joint_task_weight',.01),(m.nv-6,))
-        acc=20.;task=np.r_[com*acc*2.,angular*acc/10.,np.eye(m.nv)[6:]*acc*joint_weight[:,None]]
-        target_task=np.r_[desired_com*2.,desired_momentum/10.,desired_joint*joint_weight]
+        com_weight=np.broadcast_to(getattr(self,'com_task_weight',2.),(3,))
+        momentum_weight=np.broadcast_to(getattr(self,'momentum_task_weight',.1),(3,))
+        acc=20.;task=np.r_[com*acc*com_weight[:,None],angular*acc*momentum_weight[:,None],np.eye(m.nv)[6:]*acc*joint_weight[:,None]]
+        target_task=np.r_[desired_com*com_weight,desired_momentum*momentum_weight,desired_joint*joint_weight]
         if hasattr(self,'root_acceleration_ref'):
             weight=float(getattr(self,'root_acceleration_weight',1.))
             task=np.r_[task,np.eye(m.nv)[3:6]*acc*weight]
             target_task=np.r_[target_task,np.asarray(self.root_acceleration_ref)*weight]
         grounded=bool(len(self.contact_points(d)))
-        if grounded:
+        if grounded and getattr(self,'stabilize_support',True):
             if not getattr(self,'grounded',True):
                 self.foot_position=d.xpos[self.foot].copy()
                 self.foot_rotation=Rotation.from_matrix(d.xmat[self.foot].reshape(3,3))
@@ -45,9 +47,12 @@ class NativeContactController(SingleSupportController):
             # determined by the simulator's compliant contact inverse, not a
             # fictitious rigid vertical acceleration constraint.
             rows=[0,1,3,4,5]
-            task=np.r_[task,foot[rows]*acc/20.];target_task=np.r_[target_task,desired[rows]/20.]
+            foot_weight=float(getattr(self,'foot_task_weight',.05))
+            task=np.r_[task,foot[rows]*acc*foot_weight];target_task=np.r_[target_task,desired[rows]*foot_weight]
         self.grounded=grounded
         hessian=task.T@task+np.eye(m.nv)*1e-6;linear=task.T@target_task
+        objective_scale=max(1.,float(np.linalg.norm(hessian,ord=np.inf)))
+        hessian=hessian/objective_scale;linear=linear/objective_scale
         horizon=.08;lower,upper=m.jnt_range[1:].T
         minimum,maximum=position_acceleration_bounds(qpos[7:],qvel[6:],lower+self.margin,upper-self.margin,horizon)
         minimum=np.maximum(minimum,(-self.velocity_limits-qvel[6:])/horizon)
@@ -66,8 +71,11 @@ class NativeContactController(SingleSupportController):
                 cache['jac']=derivative.T*acc/scale[:,None]
                 d.qacc[:]=x*acc;mujoco.mj_inverse(m,d)
             return cache['jac'] if jacobian else cache['force']
+        # Keep numerical optimization error inside the unchanged physical cap.
+        # The independent force/position acceptance tolerances remain unchanged.
+        motor_budget=1.-1e-4
         constraints=[{'type':'eq','fun':lambda x:inverse(x)[:6],'jac':lambda x:inverse(x,True)[:6]},
-            {'type':'ineq','fun':lambda x:np.r_[1-inverse(x)[6:],1+inverse(x)[6:]],
+            {'type':'ineq','fun':lambda x:np.r_[motor_budget-inverse(x)[6:],motor_budget+inverse(x)[6:]],
              'jac':lambda x:np.r_[-inverse(x,True)[6:],inverse(x,True)[6:]]}]
         initial=np.zeros(m.nv) if self.previous is None else self.previous
         initial=np.clip(initial,lb,ub)
@@ -83,5 +91,10 @@ class NativeContactController(SingleSupportController):
         self.previous=result.x.copy()
         return forces[6:]*self.effort,{'equality_residual':eq_error,'motor_ratio':motor,'iterations':int(result.nit),
             'solver_converged':bool(result.success),'solver_status':int(result.status),'bound_residual':bound_error,
+            'objective_scale':objective_scale,
             'com_acceleration_error':float(np.linalg.norm(com@(result.x*acc)-desired_com)),
+            'desired_com_acceleration':(desired_com+drift[1]).tolist(),
+            'achieved_com_acceleration':(com@(result.x*acc)+drift[1]).tolist(),
+            'desired_momentum_rate':(desired_momentum+drift[2]).tolist(),
+            'achieved_momentum_rate':(angular@(result.x*acc)+drift[2]).tolist(),
             'ground_force_world':d.qfrc_constraint[:3].tolist()}

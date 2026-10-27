@@ -1,11 +1,15 @@
 """Closed-loop single-support hold using bounded whole-body inverse dynamics."""
 import argparse
+import hashlib
 import json
+import os
+import sys
 import time
 from pathlib import Path
 import mujoco
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation
 
 
 def main():
@@ -17,8 +21,16 @@ def main():
     p.add_argument('--com-z-offset',type=float,default=0.,help='Smooth COM lift over 0.2 to 0.8 seconds')
     p.add_argument('--physics-feedback',action='store_true',help='Recompute commands at each native physics step')
     p.add_argument('--waist-posture-weight',type=float,default=.01)
+    p.add_argument('--support-reference',type=Path,help='Coordinated native-model kinematic reference')
+    p.add_argument('--reference-joint-weight',type=float,default=.1)
+    p.add_argument('--foot-task-weight',type=float,default=.05)
+    p.add_argument('--reference-root-weight',type=float,default=0.)
     p.add_argument('--seconds',type=float,default=1.);args=p.parse_args()
     args.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
+    program_source=Path(__file__).read_bytes();(args.out/'probe-source.py').write_bytes(program_source)
+    configuration={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}
+    configuration.update(pid=os.getpid(),interpreter=sys.executable,cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'))
+    (args.out/'configuration.json').write_text(json.dumps(configuration,indent=2))
     from supermimic.envs import SuperMimicEnvCfgArgs,make_env
     from supermimic.envs.state_io import StateIO
     from supermimic.policy.whole_body import SingleSupportController
@@ -55,11 +67,19 @@ def main():
             from supermimic.policy.native_inverse import NativeContactController
             controller_class=NativeContactController
         controller=controller_class(m,state[0,:m.nq].numpy(),effort,velocity,foot)
+        controller.foot_task_weight=args.foot_task_weight
         if args.native_inverse:
             weights=np.full(len(names),.01)
             for i,name in enumerate(names):
                 if name.startswith('waist_'):weights[i]=args.waist_posture_weight
             controller.joint_task_weight=weights
+        reference=None
+        if args.support_reference:
+            if not args.native_inverse:raise ValueError('Coordinated reference requires native inverse dynamics')
+            from supermimic.kinematics.support_reference import SupportReference
+            reference=SupportReference(args.support_reference)
+            np.testing.assert_allclose(reference.arrays['qpos'][0],state[0,:m.nq].numpy(),atol=1e-6)
+            controller.joint_task_weight=np.full(len(names),args.reference_joint_weight)
         if args.equilibrium:
             with np.load(args.equilibrium) as equilibrium:tau0=equilibrium['required_motor_torque']
             target=state[0,7:m.nq].numpy()+tau0/kp
@@ -73,6 +93,23 @@ def main():
         original_step=env.sim.step
         def command(time_s):
             q=env.sim.data.qpos[0].numpy().copy();v=env.sim.data.qvel[0].numpy().copy()
+            if reference is not None:
+                r=reference.sample(time_s-.2)
+                controller.foot_position=r['foot_position'];controller.foot_rotation=Rotation.from_quat(r['foot_quat'])
+                controller.foot_velocity_ref=r['foot_velocity'];controller.foot_acceleration_ref=r['foot_acceleration']
+                if args.reference_root_weight:
+                    current=Rotation.from_quat(q[3:7][[1,2,3,0]])
+                    desired=Rotation.from_quat(r['qpos'][3:7][[1,2,3,0]])
+                    error=current.inv().apply((desired*current.inv()).as_rotvec())
+                    target_v=current.inv().apply(desired.apply(r['qvel'][3:6]))
+                    target_a=current.inv().apply(desired.apply(r['qacc'][3:6]))
+                    controller.root_acceleration_ref=target_a+80*error+20*(target_v-v[3:6])
+                    controller.root_acceleration_weight=args.reference_root_weight
+                tau,report=controller.solve(q,v,com_target=r['com'],com_velocity=r['com_velocity'],
+                    com_acceleration=r['com_acceleration'],momentum_target=r['momentum'],momentum_rate=r['momentum_rate'],
+                    qref=r['qpos'],joint_velocity=r['qvel'][6:],joint_acceleration=r['qacc'][6:])
+                solutions.append({'time':time_s,**report})
+                return q[7:]+(tau+kd*v[6:])/kp
             u=float(np.clip((time_s-.2)/.6,0,1));offset=args.com_z_offset
             position=offset*u**3*(10-15*u+6*u*u)
             speed=offset*30*u*u*(1-u)**2/.6
@@ -108,10 +145,15 @@ def main():
         a=np.array(measurements)
         report={'status':status,'error':error,'elapsed_s':time.monotonic()-started,'physical_steps':len(states),
             'source':str(args.source),'approved_for_training':False,'purpose':__doc__,'solutions':solutions}
+        report['configuration']=configuration;report['source_sha256']=hashlib.sha256(program_source).hexdigest()
         report['controller']='native_contact_inverse' if args.native_inverse else 'rigid_contact_inverse'
         report['com_z_offset_m']=args.com_z_offset
         report['feedback_interval_s']=float(m.opt.timestep) if args.physics_feedback else env.step_dt
         report['waist_posture_weight']=args.waist_posture_weight
+        report['support_reference']=str(args.support_reference) if args.support_reference else None
+        report['reference_joint_weight']=args.reference_joint_weight if args.support_reference else None
+        report['foot_task_weight']=args.foot_task_weight
+        report['reference_root_weight']=args.reference_root_weight
         if 'original_foot_height' in locals():report['initial_condition']={'original_support_sole_height_m':original_foot_height,
             'requested_support_sole_height_m':args.initial_foot_height,'equilibrium':str(args.equilibrium) if args.equilibrium else None,'state_edits_after_start':False}
         if 'initial_forward' in locals():report['initial_native_forward']=initial_forward

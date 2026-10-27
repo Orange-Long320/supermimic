@@ -33,6 +33,11 @@ def main():
     p.add_argument('--ground-root-pitch',type=float,default=.4)
     p.add_argument('--extend-support',action='store_true')
     p.add_argument('--joint-task-weight',type=float,default=.01)
+    p.add_argument('--support-reference',type=Path)
+    p.add_argument('--foot-task-weight',type=float,default=.05)
+    p.add_argument('--scheduled-release',action='store_true',help='Start commanded leg retraction at the reference boundary; record actual flight independently')
+    p.add_argument('--vertical-task-weight',type=float,default=2.)
+    p.add_argument('--pitch-momentum-weight',type=float,default=.1)
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
     program_source=Path(__file__).read_text()
     (args.out/'probe-source.py').write_text(program_source)
@@ -43,7 +48,8 @@ def main():
     from supermimic.robots.dimensions import PROFILE
     snapshots={}
     for relative in ['src/supermimic/policy/native_inverse.py','src/supermimic/policy/whole_body.py',
-                     'src/supermimic/policy/joint_prediction.py','src/supermimic/data/entry_state.py']:
+                     'src/supermimic/policy/joint_prediction.py','src/supermimic/data/entry_state.py',
+                     'src/supermimic/kinematics/support_reference.py']:
         data=Path(relative).read_bytes();(args.out/Path(relative).name).write_bytes(data)
         snapshots[relative]=hashlib.sha256(data).hexdigest()
     env=make_env(SuperMimicEnvCfgArgs(npz_files=[str(args.source)],num_envs=1,action_noise_std=0.,
@@ -58,7 +64,21 @@ def main():
             assert eq['joint_names'].tolist()==names
             state[0,:m.nq]=torch.tensor(eq['qpos'],dtype=state.dtype);state[0,m.nq:]=0
         entry=None
-        if args.entry_vx:
+        reference=None
+        if args.support_reference:
+            from supermimic.kinematics.support_reference import SupportReference
+            reference=SupportReference(args.support_reference)
+            np.testing.assert_allclose(reference.arrays['qpos'][0],state[0,:m.nq].numpy(),atol=1e-6)
+            initial=reference.sample(0)
+            speed_limits=np.array([PROFILE['velocity_limit'][n] for n in names])
+            speed_ratio=float((abs(initial['qvel'][6:])/speed_limits).max())
+            if speed_ratio>1:raise ValueError('Reference initial joint velocity exceeds limits')
+            if args.delay and np.linalg.norm(initial['qvel'])>.01:raise ValueError('Moving reference requires zero delay')
+            state[0,m.nq:]=torch.tensor(initial['qvel'],dtype=state.dtype)
+            entry={'scope':'Initial state only; coordinated reference velocity','joint_speed_ratio':speed_ratio,
+                'com_velocity':initial['com_velocity'].tolist(),'momentum':initial['momentum'].tolist(),
+                'reference_sha256':hashlib.sha256(args.support_reference.read_bytes()).hexdigest()}
+        elif args.entry_vx:
             from supermimic.data.entry_state import entry_velocity_state
             speed_limit=np.array([PROFILE['velocity_limit'][n] for n in names])
             incoming,entry=entry_velocity_state(m,state[0,:m.nq].numpy(),np.zeros(m.nv),args.entry_vx,speed_limit)
@@ -69,8 +89,11 @@ def main():
         effort=np.array([PROFILE['effort_limit'][n] for n in names]);velocity=np.array([PROFILE['velocity_limit'][n] for n in names])
         q0=state[0,:m.nq].numpy().copy();foot=m.body('robot/left_ankle_roll_link').id
         controller=NativeContactController(m,q0,effort,velocity,foot)
+        controller.foot_task_weight=args.foot_task_weight
+        controller.com_task_weight=np.array([2.,2.,args.vertical_task_weight])
+        controller.momentum_task_weight=np.array([.1,args.pitch_momentum_weight,.1])
         metrics=BatchedDesignMetrics(m,torch.device('cpu'));lo,hi=m.jnt_range[1:].T
-        com0=controller.com_ref.copy();push=args.push_seconds;delay=args.delay;deadline=delay+push
+        com0=controller.com_ref.copy();push=reference.duration if reference else args.push_seconds;delay=args.delay;deadline=delay+push
         launch=com0+np.array([args.advance,0,args.rise]);launch_velocity=np.array([args.launch_vx,0,args.launch_vz])
         midpoint=com0+np.array([args.advance*(.55 if args.entry_vx else .2),0,-args.crouch])
         mid_v=np.array([args.entry_vx*.65,0,0])
@@ -108,21 +131,27 @@ def main():
         last_rotation=Rotation.from_quat(q0[3:7][[1,2,3,0]])
         root_rotation0=last_rotation
         root_curve=curve(np.zeros(3),np.array([0,args.ground_root_pitch,0]),push,np.array([0,2.,0]))
-        airborne=None;unfold=None;landed=None;air_count=0;flight_curve=None;unfold_curve=None
+        airborne=None;release=None;unfold=None;landed=None;air_count=0;flight_curve=None;unfold_curve=None;fold_duration=.15
         def sample(poly,t):return poly(t),poly.derivative()(t),poly.derivative(2)(t)
         def checked_step(*a,**kw):
-            nonlocal airborne,air_count,rotation_sum,last_rotation,flight_curve,unfold,unfold_curve,landed
+            nonlocal airborne,release,air_count,rotation_sum,last_rotation,flight_curve,unfold,unfold_curve,landed,fold_duration
             t=len(traces)*dt;q=env.sim.data.qpos[0].numpy().copy();v=env.sim.data.qvel[0].numpy().copy()
             measured=metrics(env.sim.data)[0].numpy();d=controller.data;d.qpos[:]=q;d.qvel[:]=v;mujoco.mj_forward(m,d)
             _,cj,hj=controller.jacobians(d);com=d.subtree_com[controller.root].copy();cv=cj@v;h=hj@v
             air_count=air_count+1 if min(measured[7:9])>.005 and t>delay else 0
             if airborne is None and air_count>=3:
                 airborne={'time':t,'com':com.copy(),'velocity':cv.copy(),'momentum':h.copy(),'rotation':rotation_sum}
-                flight_curve=curve(q[7:],tuck[7:],.15)
+                if release is None:
+                    fold_duration=max(.15,1.97*float((abs(tuck[7:]-q[7:])/velocity).max()))
+                    flight_curve=curve(q[7:],tuck[7:],fold_duration)
+            if args.scheduled_release and reference is not None and release is None and t>=deadline and airborne is None:
+                release={'time':t,'com':com.copy(),'velocity':cv.copy(),'momentum':h.copy(),'rotation':rotation_sum}
+                fold_duration=max(.15,1.97*float((abs(tuck[7:]-q[7:])/velocity).max()))
+                flight_curve=curve(q[7:],tuck[7:],fold_duration)
             if airborne is not None and landed is None and t-airborne['time']>.12 and min(measured[7:9])<=.003 and cv[2]<0:
                 landed={'time':t,'com':com.copy()}
             qref=q0.copy();jv=np.zeros(m.nv-6);ja=jv.copy();hr=np.zeros(3)
-            if airborne is None:
+            if airborne is None and release is None:
                 phase='support' if t<delay else 'push';u=float(np.clip(t-delay,0,push))
                 ct,cvt,cat=sample(com_curve,u);ht,hv,_=sample(hcurve,max(0.,u-momentum_start));hr=hv
                 if t<delay:ct=com0.copy();cvt=np.zeros(3);cat=np.zeros(3);ht=np.zeros(3);hr=np.zeros(3)
@@ -142,18 +171,37 @@ def main():
                     error_body=current.inv().apply((desired*current.inv()).as_rotvec())
                     controller.root_acceleration_ref=current.inv().apply(root_a)+60*error_body+15*(current.inv().apply(root_v)-v[3:6])
                     controller.root_acceleration_weight=args.ground_root_weight
+                if reference is not None:
+                    if t>deadline+.15:raise RuntimeError('Coordinated takeoff missed its deadline')
+                    r=reference.sample(min(t-delay,reference.duration))
+                    ct=r['com'];cvt=r['com_velocity'];cat=r['com_acceleration']
+                    ht=r['momentum'];hr=r['momentum_rate'];qref=r['qpos'];jv=r['qvel'][6:];ja=r['qacc'][6:]
+                    controller.foot_position=r['foot_position'];controller.foot_rotation=Rotation.from_quat(r['foot_quat'])
+                    controller.foot_velocity_ref=r['foot_velocity'];controller.foot_acceleration_ref=r['foot_acceleration']
+                    if t>deadline:
+                        over=t-deadline;ct=ct+cvt*over+np.array([0,0,-.5*9.81*over*over])
+                        cvt=cvt+np.array([0,0,-9.81*over]);cat=np.array([0,0,-9.81]);hr=np.zeros(3);jv[:]=0;ja[:]=0
+                    if args.ground_root_weight:
+                        current=Rotation.from_quat(q[3:7][[1,2,3,0]]);desired=Rotation.from_quat(r['qpos'][3:7][[1,2,3,0]])
+                        error=current.inv().apply((desired*current.inv()).as_rotvec())
+                        target_v=current.inv().apply(desired.apply(r['qvel'][3:6]));target_a=current.inv().apply(desired.apply(r['qacc'][3:6]))
+                        controller.root_acceleration_ref=target_a+80*error+20*(target_v-v[3:6])
             else:
                 if hasattr(controller,'root_acceleration_ref'):del controller.root_acceleration_ref
-                phase='flight';u=t-airborne['time'];ct=airborne['com']+airborne['velocity']*u+[0,0,-.5*9.81*u*u]
-                cvt=airborne['velocity']+np.array([0,0,-9.81*u]);cat=np.array([0,0,-9.81]);ht=airborne['momentum']
-                qref[7:],jv,ja=sample(flight_curve,min(u,.15))
-                if u>=.15:jv[:]=0;ja[:]=0
+                controller.stabilize_support=False
+                anchor=release if release is not None else airborne
+                if airborne is None and t-anchor['time']>.2:raise RuntimeError('Commanded release did not produce actual flight')
+                phase='release' if airborne is None else 'flight';u=t-anchor['time'];ct=anchor['com']+anchor['velocity']*u+[0,0,-.5*9.81*u*u]
+                cvt=anchor['velocity']+np.array([0,0,-9.81*u]);cat=np.array([0,0,-9.81]);ht=anchor['momentum']
+                qref[7:],jv,ja=sample(flight_curve,min(u,fold_duration))
+                if u>=fold_duration:jv[:]=0;ja[:]=0
                 if unfold is None and (rotation_sum>4.2 or u>.5):
                     unfold=t;unfold_curve=curve(q[7:],land[7:],.2)
                 if unfold is not None:
                     phase='unfold';u_land=min(t-unfold,.2);qref[7:],jv,ja=sample(unfold_curve,u_land)
                     if t-unfold>=.2:jv[:]=0;ja[:]=0
                 if landed is not None:
+                    controller.stabilize_support=True
                     phase='landing';ct=landed['com'].copy();ct[2]=com0[2];cvt=np.zeros(3);cat=np.zeros(3);ht=np.zeros(3)
             controller.joint_task_weight=args.joint_task_weight
             tau,solution=controller.solve(q,v,com_target=ct,com_velocity=cvt,com_acceleration=cat,
@@ -186,7 +234,7 @@ def main():
                 'speed_ratio':float(x[:,14].max()),'minimum_nonfoot_height':float(x[:,9].min()),'minimum_left_height':float(x[:,7].min()),
                 'minimum_right_height':float(x[:,8].min()),'rotation':float(x[-1,15]),'max_vz':float(x[:,1].max()),'max_Hy':float(x[:,3].max())}
             report['tail']={'up':float(x[-40:,11].min()),'speed':float(x[-40:,5].max()),'com_height':float(x[-40:,0].min())}
-        for name in ['airborne','landed']:
+        for name in ['airborne','release','landed']:
             value=locals().get(name)
             report[name]=None if value is None else {k:v.tolist() if isinstance(v,np.ndarray) else v for k,v in value.items()}
         if controller is not None and hasattr(controller,'failure'):
