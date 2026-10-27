@@ -56,6 +56,7 @@ def main():
     p.add_argument("--phase",choices=("takeoff","full"),default="full")
     p.add_argument("--warmstart",type=Path,help="Parameter vector, or an (N,D) grid for zero-iteration timing ablations")
     p.add_argument("--initial-command-margin",type=float,default=0.,help="Move the first position command inward for joints starting at a soft boundary; no state or actuator edits")
+    p.add_argument("--initial-knot",action="store_true",help="Search the initial residual command as well as the three preparation knots")
     p.add_argument("--tail-of",type=Path,help="Freeze a takeoff solution and search aerial/landing residuals instead")
     p.add_argument("--device",default="cpu")
     p.add_argument("--takeoff-frame",type=int)
@@ -200,14 +201,17 @@ def main():
     metrics=BatchedDesignMetrics(m,device)
     origins=env.scene.env_origins.cpu().numpy()
     rng=np.random.default_rng(args.seed)
-    dimension=1+3*len(groups)
+    base_dimension=1+3*len(groups)
+    dimension=base_dimension+(len(groups) if args.initial_knot and not args.tail_of else 0)
     fixed_preparation=np.load(args.tail_of)["parameters"].copy() if args.tail_of else None
     if args.tail_of:
-        assert args.phase=="full" and fixed_preparation.shape==(dimension,)
+        assert args.phase=="full" and fixed_preparation.shape in [(base_dimension,),(base_dimension+len(groups),)]
     mean=np.zeros(dimension);mean[0]=1. if args.tail_of else reference_preparation
     parameter_grid=None
     if args.warmstart:
         initial=np.load(args.warmstart)["parameters"]
+        if initial.shape[-1]==base_dimension and dimension>base_dimension:
+            initial=np.pad(initial,[(0,0)]*(initial.ndim-1)+[(0,dimension-base_dimension)])
         if initial.ndim==2:
             if args.iterations or initial.shape[1]!=dimension or args.num_envs%len(initial):
                 p.error('Parameter grid requires zero iterations, matching dimensions and equal replicas')
@@ -262,11 +266,14 @@ def main():
         "source_sha256":hashlib.sha256(args.source.read_bytes()).hexdigest(),
         "physics":f"Unmodified project make_env on {device}; only local design-process reset requests suppressed",
         "joint_acceptance":"Actual mechanical joint ranges at each physics step; soft limits retained as a separate regularizer",
+        "metric_state_alignment":"Post-integration derived fields refreshed before each control-frame geometry measurement",
         "hard_joint_ranges_rad":m.jnt_range[1:].tolist(),
         "takeoff_objective":"Continuous ascending flight; grounded extension is a fallback proxy with an explicit flight deficit penalty",
         "groups":groups,"residual_units":"fraction of actuator effort, mapped to existing position actions",
         "fixed_preparation_sha256":hashlib.sha256(args.tail_of.read_bytes()).hexdigest() if args.tail_of else None,
         "optimization_variables":"aerial guide time scale and air/landing residuals" if args.tail_of else "preparation duration and support/swing residuals",
+        "initial_knot_searched":bool(args.initial_knot and not args.tail_of),
+        "fixed_preparation_has_initial_knot":bool(fixed_preparation is not None and len(fixed_preparation)>base_dimension),
         "not_a_trained_policy":True},indent=2,default=str))
 
     @torch.no_grad()
@@ -310,7 +317,7 @@ def main():
             projection["inertia"]=tensor(1/np.diag(np.linalg.inv(mass))[6:])
             projection["interventions"][:]=0;projection["infeasible"][:]=0
         active_physics["record"]=True
-        offsets=torch.tensor(prep_parameters[:,1:].reshape(args.num_envs,3,len(groups)),dtype=torch.float32,device=device)
+        offsets=torch.tensor(prep_parameters[:,1:base_dimension].reshape(args.num_envs,3,len(groups)),dtype=torch.float32,device=device)
         tail_offsets=torch.tensor(parameters[:,1:].reshape(args.num_envs,3,len(groups)),dtype=torch.float32,device=device) if args.tail_of else None
         initial_action=policy(obs["policy"],obs["goal"])
         initial_state={"qpos":env.sim.data.qpos.cpu().numpy().copy(),
@@ -326,6 +333,8 @@ def main():
             corrected=np.where(near_lower,np.maximum(corrected,lower+args.initial_command_margin),corrected)
             corrected=np.where(near_upper,np.minimum(corrected,upper-args.initial_command_margin),corrected)
             initial_delta=torch.tensor((corrected-nominal)/action_scale,dtype=torch.float32,device=device)
+        if prep_parameters.shape[1]>base_dimension:
+            initial_delta+=torch.as_tensor(prep_parameters[:,base_dimension:],dtype=torch.float32,device=device)@mapping
         states=[];velocities=[];actions=[]
         records=[[] for _ in range(args.num_envs)]
         maxima=[{"soft":0.,"hard":0.,"speed":0.,"effort":0.,"nonfoot_penetration":0.,
@@ -386,6 +395,9 @@ def main():
             v=env.sim.data.qvel.cpu().numpy().copy()
             force=env.sim.data.actuator_force.cpu().numpy()
             states.append(q);velocities.append(v);actions.append(action.cpu().numpy())
+            # MuJoCo caches geometry before its final integration. Refresh
+            # derived fields so contact heights and orientation match saved q.
+            env.sim.forward()
             measurements=metrics(env.sim.data).cpu().numpy()
             for e in range(args.num_envs):
                 if args.phase=="takeoff" and completed_air[e]:continue
