@@ -72,6 +72,7 @@ def main():
     p.add_argument("--record-physics",action="store_true",help="Save every 5 ms qpos/qvel/actuator force for independent audits")
     p.add_argument("--hard-penalty-linear",type=float,default=0.,help="Additional exact-penalty term to avoid trading small hard-limit violations for score")
     p.add_argument("--local-refinement",action="store_true",help="Refine a warm start with smaller steps, top 1/16 elites and a best-anchored mean")
+    p.add_argument("--search-groups",help="Comma-separated first joint names of residual groups to optimize; retain all other warm-start coefficients")
     p.add_argument("--floor-penalty-linear",type=float,default=0.,help="Penalize nonfoot clearance below 5 mm and foot compression beyond 5 mm")
     p.add_argument("--checkpoint-grid",type=Path,nargs='+',help="Evaluate immutable checkpoints in the same environment; zero iterations only")
     p.add_argument("--landing-ckpt",type=Path,help="Diagnostic phase-specific frozen landing controller")
@@ -203,6 +204,15 @@ def main():
     rng=np.random.default_rng(args.seed)
     base_dimension=1+3*len(groups)
     dimension=base_dimension+(len(groups) if args.initial_knot and not args.tail_of else 0)
+    search_mask=np.ones(dimension,dtype=bool)
+    if args.search_groups:
+        labels=[g[0][0] for g in groups];selected=args.search_groups.split(',')
+        if not selected or any(n not in labels for n in selected):p.error('Unknown residual group; use first joint names shown in configuration groups')
+        search_mask[1:]=False
+        for name in selected:
+            group=labels.index(name)
+            for knot in range(3):search_mask[1+knot*len(groups)+group]=True
+            if dimension>base_dimension:search_mask[base_dimension+group]=True
     fixed_preparation=np.load(args.tail_of)["parameters"].copy() if args.tail_of else None
     if args.tail_of:
         assert args.phase=="full" and fixed_preparation.shape in [(base_dimension,),(base_dimension+len(groups),)]
@@ -274,6 +284,7 @@ def main():
         "optimization_variables":"aerial guide time scale and air/landing residuals" if args.tail_of else "preparation duration and support/swing residuals",
         "initial_knot_searched":bool(args.initial_knot and not args.tail_of),
         "fixed_preparation_has_initial_knot":bool(fixed_preparation is not None and len(fixed_preparation)>base_dimension),
+        "searched_parameter_indices":np.flatnonzero(search_mask).tolist(),
         "not_a_trained_policy":True},indent=2,default=str))
 
     @torch.no_grad()
@@ -553,6 +564,7 @@ def main():
         for iteration in range(args.iterations):
             iteration_start=time.monotonic()
             population=np.clip(rng.multivariate_normal(mean,covariance,args.population),lo,hi)
+            population[:,~search_mask]=mean[~search_mask]
             population[0]=mean
             if best is not None:population[1]=best[1]
             outcomes=[]
