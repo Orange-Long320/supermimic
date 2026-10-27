@@ -35,11 +35,26 @@ def main():
     p.add_argument("--tuck-hip",type=float,default=-2.)
     p.add_argument("--tuck-knee",type=float,default=2.1)
     p.add_argument("--tuck-waist",type=float,default=0.)
+    p.add_argument("--support-pitch",type=float,default=0.,
+                   help="Final foot pitch: positive rocks around toe, negative around heel")
+    p.add_argument("--entry-vx",type=float,default=0.,help="Incoming COM speed retained in the motion, not an external force")
+    p.add_argument("--entry-vz",type=float,default=0.)
+    p.add_argument("--crouch-pitch",type=float,default=.15)
+    p.add_argument("--balance-upper-body",action="store_true",
+                   help="Use waist/shoulder roll for balance instead of forcing the leg to twist")
+    p.add_argument("--initial-com-y-offset",type=float,default=0.)
+    p.add_argument("--entry-profile",choices=("braking","direct"),default="braking")
+    p.add_argument("--launch-vx",type=float)
+    p.add_argument("--launch-pitch",type=float,default=1.)
+    p.add_argument("--pre-tuck",action="store_true",help="Finish the free-leg backswing and begin folding before takeoff")
+    p.add_argument("--tuck-time",type=float)
+    p.add_argument("--unfold-time",type=float)
     p.add_argument("--projection-iterations",type=int,default=2)
     p.add_argument("--root-orientation-slack",type=float,default=.6,
                    help="Allow contact IK to adjust torso orientation (radians per axis)")
     args=p.parse_args()
-    from supermimic.data.motion_convert import load_g1_model,convert_csv_to_npz
+    from supermimic.data.motion_convert import load_g1_model
+    from supermimic.data.physics_motion import export_qpos_motion
     from supermimic.data.centroidal_projection import project_flight
     from supermimic.data.contact_wrench import solve_contact_effort
     from supermimic.robots.dimensions import PROFILE
@@ -92,14 +107,30 @@ def main():
             new_position=position.copy();new_position[2]+=.005-moved[:,2].min()
             anchors[side]=(new_position,new_orientation)
             flattening[side]=float(correction.magnitude())
+    support_position,support_rotation=anchors["left"]
+    support_pivot=None
+    for g,vertices in meshes:
+        if m.geom_bodyid[g]!=feet["left"]:continue
+        old_position=d.xpos[feet["left"]]
+        old_rotation=d.xmat[feet["left"]].reshape(3,3)
+        world=vertices@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
+        local=(world-old_position)@old_rotation
+        flat=local@support_rotation.as_matrix().T+support_position
+        low=flat[flat[:,2]<flat[:,2].min()+.003]
+        x=low[:,0].max() if args.support_pitch>=0 else low[:,0].min()
+        edge=low[abs(low[:,0]-x)<.008]
+        support_pivot=np.array([x,edge[:,1].mean(),flat[:,2].min()])
     indices={s:np.array([j(f"{s}_{n}_joint") for n in ["hip_pitch","hip_roll","hip_yaw","knee","ankle_pitch","ankle_roll"]]) for s in feet}
+    upper_indices=np.array([j(n) for n in ["waist_roll_joint","left_shoulder_roll_joint","right_shoulder_roll_joint"]],dtype=int) if args.balance_upper_body else np.array([],dtype=int)
     errors=[]
-    def fit_pose(reference,target,active,previous=None):
-        columns=np.concatenate([np.arange(3),*[indices[s] for s in active]])
-        lo=np.concatenate([[-3,-3,.15],*[lower[indices[s]-7] for s in active]])
-        hi=np.concatenate([[3,3,1.2],*[upper[indices[s]-7] for s in active]])
+    def fit_pose(reference,target,active,previous=None,initial_soft=False):
+        columns=np.concatenate([np.arange(3),*[indices[s] for s in active],upper_indices])
+        pose_lower=soft_lower+args.joint_margin if initial_soft else lower
+        pose_upper=soft_upper-args.joint_margin if initial_soft else upper
+        lo=np.r_[[-3,-3,.15],pose_lower[columns[3:]-7]]
+        hi=np.r_[[3,3,1.2],pose_upper[columns[3:]-7]]
         if previous is not None:
-            delta=np.r_[np.full(3,.08),np.full(len(columns)-3,.35)]
+            delta=np.r_[np.full(3,.08),.9*np.array([PROFILE["velocity_limit"][names[k-7]] for k in columns[3:]])/50]
             lo=np.maximum(lo,previous[columns]-delta);hi=np.minimum(hi,previous[columns]+delta)
         # Fixing torso orientation as well as sole pose and COM overconstrains
         # the bounded leg chain. Solve orientation too, with a posture prior.
@@ -118,7 +149,9 @@ def main():
             for side in active:
                 position,rotation=foot[side];want_position,want_rotation=anchors[side]
                 values += [(position-want_position)*2000,(want_rotation.inv()*rotation).as_rotvec()*300]
-            values += [(x[:count]-reference[columns])*.03,x[count:]*.1]
+            values += [(x[:count]-reference[columns])*.03,x[count:]*(np.array([.1,.1,.5]) if args.balance_upper_body else .1)]
+            if args.balance_upper_body:
+                values += [np.array([row[j(f"{side}_hip_yaw_joint")]-ready[j(f"{side}_hip_yaw_joint")] for side in feet])*.5]
             return np.concatenate(values)
         initial=np.r_[reference[columns],np.zeros(3)]
         if previous is not None:
@@ -152,9 +185,11 @@ def main():
     swing_speed=6. if args.swing=="backward" else -6.
     start=ready.copy()
     start[j("right_hip_pitch_joint")]=hip_values[0];start[j("right_knee_joint")]=knee_values[0]
+    if args.balance_upper_body:
+        for side in feet:start[j(f"{side}_shoulder_pitch_joint")]=.2
     start[3:7]=Rotation.from_euler("xyz",[-.12,.05,0]).as_quat()[[3,0,1,2]]
-    first_com=np.r_[anchors["left"][0][:2]+[.03,0],args.initial_com_z]
-    start=fit_pose(start,first_com,["left"])
+    first_com=np.r_[anchors["left"][0][:2]+[.03,args.initial_com_y_offset],args.initial_com_z]
+    start=fit_pose(start,first_com,["left"],initial_soft=args.balance_upper_body)
     # Neutral, feet-flat crouched landing, independently of the video pose.
     landing=ready.copy();landing[3:7]=Rotation.from_euler("y",6.).as_quat()[[3,0,1,2]]
     for side in feet:
@@ -175,7 +210,7 @@ def main():
     fps=50.;takeoff=round(args.preparation*fps);land=takeoff+round(args.flight*fps)
     duration=takeoff/fps;air_duration=(land-takeoff)/fps
     vertical_velocity=(landing_z-args.launch_com_z)/air_duration+.5*9.81*air_duration
-    advance=args.com_advance;horizontal_velocity=3*advance/duration
+    advance=args.com_advance;horizontal_velocity=3*advance/duration if args.launch_vx is None else args.launch_vx
     end_com=np.r_[first_com[:2]+[advance,0],args.launch_com_z]
     land_com=end_com+np.array([horizontal_velocity*air_duration,0,landing_z-args.launch_com_z])
     landing[:3]+=land_com-fk(landing)[0]
@@ -186,26 +221,43 @@ def main():
     shoot=[]
     for refinement in range(args.projection_iterations):
         times=np.array([0,.35*duration/.9,.55*duration/.9,duration])
-        end_vector=np.array([0.,1.,0.]);angle=np.linalg.norm(end_vector)
-        cross=np.array([[0,0,1],[0,0,0],[-1,0,0]],dtype=float)
-        jr=np.eye(3)-(1-np.cos(angle))/angle**2*cross+(angle-np.sin(angle))/angle**3*cross@cross
-        vectors=[Rotation.from_euler("xyz",[-.12,.05,0]).as_rotvec(),
-                 Rotation.from_euler("xyz",[-.20,.15,0]).as_rotvec(),
-                 Rotation.from_euler("xyz",[-.20,.15,0]).as_rotvec(),end_vector]
+        end_vector=np.array([0.,args.launch_pitch,0.]);angle=np.linalg.norm(end_vector)
+        cross=np.array([[0,0,args.launch_pitch],[0,0,0],[-args.launch_pitch,0,0]],dtype=float)
+        jr=np.eye(3) if angle<1e-8 else np.eye(3)-(1-np.cos(angle))/angle**2*cross+(angle-np.sin(angle))/angle**3*cross@cross
+        vectors=[Rotation.from_quat(start[[4,5,6,3]]).as_rotvec() if args.balance_upper_body else Rotation.from_euler("xyz",[-.12,.05,0]).as_rotvec(),
+                 Rotation.from_euler("xyz",[-.20,args.crouch_pitch,0]).as_rotvec(),
+                 Rotation.from_euler("xyz",[-.20,args.crouch_pitch,0]).as_rotvec(),end_vector]
         rotation_curve=BPoly.from_derivatives(times,[[v,np.zeros(3),np.zeros(3)] if k<3 else
             [v,np.linalg.solve(jr,omega),np.zeros(3)] for k,v in enumerate(vectors)])
-        z_curve=CubicHermiteSpline(times,[first_com[2],args.crouch_com_z,args.crouch_com_z,args.launch_com_z],[0,0,0,vertical_velocity])
+        z_curve=CubicHermiteSpline(times,[first_com[2],args.crouch_com_z,args.crouch_com_z,args.launch_com_z],[args.entry_vz,0,0,vertical_velocity])
+        braking_distance=min(.8*advance,.5*max(args.entry_vx,0)*times[1])
+        x_curve=CubicHermiteSpline(times,[0,braking_distance,braking_distance,advance],
+                                  [args.entry_vx,0,0,horizontal_velocity]) if args.entry_vx else None
+        if args.entry_vx and args.entry_profile=="direct":
+            x_curve=CubicHermiteSpline([0,duration],[0,advance],[args.entry_vx,horizontal_velocity])
         hip_curve=CubicHermiteSpline(times,hip_values,[0,0,0,swing_speed])
         knee_curve=CubicHermiteSpline(times,knee_values,[0,0,0,-2])
+        if args.pre_tuck:
+            swing_times=np.array([0,.3,.6,1])*duration
+            hip_curve=CubicHermiteSpline(swing_times,[-.6,-.4,.8,-1.5],[0,8,0,-15])
+            knee_curve=CubicHermiteSpline(swing_times,[1.5,2.2,1.0,2.3],[0,0,0,8])
         arm_curve=CubicHermiteSpline(times,[.2,.7,.7,-.7],[0,0,0,-4])
         for frame in range(takeoff+1):
             t=frame/fps;u=t/duration
+            if frame==0 and args.balance_upper_body:
+                q[frame]=start;errors.append(errors[0].copy());continue
+            phase=float(np.clip((u-.55/.9)/(1-.55/.9),0,1))
+            w=phase**3*(10-15*phase+6*phase*phase)
+            rock=Rotation.from_rotvec([0.,args.support_pitch*w,0.])
+            anchors["left"]=(support_pivot+rock.apply(support_position-support_pivot),rock*support_rotation)
             row=start.copy()
             row[3:7]=Rotation.from_rotvec(rotation_curve(t)).as_quat()[[3,0,1,2]]
             row[j("right_hip_pitch_joint")]=hip_curve(t)
             row[j("right_knee_joint")]=knee_curve(t)
+            if args.pre_tuck:row[j("waist_pitch_joint")]=.2*u**3*(10-15*u+6*u*u)
             for side in feet:row[j(f"{side}_shoulder_pitch_joint")]=arm_curve(t)
-            desired=np.r_[first_com[:2]+[advance*u**3,0],float(z_curve(t))]
+            x=float(x_curve(t)) if x_curve is not None else advance*u**3
+            desired=np.r_[first_com[:2]+[x,0],float(z_curve(t))]
             q[frame]=fit_pose(row,desired,["left"],q[frame-1] if frame else None)
         if args.stance_only:
             stance=q[:takeoff+1]
@@ -216,8 +268,20 @@ def main():
                     heights[side].append(min(float((v@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])[:,2].min())
                         for g,v in meshes if m.geom_bodyid[g]==body))
             static=static_support(stance[0])
+            velocity=np.zeros((len(stance)-1,m.nv))
+            for k in range(len(velocity)):
+                mujoco.mj_differentiatePos(m,velocity[k],1/fps,stance[k],stance[k+1])
+            v1,v2=np.zeros(m.nv),np.zeros(m.nv)
+            mujoco.mj_differentiatePos(m,v1,-1/fps,stance[-1],stance[-2])
+            mujoco.mj_differentiatePos(m,v2,-2/fps,stance[-1],stance[-3])
+            d.qpos[:]=stance[-1];d.qvel[:]=2*v1-v2;mujoco.mj_forward(m,d)
+            momentum=np.zeros((3,m.nv));com_jac=np.zeros((3,m.nv))
+            mujoco.mj_angmomMat(m,d,momentum,root);mujoco.mj_jacSubtreeCom(m,d,com_jac,root)
+            speed_limits=np.array([PROFILE["velocity_limit"][n] for n in names])
             args.out.mkdir(parents=True,exist_ok=False)
             np.savez(args.out/"stance-qpos.npz",qpos=stance,fps=np.array([fps]))
+            np.savetxt(args.out/"stance.csv",np.c_[stance[:,:3],stance[:,[4,5,6,3]],stance[:,7:]],delimiter=",",fmt="%.10f")
+            export_qpos_motion(m,stance,args.out/"stance-fk.npz",fps,source=args.out/"stance.csv")
             report={"approved_for_training":False,"stance_only":True,
                 "arguments":{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
                 "maximum_com_error_m":max(e["com_error_m"] for e in errors),
@@ -225,6 +289,9 @@ def main():
                 "maximum_scaled_constraint":max(e["maximum_scaled_constraint"] for e in errors),
                 "maximum_hard_violation_rad":float(np.maximum(np.maximum(hard_lower-stance[:,7:],stance[:,7:]-hard_upper),0).max()),
                 "maximum_soft_violation_rad":float(np.maximum(np.maximum(soft_lower-stance[:,7:],stance[:,7:]-soft_upper),0).max()),
+                "launch_angular_momentum_world":(momentum@d.qvel).tolist(),
+                "launch_com_velocity_world":(com_jac@d.qvel).tolist(),
+                "maximum_joint_speed_ratio":float((abs(velocity[:,6:])/speed_limits).max()),
                 "minimum_foot_height_m":{side:min(values) for side,values in heights.items()},
                 "initial_static_contact_feasible":bool(static.success),
                 "initial_static_peak_motor_ratio":float(static.x[-1]) if static.success else None,
@@ -242,13 +309,17 @@ def main():
             tuck[j(f"{side}_elbow_joint")-7]=-1.4
         tuck[j("waist_pitch_joint")-7]=args.tuck_waist
         tuck=np.clip(tuck,lower,upper)
-        joint_curve=CubicHermiteSpline([0,.4*air_duration,.6*air_duration,air_duration],
+        tuck_time=.4*air_duration if args.tuck_time is None else args.tuck_time
+        unfold_time=.4*air_duration if args.unfold_time is None else args.unfold_time
+        if not 0<tuck_time<air_duration-unfold_time<air_duration:
+            raise ValueError("Tuck and unfold durations leave no valid aerial hold")
+        joint_curve=CubicHermiteSpline([0,tuck_time,air_duration-unfold_time,air_duration],
             np.array([q[takeoff,7:],tuck,tuck,landing[7:]]),
             np.array([v_launch,np.zeros(len(names)),np.zeros(len(names)),np.zeros(len(names))]))
         for frame in range(takeoff+1,land+1):
             t=(frame-takeoff)/fps
             q[frame,7:]=np.clip(joint_curve(t),lower,upper)
-            q[frame,3:7]=Rotation.from_euler("y",1+5*t/air_duration).as_quat()[[3,0,1,2]]
+            q[frame,3:7]=Rotation.from_euler("y",args.launch_pitch+(6-args.launch_pitch)*t/air_duration).as_quat()[[3,0,1,2]]
             target=end_com+np.array([horizontal_velocity*t,0,vertical_velocity*t-.5*9.81*t*t])
             q[frame,:3]+=target-fk(q[frame])[0]
         q[land]=landing
@@ -274,7 +345,7 @@ def main():
     static=static_support(q[0])
     args.out.mkdir(parents=True,exist_ok=False)
     np.savetxt(args.out/"webster.csv",np.c_[q[:,:3],q[:,[4,5,6,3]],q[:,7:]],delimiter=",",fmt="%.10f")
-    convert_csv_to_npz(args.out/"webster.csv",args.out/"webster.npz",fps,fps)
+    export_qpos_motion(m,q,args.out/"webster.npz",fps,source=args.out/"webster.csv")
     report={"purpose":"Robot-designed kinematic guide, not a trained policy or dynamic feasibility certificate",
         "arguments":{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         "approved_for_training":False,"ready_sha256":hashlib.sha256(args.ready_config.read_bytes()).hexdigest(),
