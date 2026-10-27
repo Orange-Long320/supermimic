@@ -8,6 +8,9 @@ SM_GPU=${3:?physical free GPU 2 or 3}
 SM_WARM=${4:-}
 SM_GUIDE=${5:?independent guide NPZ}
 SM_TAIL=${6:-}
+SM_CHECKPOINT=${7:-logs/webster_transfer_short_20261027_r1_train/ckpt_latest.pt}
+SM_TARGET_HY=${8:-25}
+SM_TARGET_VZ=${9:-2.4}
 [[ "$SM_TAG" =~ ^[a-zA-Z0-9_-]+$ ]]
 [[ "$SM_PHASE" == takeoff || "$SM_PHASE" == full ]]
 [[ "$SM_GPU" =~ ^[23]$ ]]
@@ -26,7 +29,6 @@ nvidia-smi -i "$SM_GPU" > "$SM_RUN/gpu-before.txt"
 cp scripts/data/optimize_webster_policy_cpu.py "$SM_RUN/designer-source.py"
 cp src/supermimic/data/design_metrics.py "$SM_RUN/metrics-source.py"
 cp "${BASH_SOURCE[0]}" "$SM_RUN/launch.sh"
-SM_CHECKPOINT=logs/webster_transfer_short_20261027_r1_train/ckpt_latest.pt
 sha256sum "$SM_CHECKPOINT" "$SM_GUIDE" scripts/data/optimize_webster_policy_cpu.py \
   src/supermimic/data/design_metrics.py > "$SM_RUN/inputs.sha256"
 SM_SECONDS=1.2
@@ -35,6 +37,7 @@ SM_CMD=(nice -n 19 timeout --signal=TERM --kill-after=30 2100
   bash scripts/run_local.sh scripts/robot.py x2_ultra scripts/data/optimize_webster_policy_cpu.py
   --ckpt "$SM_CHECKPOINT" --source "$SM_GUIDE" --out "$SM_RUN/design"
   --device cuda:0 --phase "$SM_PHASE" --seconds "$SM_SECONDS"
+  --target-hy "$SM_TARGET_HY" --target-vz "$SM_TARGET_VZ"
   --num-envs 128 --population 256 --iterations 160 --max-seconds 1800)
 if [[ -n "$SM_WARM" ]]; then
   sha256sum "$SM_WARM" >> "$SM_RUN/inputs.sha256"

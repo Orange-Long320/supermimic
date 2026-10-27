@@ -14,6 +14,8 @@ def main():
     parser.add_argument("--npz", type=Path, required=True)
     parser.add_argument("--contacts", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--joint-limit-policy",choices=("soft","hard"),default="soft",
+                        help="Report both; explicitly select whether soft posture limits are mandatory")
     args = parser.parse_args()
     from supermimic.robots.paths import select_robot
     select_robot(args.robot, check_assets=True)
@@ -74,7 +76,8 @@ def main():
               "minimum_collision_height_m": minimum, "minimum_nonfoot_collision_height_m": nonfoot,
               "flight_com_acceleration_max_error_m_per_s2": error, "joint_limit_violation_rad": violation,
               "soft_joint_limit_factor": factor, "soft_joint_limit_violation_rad": soft_violation,
-              "approved_for_bounded_simulation": bool(finite and minimum[0] > -.005 and nonfoot[0] > .005 and error < .02 and violation < 1e-4 and soft_violation < 1e-4),
+              "joint_limit_policy":args.joint_limit_policy,
+              "approved_for_bounded_simulation": bool(finite and minimum[0] > -.005 and nonfoot[0] > .005 and error < .02 and violation < 1e-4 and (args.joint_limit_policy=="hard" or soft_violation < 1e-4)),
               "limitations": "Geometric/contact/COM checks only; angular momentum, actuator feasibility and policy success remain unvalidated."}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2) + "\n")

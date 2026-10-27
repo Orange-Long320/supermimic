@@ -35,6 +35,8 @@ def main():
     p.add_argument("--device",default="cpu")
     p.add_argument("--takeoff-frame",type=int)
     p.add_argument("--landing-frame",type=int)
+    p.add_argument("--target-vz",type=float,default=2.4)
+    p.add_argument("--target-hy",type=float,default=25.)
     args=p.parse_args()
     assert args.population%args.num_envs==0
     # Redesigned preparations have different contact frames. Never silently
@@ -114,6 +116,7 @@ def main():
     centre=m.jnt_range[1:].mean(axis=1)
     half=.45*np.diff(m.jnt_range[1:],axis=1).ravel()
     lower,upper=centre-half,centre+half
+    hard_lower,hard_upper=m.jnt_range[1:].T
     from supermimic.data.design_metrics import BatchedDesignMetrics
     metrics=BatchedDesignMetrics(m,device)
     origins=env.scene.env_origins.cpu().numpy()
@@ -131,7 +134,7 @@ def main():
     start=time.monotonic()
     evaluations=0
     best=None
-    physics_limits=np.zeros((args.num_envs,3))
+    physics_limits=np.zeros((args.num_envs,4))
     physics_mask=np.ones(args.num_envs,dtype=bool)
     original_step=env.sim.step
     active_physics={"record":False}
@@ -142,6 +145,7 @@ def main():
             v=env.sim.data.qvel.cpu().numpy()
             f=env.sim.data.actuator_force.cpu().numpy()
             limits=np.c_[np.maximum(np.maximum(lower-q[:,7:],q[:,7:]-upper),0).max(axis=1),
+                np.maximum(np.maximum(hard_lower-q[:,7:],q[:,7:]-hard_upper),0).max(axis=1),
                 (np.abs(v[:,6:])/velocity_limit).max(axis=1),(np.abs(f)/effort).max(axis=1)]
             physics_limits[physics_mask]=np.maximum(physics_limits[physics_mask],limits[physics_mask])
         return result
@@ -151,6 +155,8 @@ def main():
         "checkpoint_sha256":hashlib.sha256(args.ckpt.read_bytes()).hexdigest(),
         "source_sha256":hashlib.sha256(args.source.read_bytes()).hexdigest(),
         "physics":f"Unmodified project make_env on {device}; only local design-process reset requests suppressed",
+        "joint_acceptance":"Actual mechanical joint ranges at each physics step; soft limits retained as a separate regularizer",
+        "hard_joint_ranges_rad":m.jnt_range[1:].tolist(),
         "groups":groups,"residual_units":"fraction of actuator effort, mapped to existing position actions",
         "fixed_preparation_sha256":hashlib.sha256(args.tail_of.read_bytes()).hexdigest() if args.tail_of else None,
         "optimization_variables":"aerial guide time scale and air/landing residuals" if args.tail_of else "preparation duration and support/swing residuals",
@@ -191,7 +197,7 @@ def main():
             initial_delta=torch.tensor((corrected-nominal)/action_scale,dtype=torch.float32,device=device)
         states=[];velocities=[];actions=[]
         records=[[] for _ in range(args.num_envs)]
-        maxima=[{"soft":0.,"speed":0.,"effort":0.,"nonfoot_penetration":0.,
+        maxima=[{"soft":0.,"hard":0.,"speed":0.,"effort":0.,"nonfoot_penetration":0.,
                  "foot_penetration":0.,"minimum_nonfoot_height":1e3} for _ in range(args.num_envs)]
         completed_air=np.zeros(args.num_envs,dtype=bool)
         air_run=np.zeros(args.num_envs,dtype=int)
@@ -206,7 +212,7 @@ def main():
             residual*=torch.clamp(1-(step*.02-clock["preparation"])/.12,0,1)[:,None]
             if args.tail_of:
                 after=torch.clamp(step*.02-clock["preparation"],min=0)
-                air_duration=.5*clock["air_scale"]
+                air_duration=reference_flight*clock["air_scale"]
                 tail_f=torch.clamp(after/air_duration,0,1)*3
                 tail_index=tail_f.long().clamp(max=2)
                 tail_fraction=tail_f-tail_index
@@ -251,14 +257,14 @@ def main():
             pitch=np.unwrap([r["pitch"] for r in rows])
             air=[i for i,r in enumerate(rows) if min(r["feet"].values())>.02 and r["nonfoot_height"]>.005]
             single=[i for i,r in enumerate(rows) if r["feet"]["left"]<.01 and r["feet"]["right"]>.04]
-            event_cost=min((r["vz"]-2.4)**2*4+np.sum((np.array(r["momentum"])-[0,25,0])**2)/64
+            event_cost=min((r["vz"]-args.target_vz)**2*4+np.sum((np.array(r["momentum"])-[0,args.target_hy,0])**2)/64
                 +sum(max(.025-h,0)*60 for h in r["feet"].values()) for r in rows if .25<=r["time"]<=1.2)
             physical=maxima[e]
             # For a completed takeoff, stats stop at that event. Full-clip
             # checks always use every 5 ms physics step, not only video frames.
-            for k,key in enumerate(("soft","speed","effort")):
+            for k,key in enumerate(("soft","hard","speed","effort")):
                 physical[key]=max(physical[key],float(physics_limits[e,k]))
-            cost=event_cost+physical["soft"]**2*10000+max(physical["speed"]-1,0)**2*20
+            cost=event_cost+physical["hard"]**2*10000+physical["soft"]**2*20+max(physical["speed"]-1,0)**2*20
             cost+=physical["nonfoot_penetration"]**2*2000+physical["foot_penetration"]**2*2000
             if args.phase=="full":
                 cost+=max(5.7-pitch.max()+pitch[0],0)**2*2
@@ -270,7 +276,7 @@ def main():
             first_air=next((i for i in range(len(rows)-2) if all(j in air for j in range(i,i+3))),None)
             single_at_launch=first_air is not None and sum(i in single for i in range(max(0,first_air-8),first_air))>=4
             launch_row=rows[min(first_air+2,len(rows)-1)] if first_air is not None else None
-            takeoff_passed=(completed_air[e] and single_at_launch and physical["soft"]<1e-4
+            takeoff_passed=(completed_air[e] and single_at_launch and physical["hard"]<1e-4
                 and launch_row["vz"]>1.5 and launch_row["momentum"][1]>20
                 and physical["speed"]<=1 and physical["effort"]<=1.00001
                 and physical["minimum_nonfoot_height"]>.005 and physical["foot_penetration"]<.005)
@@ -284,7 +290,7 @@ def main():
                 and air_rotation>3.5
                 and min(rows[i]["up_z"] for i in air)<-.7 and rows[-1]["up_z"]>.85
                 and landed
-                and physical["soft"]<1e-4 and physical["speed"]<=1 and physical["effort"]<=1.00001
+                and physical["hard"]<1e-4 and physical["speed"]<=1 and physical["effort"]<=1.00001
                 and physical["minimum_nonfoot_height"]>.005 and physical["foot_penetration"]<.005)
             reports.append({"cost":float(cost),"maxima":physical,"air_frames":len(air),"single_left_support_frames":len(single),
                 "maximum_forward_rotation_rad":float(pitch.max()-pitch[0]),"final":rows[-1],
