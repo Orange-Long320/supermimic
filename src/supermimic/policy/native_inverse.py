@@ -90,6 +90,18 @@ class NativeContactController(SingleSupportController):
             rows=[0,1,3,4,5]
             foot_weight=float(getattr(self,'foot_task_weight',.05))
             task=np.r_[task,foot[rows]*acc*foot_weight];target_task=np.r_[target_task,desired[rows]*foot_weight]
+            for body,position_ref,rotation_ref in getattr(self,'additional_support_feet',[]):
+                position_jac=np.zeros((3,m.nv));rotation_jac=np.zeros((3,m.nv))
+                future_position_jac=np.zeros((3,m.nv));future_rotation_jac=np.zeros((3,m.nv))
+                mujoco.mj_jacBody(m,d,position_jac,rotation_jac,body)
+                mujoco.mj_jacBody(m,f,future_position_jac,future_rotation_jac,body)
+                support_jac=np.r_[position_jac,rotation_jac]
+                support_drift=(np.r_[future_position_jac,future_rotation_jac]-support_jac)@qvel/epsilon
+                current_rotation=Rotation.from_matrix(d.xmat[body].reshape(3,3))
+                error=np.r_[position_ref-d.xpos[body],(rotation_ref*current_rotation.inv()).as_rotvec()]
+                desired=400*error-40*support_jac@qvel-support_drift
+                task=np.r_[task,support_jac[rows]*acc*foot_weight]
+                target_task=np.r_[target_task,desired[rows]*foot_weight]
         self.grounded=grounded
         hessian=task.T@task+np.eye(m.nv)*1e-6;linear=task.T@target_task
         objective_scale=max(1.,float(np.linalg.norm(hessian,ord=np.inf)))

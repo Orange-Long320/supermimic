@@ -24,6 +24,9 @@ def main():
     p.add_argument('--com-z-offset',type=float,default=0.,help='Smooth COM lift over 0.2 to 0.8 seconds')
     p.add_argument('--physics-feedback',action='store_true',help='Recompute commands at each native physics step')
     p.add_argument('--waist-posture-weight',type=float,default=.01)
+    p.add_argument('--joint-posture-weight',type=float,default=.01)
+    p.add_argument('--standing-root-weight',type=float,default=0.,help='Soft initial root-attitude feedback during a hold')
+    p.add_argument('--support-both',action='store_true',help='Also stabilize right-foot tangents and orientation in the native-contact hold')
     p.add_argument('--support-reference',type=Path,help='Coordinated native-model kinematic reference')
     p.add_argument('--reference-joint-weight',type=float,default=.1)
     p.add_argument('--foot-task-weight',type=float,default=.05)
@@ -49,6 +52,7 @@ def main():
     p.add_argument('--release-after',type=float,default=.4)
     p.add_argument('--seconds',type=float,default=1.);args=p.parse_args()
     if args.integration_aware and not args.native_inverse:p.error('Integration-aware control requires native inverse dynamics')
+    if args.support_both and not args.native_inverse:p.error('Two-foot feedback requires native inverse dynamics')
     args.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
     program_source=Path(__file__).read_bytes();(args.out/'probe-source.py').write_bytes(program_source)
     configuration={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}
@@ -111,8 +115,13 @@ def main():
         controller=controller_class(m,state[0,:m.nq].numpy(),effort,velocity,foot)
         controller.integration_aware=args.integration_aware
         controller.foot_task_weight=args.foot_task_weight
+        if args.support_both:
+            native_data=mujoco.MjData(m);native_data.qpos[:]=state[0,:m.nq].numpy();mujoco.mj_kinematics(m,native_data)
+            right=m.body('robot/right_ankle_roll_link').id
+            controller.additional_support_feet=[(right,native_data.xpos[right].copy(),Rotation.from_matrix(native_data.xmat[right].reshape(3,3)))]
         if args.native_inverse:
-            weights=np.full(len(names),.01)
+            controller.foot_geometry_floor=args.foot_floor
+            weights=np.full(len(names),args.joint_posture_weight)
             for i,name in enumerate(names):
                 if name.startswith('waist_'):weights[i]=args.waist_posture_weight
             controller.joint_task_weight=weights
@@ -219,6 +228,10 @@ def main():
                 solutions.append({'time':time_s,'phase':'preparation' if args.vertical_demand is not None else 'reference',**report})
                 return q[7:]+(tau+kd*v[6:])/kp
             u=float(np.clip((time_s-.2)/.6,0,1));offset=args.com_z_offset
+            if args.standing_root_weight:
+                current=Rotation.from_quat(q[3:7][[1,2,3,0]])
+                controller.root_acceleration_ref=60*(current.inv()*initial_rotation).as_rotvec()-15*v[3:6]
+                controller.root_acceleration_weight=args.standing_root_weight
             position=offset*u**3*(10-15*u+6*u*u)
             speed=offset*30*u*u*(1-u)**2/.6
             acceleration=offset*60*u*(1-3*u+2*u*u)/.6**2
