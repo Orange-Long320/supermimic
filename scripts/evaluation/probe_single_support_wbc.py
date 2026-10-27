@@ -33,6 +33,10 @@ def main():
     p.add_argument('--foot-floor',type=float)
     p.add_argument('--pitch-momentum',type=float,default=0.)
     p.add_argument('--pitch-weight',type=float,default=0.)
+    p.add_argument('--side-momentum-weight',type=float,default=.1)
+    p.add_argument('--lateral-weight',type=float,default=2.)
+    p.add_argument('--forward-weight',type=float,default=2.)
+    p.add_argument('--preparation-com-weight',type=float,nargs=3)
     p.add_argument('--free-joint-weight',type=float,default=.02)
     p.add_argument('--root-weight',type=float,default=1.)
     p.add_argument('--swing-hip',type=float)
@@ -113,13 +117,15 @@ def main():
                 if name.startswith('waist_'):weights[i]=args.waist_posture_weight
             controller.joint_task_weight=weights
         if args.vertical_demand is not None:
-            if not args.native_inverse or args.support_reference:raise ValueError('Vertical diagnostic requires native inverse without a guide')
-            controller.com_task_weight=np.array([2.,2.,2.])
-            controller.momentum_task_weight=np.array([.1,args.pitch_weight,.1])
+            if not args.native_inverse:raise ValueError('Vertical diagnostic requires native inverse')
+            controller.com_task_weight=np.array([args.forward_weight,args.lateral_weight,2.])
+            push_com_weights=controller.com_task_weight.copy()
+            controller.momentum_task_weight=np.array([args.side_momentum_weight,args.pitch_weight,args.side_momentum_weight])
             controller.joint_task_weight=np.array([.02 if n.startswith('left_') else args.free_joint_weight for n in names])
             if args.free_knee_weight is not None:controller.joint_task_weight[names.index('right_knee_joint')]=args.free_knee_weight
             controller.root_acceleration_weight=args.root_weight
-            controller.stabilize_support=False
+            vertical_weights=controller.joint_task_weight.copy()
+            controller.stabilize_support=bool(args.support_reference)
             controller.foot_geometry_floor=args.foot_floor
             controller.root_acceleration_hard=args.lock_root_orientation
         initial_rotation=Rotation.from_quat(state[0,3:7].numpy()[[1,2,3,0]])
@@ -131,6 +137,8 @@ def main():
             reference=SupportReference(args.support_reference)
             np.testing.assert_allclose(reference.arrays['qpos'][0],state[0,:m.nq].numpy(),atol=1e-6)
             controller.joint_task_weight=np.full(len(names),args.reference_joint_weight)
+        push_start_time=reference.duration+.2 if reference is not None and args.vertical_demand is not None else 0.
+        preparation_done=push_start_time==0.;preparation_result=None
         if args.equilibrium:
             with np.load(args.equilibrium) as equilibrium:tau0=equilibrium['required_motor_torque']
             target=state[0,7:m.nq].numpy()+tau0/kp
@@ -143,12 +151,23 @@ def main():
         env.termination_manager.compute=lambda:torch.zeros(1,dtype=torch.bool)
         original_step=env.sim.step
         def command(time_s):
-            nonlocal release_time
+            nonlocal release_time,preparation_done,preparation_result,initial_rotation
             q=env.sim.data.qpos[0].numpy().copy();v=env.sim.data.qvel[0].numpy().copy()
-            if args.vertical_demand is not None:
+            if args.vertical_demand is not None and time_s>=push_start_time:
+                elapsed=time_s-push_start_time
+                if not preparation_done:
+                    controller.data.qpos[:]=q;controller.data.qvel[:]=v;mujoco.mj_forward(m,controller.data)
+                    _,cj,hj=controller.jacobians(controller.data)
+                    preparation_result={'time_s':time_s,'com':controller.data.subtree_com[controller.root].tolist(),
+                        'com_velocity':(cj@v).tolist(),'momentum':(hj@v).tolist()}
+                    controller.com_ref=controller.data.subtree_com[controller.root].copy();controller.qref=q.copy()
+                    controller.joint_task_weight=vertical_weights.copy();controller.com_task_weight=push_com_weights.copy();controller.stabilize_support=False
+                    controller.root_acceleration_weight=args.root_weight
+                    initial_rotation=Rotation.from_quat(q[3:7][[1,2,3,0]])
+                    preparation_done=True
                 knee=names.index('left_knee_joint') if 'left_knee_joint' in names else next(i for i,n in enumerate(names) if n.startswith('left_knee'))
                 # Only commands change after the initial state; release is a motor retraction command.
-                if release_time is None and (q[7+knee]<args.release_on_knee or time_s>=args.release_after):release_time=time_s
+                if release_time is None and (q[7+knee]<args.release_on_knee or elapsed>=args.release_after):release_time=time_s
                 controller.data.qpos[:]=q;controller.data.qvel[:]=v;mujoco.mj_forward(m,controller.data)
                 _,com_jac,h_jac=controller.jacobians(controller.data)
                 if release_time is not None:
@@ -174,13 +193,15 @@ def main():
                 target_v=np.array([0.,0.,(com_jac@v)[2]])
                 posture=controller.qref.copy()
                 if args.swing_hip is not None:
-                    u=np.clip(time_s/.15,0,1);u=u*u*(3-2*u)
+                    u=np.clip(elapsed/.15,0,1);u=u*u*(3-2*u)
                     i=7+names.index('right_hip_pitch_joint');posture[i]=(1-u)*posture[i]+u*args.swing_hip
                 tau,report=controller.solve(q,v,com_target=controller.com_ref,com_velocity=target_v,
                     com_acceleration=np.array([0.,0.,args.vertical_demand]),momentum_target=np.array([0.,args.pitch_momentum,0.]),qref=posture)
                 solutions.append({'time':time_s,'phase':'vertical_push',**report})
                 return q[7:]+(tau+kd*v[6:])/kp
             if reference is not None:
+                if args.vertical_demand is not None and args.preparation_com_weight is not None:
+                    controller.com_task_weight=np.asarray(args.preparation_com_weight)
                 r=reference.sample(time_s-.2)
                 controller.foot_position=r['foot_position'];controller.foot_rotation=Rotation.from_quat(r['foot_quat'])
                 controller.foot_velocity_ref=r['foot_velocity'];controller.foot_acceleration_ref=r['foot_acceleration']
@@ -195,7 +216,7 @@ def main():
                 tau,report=controller.solve(q,v,com_target=r['com'],com_velocity=r['com_velocity'],
                     com_acceleration=r['com_acceleration'],momentum_target=r['momentum'],momentum_rate=r['momentum_rate'],
                     qref=r['qpos'],joint_velocity=r['qvel'][6:],joint_acceleration=r['qacc'][6:])
-                solutions.append({'time':time_s,**report})
+                solutions.append({'time':time_s,'phase':'preparation' if args.vertical_demand is not None else 'reference',**report})
                 return q[7:]+(tau+kd*v[6:])/kp
             u=float(np.clip((time_s-.2)/.6,0,1));offset=args.com_z_offset
             position=offset*u**3*(10-15*u+6*u*u)
@@ -237,6 +258,8 @@ def main():
         a=np.array(measurements)
         report={'status':status,'error':error,'elapsed_s':time.monotonic()-started,'physical_steps':len(states),
             'source':str(args.source),'approved_for_training':False,'purpose':__doc__,'solutions':solutions}
+        report['preparation_result']=preparation_result if 'preparation_result' in locals() else None
+        report['push_start_time_s']=push_start_time if 'push_start_time' in locals() else 0.
         report['entry_audit']=entry_audit if 'entry_audit' in locals() else None
         report['release_time_s']=release_time if 'release_time' in locals() else None
         report['configuration']=configuration;report['source_sha256']=hashlib.sha256(program_source).hexdigest()

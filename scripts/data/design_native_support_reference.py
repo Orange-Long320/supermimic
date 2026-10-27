@@ -12,8 +12,10 @@ def main():
     p.add_argument('--model',type=Path,required=True);p.add_argument('--equilibrium',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True);p.add_argument('--seconds',type=float,default=.6)
     p.add_argument('--rise',type=float,default=.04);p.add_argument('--advance',type=float,default=0.)
+    p.add_argument('--lateral',type=float,default=0.)
     p.add_argument('--entry-vx',type=float,default=0.);p.add_argument('--launch-vx',type=float,default=0.)
     p.add_argument('--launch-vz',type=float,default=0.);p.add_argument('--root-pitch',type=float,default=0.)
+    p.add_argument('--root-roll',type=float,default=0.)
     p.add_argument('--root-pitch-velocity',type=float,default=0.);p.add_argument('--toe-angle',type=float,default=0.)
     p.add_argument('--swing-hip',type=float);p.add_argument('--swing-knee',type=float)
     p.add_argument('--swing-hip-velocity',type=float,default=0.)
@@ -50,12 +52,13 @@ def main():
     def curve(first,last,velocity0=None,velocity1=None):
         return BPoly.from_derivatives([0,duration],[[first,np.zeros_like(first) if velocity0 is None else velocity0,np.zeros_like(first)],
             [last,np.zeros_like(last) if velocity1 is None else velocity1,np.zeros_like(last)]])
-    com_curve=curve(com0,com0+[args.advance,0,args.rise],np.array([args.entry_vx,0,0]),np.array([args.launch_vx,0,args.launch_vz]))
-    pitch_curve=curve(np.zeros(3),np.array([0,args.root_pitch,0]),velocity1=np.array([0,args.root_pitch_velocity,0]))
+    com_curve=curve(com0,com0+[args.advance,args.lateral,args.rise],np.array([args.entry_vx,0,0]),np.array([args.launch_vx,0,args.launch_vz]))
+    pitch_curve=curve(np.zeros(3),np.array([args.root_roll,args.root_pitch,0]),velocity1=np.array([0,args.root_pitch_velocity,0]))
     if args.ramped_launch:
+        if args.root_roll:raise ValueError('Ramped launch roll timing is not specified')
         v0=np.array([args.entry_vx,0,0]);v1=np.array([args.launch_vx,0,args.launch_vz])
         displacement=(2*v0+v1)*duration/3
-        requested=np.array([args.advance,0,args.rise])
+        requested=np.array([args.advance,args.lateral,args.rise])
         if not np.allclose(displacement,requested,atol=1e-8):
             raise ValueError(f'Constant-jerk launch displacement must be {displacement.tolist()}')
         com_curve=BPoly.from_derivatives([0,duration],[[com0,v0,np.zeros(3)],
@@ -95,7 +98,7 @@ def main():
         for stage in np.linspace(0,duration,13):
             fp,fr=foot_pose(stage)
             endpoint,endpoint_error=ik.fit(swing_curve(stage),com_curve(stage),fp,fr,Rotation.from_rotvec(pitch_curve(stage))*rootrot)
-        angle=np.array([0,args.root_pitch,0])
+        angle=np.array([args.root_roll,args.root_pitch,0])
         if endpoint_error['com_error_m']>.002 or endpoint_error['root_orientation_error_rad']>.02:
             raise ValueError('Endpoint IK did not satisfy constraints for momentum matching')
         eps=1e-6;p0,r0=foot_pose(duration-eps);p1,r1=foot_pose(duration)
