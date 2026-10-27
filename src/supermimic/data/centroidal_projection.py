@@ -40,6 +40,13 @@ def project_flight(model, poses, start, end, fps, seed):
     joints = CubicSpline(times, q[:, 7:], axis=0)
     am = np.zeros((3, model.nv))
     target = Rotation.from_quat(q[start:end + 1, [4, 5, 6, 3]])
+    # Endpoint orientation alone cannot distinguish one full forward flip
+    # from a small backward rotation. Preserve the guide's signed cumulative
+    # world-Y rotation, including its winding, throughout shooting.
+    def forward_progress(rotation):
+        increments=(rotation[1:]*rotation[:-1].inv()).as_rotvec()[:,1]
+        return np.r_[0.,np.cumsum(increments)]
+    target_progress=forward_progress(target)
     com = []
     for row in q[start:end + 1]:
         d.qpos[:] = row
@@ -71,7 +78,9 @@ def project_flight(model, poses, start, end, fps, seed):
     def error(momentum):
         rotation = Rotation.from_quat(integrate(momentum)[:, [1, 2, 3, 0]])
         delta = (target.inv() * rotation).as_rotvec()
-        return np.r_[delta[1:-1].ravel() * .1, delta[-1] * 10]
+        progress=forward_progress(rotation)-target_progress
+        return np.r_[delta[1:-1].ravel() * .1, delta[-1] * 10,
+                     progress[1:-1],progress[-1]*10]
 
     fit = least_squares(error, seed, max_nfev=30, diff_step=1e-4, ftol=1e-6, xtol=1e-6, gtol=1e-6)
     q[start:end + 1, 3:7] = integrate(fit.x)
