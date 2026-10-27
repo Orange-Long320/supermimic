@@ -1,0 +1,15 @@
+{
+  "source_url": "https://www.bilibili.com/video/BV1Xy4y1g7xA/",
+  "source_start_seconds": 256.2,
+  "source_end_seconds": 257.6,
+  "source_fps": 25,
+  "takeoff_source_interval_seconds": [256.48, 256.52],
+  "landing_source_interval_seconds": [256.96, 257.0],
+  "reference_fps": 30,
+  "takeoff_reference_frame": 9,
+  "landing_reference_frame": 24,
+  "annotation": "Manual visual contact annotation; timing uncertainty approximately one source frame. Reference frame 9 is the last support boundary; frame 24 is the first landing boundary.",
+  "gravity_m_per_s2": 9.81,
+  "sole_clearance_m": 0.005,
+  "method": "Fit robot COM ballistics between visually annotated contacts; preserve recovered joint angles and root orientation. Candidate reference, not measured ground truth or proof of dynamic feasibility."
+}

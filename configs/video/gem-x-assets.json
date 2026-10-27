@@ -1,0 +1,91 @@
+{
+  "source_repository": "https://github.com/NVlabs/GEM-X",
+  "source_commit": "20555befe2fbbe5b2015e1fff7ff214dc18ea9d6",
+  "model_revision": "4fce057963671fd95cd4154297944397e7b5a9a0",
+  "soma_revision": "d281db2d01553f7230c56e764cec00fe27ef23f7",
+  "files": [
+    {
+      "path": "weights/LICENSE",
+      "url": "https://huggingface.co/nvidia/GEM-X/resolve/4fce057963671fd95cd4154297944397e7b5a9a0/LICENSE",
+      "size": 11387,
+      "sha256": "d1a7d615ab8eff4de143b1456f46dabf232f54daf0fcf9a70442bb6f637a9e95"
+    },
+    {
+      "path": "weights/body_config.json",
+      "url": "https://huggingface.co/nvidia/GEM-X/resolve/4fce057963671fd95cd4154297944397e7b5a9a0/body_config.json",
+      "size": 1086,
+      "sha256": "61c29c72b93f88789ecb7beb21c526c78e92e24ffbce91d91e51984272b26368"
+    },
+    {
+      "path": "weights/body_s240000.ckpt",
+      "url": "https://huggingface.co/nvidia/GEM-X/resolve/4fce057963671fd95cd4154297944397e7b5a9a0/body_s240000.ckpt",
+      "size": 3538753341,
+      "sha256": "e244d27f2834eb6382c5f6b9cbf2a38681b685514a1b2e86f8f3d2592d614959"
+    },
+    {
+      "path": "weights/body_video_native77.yaml",
+      "url": "https://huggingface.co/nvidia/GEM-X/resolve/4fce057963671fd95cd4154297944397e7b5a9a0/body_video_native77.yaml",
+      "size": 1286,
+      "sha256": "796a306aca61e0c928888a23d74996740795bfa7cd1735bdc184d1e5274a02d7"
+    },
+    {
+      "path": "weights/motion_native77.yaml",
+      "url": "https://huggingface.co/nvidia/GEM-X/resolve/4fce057963671fd95cd4154297944397e7b5a9a0/motion_native77.yaml",
+      "size": 823,
+      "sha256": "5d5dff8ee849d3bcf53c28ce60340114980fe59062fa427c1f343655849cad8d"
+    },
+    {
+      "path": "weights/motion_native77_e774_s292175.ckpt",
+      "url": "https://huggingface.co/nvidia/GEM-X/resolve/4fce057963671fd95cd4154297944397e7b5a9a0/motion_native77_e774_s292175.ckpt",
+      "size": 187134331,
+      "sha256": "c7790f4587e518bcea40cb8281c9be2233d37f6caa668835462542760dcf82aa"
+    },
+    {
+      "path": "weights/motion_stats_raw.npz",
+      "url": "https://huggingface.co/nvidia/GEM-X/resolve/4fce057963671fd95cd4154297944397e7b5a9a0/motion_stats_raw.npz",
+      "size": 21320,
+      "sha256": "b7719b634e0fc1f001005605d117d77448c8d4a110923149df58529c68112ed6"
+    },
+    {
+      "path": "weights/vitpose.pth",
+      "url": "https://huggingface.co/nvidia/GEM-X/resolve/4fce057963671fd95cd4154297944397e7b5a9a0/vitpose.pth",
+      "size": 3388483384,
+      "sha256": "8e3eec71dbd6bb745eba8c6debe3e4b97bcfd1d01f300099f2eedf50b9a80c8e"
+    },
+    {
+      "path": "soma/LICENSE",
+      "url": "https://huggingface.co/nvidia/SOMA-X/resolve/d281db2d01553f7230c56e764cec00fe27ef23f7/LICENSE",
+      "size": 11387,
+      "sha256": "d1a7d615ab8eff4de143b1456f46dabf232f54daf0fcf9a70442bb6f637a9e95"
+    },
+    {
+      "path": "soma/SOMA_neutral.npz",
+      "url": "https://huggingface.co/nvidia/SOMA-X/resolve/d281db2d01553f7230c56e764cec00fe27ef23f7/SOMA_neutral.npz",
+      "size": 26608121,
+      "sha256": "5829af4a5333abdba5ad449360b868faacee99d395971e62f35c0e7169432b63"
+    },
+    {
+      "path": "soma/SOMA_procedural_transforms.json",
+      "url": "https://huggingface.co/nvidia/SOMA-X/resolve/d281db2d01553f7230c56e764cec00fe27ef23f7/SOMA_procedural_transforms.json",
+      "size": 20045,
+      "sha256": "9853e19ab51625ffaa7d9e7ccf0e443272c2740837604e6bacd66604e8edf509"
+    },
+    {
+      "path": "soma/SOMA_template_rig.usda",
+      "url": "https://huggingface.co/nvidia/SOMA-X/resolve/d281db2d01553f7230c56e764cec00fe27ef23f7/SOMA_template_rig.usda",
+      "size": 28306038,
+      "sha256": "a952cb7bdf4ccd801e355d53122d395b985b69d0d9181439edad5081bb171856"
+    },
+    {
+      "path": "soma/correctives_model.pt",
+      "url": "https://huggingface.co/nvidia/SOMA-X/resolve/d281db2d01553f7230c56e764cec00fe27ef23f7/correctives_model.pt",
+      "size": 70549157,
+      "sha256": "411d061a651051a7a4ec941543495d35eac21e5a7a69c8ce042b89cd12772a43"
+    }
+  ],
+  "source_archive": {
+    "url": "https://codeload.github.com/NVlabs/GEM-X/tar.gz/20555befe2fbbe5b2015e1fff7ff214dc18ea9d6",
+    "size": 71440533,
+    "sha256": "926d28c0d3036d7c7898b0d097972018e18551e9a937eea0e597da30d5e71924"
+  }
+}

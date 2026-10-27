@@ -1,0 +1,28 @@
+{
+  "adaptation": {
+    "url": "https://github.com/tianshuwu/supermimic-retargeted.git",
+    "commit": "ff69a0e5305126eb5b80b323bcd815805bc3df4e"
+  },
+  "mjlab": {
+    "url": "https://github.com/mujocolab/mjlab.git",
+    "commit": "8bb2bc9e187797689ec82c78c35019afd2fd0376"
+  },
+  "lafan1": {
+    "url": "https://github.com/ubisoft/ubisoft-laforge-animation-dataset.git",
+    "commit": "94084601bacdf9cc3764b5c73daaeccae6035fac",
+    "archive": "lafan1/lafan1.zip",
+    "sha256": "ea918082b500a5d158e9d3aa39039df04cd42e25f5c02fe8f7e88e8e9365a977"
+  },
+  "python_runtime": {
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260602/cpython-3.12.13%2B20260602-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+    "sha256": "191b5188b42886fb8a14968d714571e8f3d1cef92ac7ad4c7e24cc4d0929b194"
+  },
+  "torch_linux_cp312": {
+    "version": "2.14.1+cu130",
+    "sha256": "5359b255ac68c0cabb8293952b38e00f0d1a570815cd87f19b61af702c071410"
+  },
+  "warp_linux_main": {
+    "version": "1.18.0",
+    "sha256": "090962bfae7dd22ade0d8e0258f41635e0e58980f15bcc9e7a7d312819dfe440"
+  }
+}
