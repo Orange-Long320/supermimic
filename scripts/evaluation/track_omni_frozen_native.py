@@ -17,9 +17,16 @@ def main():
     p.add_argument('--motion',type=Path,required=True,help='Explicit 50 Hz FK motion, with original joint/body names')
     p.add_argument('--checkpoint',type=Path,required=True)
     p.add_argument('--seconds',type=float,required=True)
+    p.add_argument('--start-frame',type=int,default=0,help='Explicit 50 Hz source entry; a nonzero start is not automatically a complete climb')
+    p.add_argument('--entry-velocity-mode',choices=['reference','zero'],default='reference',help='Initial state only; no subsequent state rewrites')
+    p.add_argument('--joint-barrier-margin',type=float,help='Optional conservative position-command barrier inside unchanged mechanical ranges')
+    p.add_argument('--joint-barrier-frequency',type=float,default=35.)
+    p.add_argument('--joint-projection-source',type=Path,help='Explicit private project_joint_commands module for the optional servo guard')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
     if a.out.exists() or a.seconds<=0:p.error('New output and positive duration required')
+    if a.start_frame<0:p.error('Source entry must be nonnegative')
+    if a.joint_barrier_margin is not None and (a.joint_barrier_margin<=0 or a.joint_barrier_frequency<=0 or not a.joint_projection_source):p.error('Barrier requires positive bounds and an explicit private projection source')
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
     import mujoco
@@ -47,10 +54,12 @@ def main():
     scale=torch.tensor([PROFILE['action_scale'][n] for n in names],dtype=torch.float32)
     effort=np.array([PROFILE['effort_limit'][n] for n in names],dtype=float)
     lib=MotionLibrary([a.motion],tuple(PROFILE['tracked_bodies']),defaults,device='cpu')
+    if a.start_frame>=lib.num_frames:raise ValueError('Source entry beyond the clip')
     anchor_name=PROFILE['anchor_body'];anchor=m.body('robot/'+anchor_name).id;anchor_index=lib.body_names.index(anchor_name)
     anchor_obs=bool(cfg['env'].get('anchor_obs',False));future_frames=int(cfg['env'].get('future_frames',10))
     if policy.cfg.goal_dim!=future_frames*72+(9 if anchor_obs else 0):raise ValueError('Frozen policy goal interface differs')
-    q,v=lib.ref_qpos_qvel(torch.tensor([0]));d.qpos[:]=q[0].numpy();d.qvel[:]=v[0].numpy()
+    q,v=lib.ref_qpos_qvel(torch.tensor([a.start_frame]));d.qpos[:]=q[0].numpy();d.qvel[:]=v[0].numpy()
+    if a.entry_velocity_mode=='zero':d.qvel[:]=0.
     columns=m.jnt_qposadr[m.actuator_trnid[:,0]];vcols=m.jnt_dofadr[m.actuator_trnid[:,0]]
     if not np.array_equal(columns,np.arange(7,38)):raise ValueError('Actuator joint order differs')
     d.ctrl[:]=d.qpos[columns]-m.actuator_biasprm[:,2]*d.qvel[vcols]/m.actuator_gainprm[:,0]
@@ -58,6 +67,16 @@ def main():
     a.out.mkdir(parents=True);(a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (a.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'cpu_threads':1,'gpu':None,'configuration':{k:str(v) if isinstance(v,Path) else v for k,v in vars(a).items()}},indent=2))
     states=[np.r_[d.qpos.copy(),d.qvel.copy()]];controls=[];actions=[];rows=[]
+    projector=None;projection_counts=np.zeros(31,dtype=int);infeasible_counts=np.zeros(31,dtype=int)
+    if a.joint_barrier_margin is not None:
+        import importlib.util
+        module_spec=importlib.util.spec_from_file_location('omni_joint_projection_snapshot',a.joint_projection_source)
+        module=importlib.util.module_from_spec(module_spec);module_spec.loader.exec_module(module);projector=module.project_joint_commands
+        (a.out/'joint-projection-as-run.py').write_bytes(a.joint_projection_source.read_bytes())
+        if np.any(np.diff(m.jnt_range[1:],axis=1).ravel()<=2*a.joint_barrier_margin):raise ValueError('Barrier margin leaves no joint interior')
+        tensor=lambda x:torch.as_tensor(np.asarray(x).copy(),dtype=torch.float64)
+        kp,kd,cap,lo,hi=[tensor(x) for x in [m.actuator_gainprm[:,0],-m.actuator_biasprm[:,2],effort,m.jnt_range[1:,0],m.jnt_range[1:,1]]]
+        mass=np.zeros((m.nv,m.nv))
     previous=torch.zeros((1,31));xi=torch.zeros((1,XI_DIM));history=[];obs_trace=[];goal_trace=[]
     def observe():
         return analytic_observation(torch.tensor(np.r_[d.qpos,d.qvel][None],dtype=torch.float32),previous,xi,defaults)
@@ -65,7 +84,7 @@ def main():
     status='completed';failure=None
     with torch.no_grad():
         for tick in range(round(a.seconds*50)):
-            frame=torch.tensor([min(tick+1,lib.num_frames-1)])
+            frame=torch.tensor([min(a.start_frame+tick+1,lib.num_frames-1)])
             goal=lib.goal_window(frame,future_frames)
             if anchor_obs:
                 rel=anchor_relative_obs(torch.tensor(d.xpos[anchor][None],dtype=torch.float32),
@@ -77,8 +96,14 @@ def main():
             if not np.isfinite(target).all():raise ValueError('Nonfinite policy command')
             actions.append(action[0].numpy().copy())
             for substep in range(4):
-                mujoco.mj_forward(m,d);d.ctrl[:]=target;mujoco.mj_forward(m,d)
-                controls.append(target.copy());mujoco.mj_step(m,d);mujoco.mj_forward(m,d)
+                mujoco.mj_forward(m,d);executed=target
+                if projector is not None:
+                    mujoco.mj_fullM(m,d,mass);effective=1/np.diag(np.linalg.inv(mass))[6:]
+                    projected,changed,infeasible=projector(tensor(target),tensor(d.qpos[7:]),tensor(d.qvel[6:]),tensor(d.qacc[6:]),
+                        tensor(d.actuator_force),kp,kd,cap,tensor(effective),lo,hi,a.joint_barrier_margin,a.joint_barrier_frequency)
+                    executed=projected.numpy();projection_counts+=changed.numpy();infeasible_counts+=infeasible.numpy()
+                d.ctrl[:]=executed;mujoco.mj_forward(m,d)
+                controls.append(executed.copy());mujoco.mj_step(m,d);mujoco.mj_forward(m,d)
                 states.append(np.r_[d.qpos.copy(),d.qvel.copy()])
                 hard=float(np.maximum(np.maximum(m.jnt_range[1:,0]-d.qpos[7:],d.qpos[7:]-m.jnt_range[1:,1]),0.).max())
                 up=float(d.xmat[int(m.jnt_bodyid[0])].reshape(3,3)[2,2])
@@ -93,11 +118,15 @@ def main():
     np.savez_compressed(a.out/'trajectory.npz',state=np.array(states),controls=np.array(controls),dt=np.array(.005))
     np.savez_compressed(a.out/'policy-interface.npz',observation=np.array(obs_trace),goal=np.array(goal_trace),actions=np.array(actions),fps=np.array([50.]))
     report={'status':status,'failure':failure,'seconds_executed':len(controls)*.005,'state_resets_after_entry':0,
-        'configuration':{'model':str(a.model),'motion':str(a.motion),'checkpoint':str(a.checkpoint)},
+        'configuration':{k:str(v) if isinstance(v,Path) else v for k,v in vars(a).items()},
         'model_sha256':hashlib.sha256(a.model.read_bytes()).hexdigest(),'checkpoint_sha256':checkpoint_sha,
         'reference_sha256':hashlib.sha256(a.motion.read_bytes()).hexdigest(),'maximum_hard_violation_rad':max(x['hard_violation_rad'] for x in rows),
         'maximum_motor_ratio':max(x['motor_ratio'] for x in rows),'last':rows[-1],'policy_evaluation':True,'policy_weight_updates':0,
         'terrain_observation':'Existing motion/anchor interface only; no new box features added to the frozen policy',
+        'policy_alone':projector is None,'joint_projection':{'margin':a.joint_barrier_margin,'frequency':a.joint_barrier_frequency,
+            'interventions_per_joint':projection_counts.tolist(),'infeasible_predictions_per_joint':infeasible_counts.tolist(),
+            'source_sha256':hashlib.sha256(a.joint_projection_source.read_bytes()).hexdigest() if projector else None,
+            'scope':'Approximate acceleration barrier; only position commands change. Actual trajectory audit remains authoritative.'},
         'training_approved':False,'complete_climb_verified':False,'rows':rows,'scope':__doc__}
     (a.out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({k:v for k,v in report.items() if k!='rows'},indent=2))
 
