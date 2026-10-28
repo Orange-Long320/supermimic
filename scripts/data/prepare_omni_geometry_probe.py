@@ -44,13 +44,15 @@ def main():
     time_map=None
     if warp:
         begin=a.brake_frame/fps;stop=a.stop_frame/fps;braking=2*(stop-begin)
-        clock=np.arange(round((begin+braking+a.hold_seconds)*200)+1)/200.
+        # Pad the stationary tail to a control tick. This preserves the ascent
+        # clock when exporting 50 Hz goals instead of stretching its prefix.
+        clock=np.arange(int(np.ceil((begin+braking+a.hold_seconds)*50))*4+1)/200.
         u=np.clip((clock-begin)/braking,0.,1.)
         slowed=begin+braking*(u-2.5*u**4+3*u**5-u**6)
         query=np.where(clock<=begin,clock,np.where(clock>=begin+braking,stop,slowed))
         if np.any(np.diff(query)<-1e-12):raise ValueError('Source-time mapping must remain monotone')
         time_map={'kind':'ascent_then_hold','input_fps':fps,'brake_frame':a.brake_frame,'stop_frame':a.stop_frame,
-            'braking_duration_s':braking,'hold_seconds':a.hold_seconds,
+            'braking_duration_s':braking,'hold_seconds':float(clock[-1]-begin-braking),'requested_hold_seconds':a.hold_seconds,
             'description':'Source-time velocity smoothly falls from 1 to 0 with zero acceleration at both ends; original ascent prefix retained'}
     cols=np.r_[np.arange(3),np.arange(7,38)];dense=np.zeros((len(query),38))
     dense[:,cols]=PchipInterpolator(times,q[:,cols],axis=0)(query)
