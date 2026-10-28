@@ -371,3 +371,13 @@
 - 新audit_omni_tasks.py复用原严格物理审计，分别验收箱顶站稳、上箱下箱、手撑跨越落地。翻越方向和边界由参考定义，实际须跨越两侧并经过箱上方；掌对目标箱顶真实向上载荷至少5%体重连续100ms。低处末2秒稳定保留原姿态/COM速度/漂移/净支撑标准，增加完整双足位于同一表面且总足载荷中值≥80%体重、各≥5%。原碰撞/关节/速度/力矩门槛不变。接触力逐步与真实root约束力复核；源参考SHA、平移后q/v、真实源0初始化和完整参考覆盖独立绑定。
 - 服务器专项测量预飞omni_task_audit_preflight_20261029_r1：GPU2冻结容量权重实际执行0.2秒/40步，采集退出0。regression.json记录最终审计正确拒绝短轨迹（审计退出0但complete_task_verified=false）；源0误差q2.82e-7/v2.84e-7、接触根力一致性通过。篡改接触hash负例退出1且不产出审计目录。手撑参考沿箱局部axis0负向从+1.396到-.871m跨越半宽.347m且经过箱上方。仅测量/分类回归，不是完整控制通过。
 - watch_omni_task_audit.py只读CPU跟进现有driver，最多等待两小时，之后每段审计最多600秒；不启动或重启训练。保存源码SHA、日志/命令/退出码、真实轨迹专项结果，视频人工复核仍必需，不自动批准最终项目结果。实际启动状态与目录须后续记录。
+
+## 参考受力检查与局部修正探针（2026-10-29，运行中）
+
+- 专项watcher已实际启动：omni_task_audit_followup_20261029_r1，同名tmux，PID1403344已核验存活并等待既有训练；源码7be534b，bundle双端SHA95081a62d8980b6fbefc537130a1024305d83fd9c77e2b4277ff4c9e3bc73715。训练子1402026仍活，未启动重复GPU任务。
+- 新参考完整200Hz受力检查omni_task_reference_forces_20261029_r1已启动，CPU-only affinity10,11/数值线程1，顺序三段各900秒。入口9d441cb，复用私有7568607包的audit_omni_x2_reference/contact_wrench；原资产XML、profile armature/effort、显式摩擦.8、2mm候选接触、1mm碰撞不变。bundle双端SHA554aba65db736c9daa2abfd6fdbb9a2188520c7ab8ce2ff7986be2550a09442f。
+- step43_box_stand检查已结束退出0但必要条件失败：1257个受力帧，静态根wrench可行1108/原电机内1099，动态可行747/电机内730，静态最小峰电机比1.514858、动态2.111380。几何.848254mm/硬界0/速度比.30661通过。静态超限2.24–2.28s，主导左踝pitch54.535Nm/36；动态峰2.92s，腰pitch约76.010Nm/36。末4.3s后399受力帧静/动态均通过，不能把此末段平衡当完整动作通过。其余两段检查仍运行，禁止抢跑结论。
+- 中段独立屏幕诊断保留在该step43输出：failure-phases.json、support-gaps-selected.json、native-support-face-screen.json及wrench-rootcause-screen-r3.json。1.625s COM投影出足支撑域7.79mm，2.92s出21.41mm；2.5s无实际接触且最近足gap2.029mm，参考需要非零净根力约394/274/178N，不能按自由飞行自动判可行。原生选帧接触法线向上，未发现漏掉脚撑箱侧面的证据，不据此改检查器。静态不平衡本身不能否定所有动态平衡，动态需单独检查。
+- 两次临时root需求屏幕无效，明确在invalidated-diagnostic-screens.json记录原因：第一次forward覆盖指定qacc、第二次从保存模型读取的contact启用导致inverse已扣软接触力；不得引用其力数值。r3在LP诊断中显式关闭CONTACT/LIMIT，forward后重置指定qacc，末保持帧垂直需求439.49781N恰为原体重，原正式audit报告与这些临时屏幕无关、保持不变。诊断开关不用于实际仿真或策略成功证据。
+- 针对已定位支撑/踝力矩问题，独立probe_omni_support_balance.py尝试三个离散姿态325/456/540的root/腿/腰修正；全部手臂固定，双足源位姿固定，root位移域±.12m/旋转分量±.15rad、原0.9关节界/腰改变量≤.26rad，原1mm碰撞与力矩不放宽。先静态COM支撑，再原接触LP最小电机比≤.95。仅离散姿态探针，尚无时序/动态/连续控制证明，不能直接入训练。
+- probe r1在优化前因错误假定nu31而退出1；已核验正式inverse模型nq38/nv37/njnt32/nu0，本来无伺服，电机上限来自原profile。3de514d修正只读inverse模型守卫并新增原armature一致性检查，未改物理；r2独立目录omni_support_pose_probe_20261029_r2启动，CPU-only affinity12,13/900秒整体上限，r1完整保留。当前训练包7568607不变。b0cfd46探针初版bundle双端SHA83de3c0de56923237f1ecc5d37424e6e5fce9f5de16398a4e20c69ae4db8ebe4；后续3de守卫修正以源码提交为准。
