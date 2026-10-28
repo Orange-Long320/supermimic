@@ -24,16 +24,17 @@ def main():
     args.out.mkdir(parents=True, exist_ok=False)
     torch.set_num_threads(1)
     digest = lambda f: hashlib.sha256(f.read_bytes()).hexdigest()
-    config = json.loads((args.trace/'configuration.json').read_text())
+    design_trace=(args.trace/'configuration.json').exists()
+    config = json.loads((args.trace/('configuration.json' if design_trace else 'result.json')).read_text())
     a = config['arguments']
     unsupported = [k for k in ['tail_of', 'landing_ckpt', 'consistent_retiming', 'initial_command_margin',
-        'bounded_target_joints', 'joint_stop_margin', 'physics_command_projection'] if a.get(k)]
+        'bounded_target_joints', 'joint_stop_margin', 'physics_command_projection','prefix_trace','native_contact_preview'] if a.get(k)]
     if unsupported:
         raise ValueError(f'Preview does not reproduce these controllers: {unsupported}')
     if args.ckpt.name == 'ckpt_latest.pt' or digest(args.ckpt) != config['checkpoint_sha256']:
         raise ValueError('Use the immutable controller that generated the trace')
-    source = Path(a['source']); parameters = Path(a['warmstart'])
-    if digest(source) != config['source_sha256'] or digest(parameters) != config['warmstart_sha256']:
+    source = Path(a['source']); parameters = Path(a['warmstart']) if design_trace else None
+    if digest(source) != config['source_sha256'] or (parameters is not None and digest(parameters) != config['warmstart_sha256']):
         raise ValueError('Calibration source/parameters changed')
     policy, policy_config = load_policy_from_checkpoint(args.ckpt, 'cpu')
     policy.requires_grad_(False)
@@ -45,8 +46,9 @@ def main():
     trajectory = np.load(args.trace/'baseline-trajectory.npz')
     if not 2<=args.horizon<=len(trajectory['actions']):
         p.error('Preview horizon must span at least two recorded control frames')
-    preview = NativePolicyPreview(model, policy, library, config['groups'], np.load(parameters)['parameters'],
-        a['takeoff_frame'], a['landing_frame'], observations['reference_frame'][0],
+    preview = NativePolicyPreview(model, policy, library, config['groups'] if design_trace else [],
+        np.load(parameters)['parameters'] if parameters is not None else None,
+        a.get('takeoff_frame'), a.get('landing_frame'), observations['reference_frame'][0],
         policy_config['env'].get('anchor_obs', False), policy_config['env'].get('future_frames', 10), a.get('contact_pulses', False))
     computed_frames = [int(preview.frame_at(i*.02)[0]) for i in range(len(observations['policy']))]
     if not np.array_equal(computed_frames, observations['reference_frame']):
@@ -74,6 +76,7 @@ def main():
     errors = np.asarray(errors); action_errors = np.asarray(action_errors); goal_errors = np.asarray(goal_errors)
     report = {'scope': 'H control frames from true recorded boundaries, including predicted policy observation history, anchor goal and actions',
         'horizon_control_frames': args.horizon,
+        'clock_mode':'retimed_preparation' if design_trace else 'natural_reference',
         'control_windows': len(errors), 'maximum_action_error_by_control_frame': action_errors.max(0).tolist(),
         'native_model_sha256': digest(args.trace/'native-model.mjb'),
         'maximum_goal_error_by_control_frame': goal_errors.max(0).tolist(),
@@ -83,7 +86,7 @@ def main():
             for h in sorted({h for h in [1,2,4,8,16,32,args.horizon] if h<=args.horizon})],
         'reference_clock_matched': True, 'approved_for_controller_use': False,
         'input_sha256': {str(f): digest(f) for f in [args.ckpt, source, parameters,
-            args.trace/'baseline-physics.npz', args.trace/'baseline-observations.npz']}}
+            args.trace/'baseline-physics.npz', args.trace/'baseline-observations.npz'] if f is not None}}
     (args.out/'result.json').write_text(json.dumps(report, indent=2))
     np.savez(args.out/'errors.npz', state_and_geometry=errors, actions=action_errors, goals=goal_errors)
     (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())

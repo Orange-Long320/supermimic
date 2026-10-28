@@ -1,7 +1,8 @@
 """Capture a frozen policy's real physics from a selected reference frame.
 
 Stops at the first original termination; never includes an automatic reset.
-No reference retiming, residual actions, or physics changes are applied.
+No reference retiming or physics changes are applied. Optional recorded command
+prefixes are explicit counterfactuals, never labelled as the policy alone.
 Optional final-reference holding ignores only clip-end timeout, retaining all
 physical failure checks. Geometry is measured in a separate native data object.
 """
@@ -25,8 +26,15 @@ def main():
     p.add_argument('--seconds',type=float,default=4.)
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--hold-last-reference',action='store_true',help='Ignore clip-end timeout and hold its last reference state; original physical failures still stop capture')
+    p.add_argument('--record-observations',action='store_true')
+    p.add_argument('--prefix-trace',type=Path,help='Directory containing recorded 50 Hz actions and initial native state')
+    p.add_argument('--prefix-until',type=float,default=0.,help='Keep recorded commands until this time, then blend back to the live policy')
+    p.add_argument('--prefix-blend',type=float,default=.08)
+    p.add_argument('--prefix-joints',nargs='+',help='Only replace these named joints; default is all joints')
     args=p.parse_args()
     if args.seconds<=0 or args.start_frame<0:p.error('Invalid duration or start frame')
+    if args.prefix_trace and (args.prefix_until<=0 or args.prefix_blend<0):p.error('Prefix needs positive duration and nonnegative blending')
+    if not args.prefix_trace and (args.prefix_until or args.prefix_joints):p.error('Prefix options require a recorded trace')
     args.out.mkdir(parents=True,exist_ok=False)
     torch.set_num_threads(1)
     from supermimic.envs import SuperMimicEnvCfgArgs,make_env
@@ -72,6 +80,23 @@ def main():
         initial_q=env.sim.data.qpos[0].cpu().numpy().copy();initial_q[:3]-=origin
         initial_v=env.sim.data.qvel[0].cpu().numpy().copy()
         np.savez(args.out/'initial-state.npz',state=np.r_[initial_q,initial_v][None],qpos=initial_q,qvel=initial_v)
+        prefix_actions=None;prefix_details=None;prefix_errors=[];observation_trace=[]
+        if args.prefix_trace:
+            prefix_path=args.prefix_trace/'baseline-trajectory.npz'
+            prefix=np.load(prefix_path);prefix_physics=np.load(args.prefix_trace/'baseline-physics.npz')
+            if abs(float(prefix['fps'][0])-1/env.step_dt)>1e-6:raise ValueError('Prefix control frequency differs')
+            prefix_actions=prefix['actions'].copy()
+            if len(prefix_actions)*env.step_dt<args.prefix_until+args.prefix_blend:raise ValueError('Recorded prefix is too short')
+            selected=args.prefix_joints or list(PROFILE['joint_names'])
+            if len(set(selected))!=len(selected) or any(n not in PROFILE['joint_names'] for n in selected):raise ValueError('Invalid prefix joint selection')
+            prefix_indices=[PROFILE['joint_names'].index(n) for n in selected]
+            initial_errors={'qpos':float(abs(prefix_physics['initial_qpos']-initial_q).max()),
+                'qvel':float(abs(prefix_physics['initial_qvel']-initial_v).max())}
+            if max(initial_errors.values())>1e-5:raise ValueError('Recorded and live initial states differ; no state rewrite is permitted')
+            if hashlib.sha256((args.prefix_trace/'native-model.mjb').read_bytes()).hexdigest()!=hashlib.sha256((args.out/'native-model.mjb').read_bytes()).hexdigest():
+                raise ValueError('Recorded prefix uses a different native model')
+            prefix_details={'trace':str(args.prefix_trace),'actions_sha256':hashlib.sha256(prefix_path.read_bytes()).hexdigest(),
+                'joint_names':selected,'until_s':args.prefix_until,'blend_s':args.prefix_blend,'initial_errors':initial_errors}
         original_step=env.sim.step
         def capture(*a,**kw):
             result=original_step(*a,**kw)
@@ -91,11 +116,24 @@ def main():
             return result
         env.sim.step=capture
         with torch.no_grad():
-            for _ in range(round(args.seconds/env.step_dt)):
+            for step in range(round(args.seconds/env.step_dt)):
+                if args.record_observations:
+                    observation_trace.append((obs['policy'][0].cpu().numpy().copy(),obs['goal'][0].cpu().numpy().copy(),int(cmd.frame[0])))
                 action=policy(obs['policy'],obs['goal'])
+                t=step*env.step_dt
+                if prefix_actions is not None and t<args.prefix_until+args.prefix_blend:
+                    fraction=min(max((t-args.prefix_until)/args.prefix_blend,0),1) if args.prefix_blend else 0.
+                    recorded=torch.as_tensor(prefix_actions[step,prefix_indices],dtype=action.dtype,device=action.device)
+                    action[:,prefix_indices]=torch.lerp(recorded,action[:,prefix_indices],fraction)
                 actions.append(action[0].cpu().numpy().copy())
                 obs,*_=env.step(action)
+                if prefix_actions is not None and t<args.prefix_until+args.prefix_blend and t<=args.prefix_until and len(prefix_indices)==len(PROFILE['joint_names']):
+                    prefix_errors.append(float(abs(positions[-1]-prefix['qpos'][step]).max()))
                 if failures:break
+        if observation_trace:
+            np.savez(args.out/'baseline-observations.npz',policy=np.stack([r[0] for r in observation_trace]),
+                goal=np.stack([r[1] for r in observation_trace]),reference_frame=[r[2] for r in observation_trace],
+                initial_qpos=initial_q,initial_qvel=initial_v,fps=np.array([1/env.step_dt]))
         scale=PROFILE['action_scale']
         scale=np.array([scale[n] for n in PROFILE['joint_names']]) if isinstance(scale,dict) else scale
         defaults=np.array([PROFILE['default_joint_pos'][n] for n in PROFILE['joint_names']])
@@ -116,6 +154,8 @@ def main():
             'maximum_soft_violation':float(a[:,12].max()),'maximum_speed_ratio':float(a[:,13].max()),
             'maximum_effort_ratio':float(a[:,14].max()),'approved_for_training':False,
             'maximum_hard_violation':float(a[:,15].max()),'hard_joint_ranges_rad':model.jnt_range[1:].tolist(),
+            'policy_alone':prefix_details is None,'recorded_prefix':prefix_details,
+            'prefix_reproduction_maximum_qpos_error':max(prefix_errors) if prefix_errors else None,
             'maximum_foot_compression_m':float(max(-a[:,7:9].min(),0)),
             'metric_state_alignment':'Independent native mj_forward of each post-integration recorded state; execution sim untouched',
             'metric_columns':['com_z','com_vz','H_x','H_y','H_z','com_speed','root_angular_speed',

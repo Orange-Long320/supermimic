@@ -20,15 +20,18 @@ class NativePolicyPreview:
         self.data = mujoco.MjData(model)
         self.policy = policy
         self.library = library
-        self.parameters = torch.tensor(parameters, dtype=torch.float32)
-        self.takeoff = int(takeoff_frame); self.landing = int(landing_frame)
+        self.parameters = torch.tensor(parameters, dtype=torch.float32) if parameters is not None else None
+        self.takeoff = int(takeoff_frame) if takeoff_frame is not None else None
+        self.landing = int(landing_frame) if landing_frame is not None else None
         self.initial_frame = int(initial_frame)
         self.future_frames = int(future_frames); self.anchor_obs = bool(anchor_obs)
         self.contact_pulses = bool(contact_pulses)
         self.count = len(groups)
         expected = 1+(6 if contact_pulses else 4)*self.count
-        if self.parameters.shape != (expected,):
+        if self.parameters is not None and self.parameters.shape != (expected,):
             raise ValueError('Preview requires explicit preparation parameters with an initial knot')
+        if self.parameters is None and contact_pulses:
+            raise ValueError('A raw policy has no preparation pulse parameters')
         names = PROFILE['joint_names']
         if [model.joint(int(j)).name.rsplit('/', 1)[-1] for j in model.actuator_trnid[:, 0]] != list(names):
             raise ValueError('Preview actuator order differs from robot profile')
@@ -51,6 +54,7 @@ class NativePolicyPreview:
         self.geometry_groups = [g.numpy() for g in geometry.groups]
 
     def residual(self, time):
+        if self.parameters is None:return torch.zeros_like(self.q0)
         p = self.parameters; count = self.count
         initial = p[1+3*count:1+4*count]
         knots = torch.cat([initial[None], p[1:1+3*count].reshape(3, count)], 0)
@@ -63,6 +67,9 @@ class NativePolicyPreview:
 
     def frame_at(self, time):
         # Match the native discrete retimed clock, including its reset lead.
+        if self.parameters is None:
+            frame=(torch.tensor(time,dtype=torch.float32)*50).round().long()
+            return torch.minimum(frame+self.initial_frame,self.library.clip_last[0]).reshape(1)
         prep = self.parameters[0]
         t = torch.tensor(time, dtype=torch.float32)
         frame = torch.where(t <= prep, t/prep*self.takeoff, self.takeoff+(t-prep)*50).round().long()
@@ -117,8 +124,11 @@ class NativePolicyPreview:
             goal = (torch.as_tensor(initial_goal, dtype=torch.float32).reshape(1, -1)
                     if h == 0 and initial_goal is not None else self.goal(current_time))
             action = self.policy(flatten_history_term_major(history), goal)[0]+self.residual(current_time)
-            if h == 0 and correction is not None:
-                action += torch.as_tensor(correction, dtype=torch.float32)
+            if correction is not None:
+                if np.ndim(correction)==1:
+                    if h==0:action+=torch.as_tensor(correction,dtype=torch.float32)
+                else:
+                    action+=torch.as_tensor(correction[h],dtype=torch.float32)
             actions.append(action.numpy().copy()); goals.append(goal[0].numpy().copy())
             d.ctrl[:] = self.q0.numpy()+action.numpy()*self.scale
             for _ in range(self.ratio):

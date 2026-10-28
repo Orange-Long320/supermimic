@@ -1,0 +1,114 @@
+"""Bounded shared-GPU comparison of joint penalties, using the project Trainer.
+
+Overrides only this process's real and imagined joint-limit reward weights.
+The existing long jobs and their inputs remain untouched. This is an experiment,
+not approval of the imperfect teacher or a motion-success certificate.
+"""
+import argparse
+from dataclasses import asdict
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+
+import torch
+
+from supermimic.config import TrainConfig,DataCfg,EnvCfg,ScheduleCfg
+from supermimic.imagination.policy_trainer import PolicyTrainerCfg
+from supermimic.policy.nets import PolicyCfg,CriticCfg
+from supermimic.training.loop import Trainer
+from supermimic.world_model.state_spec import StateSpecCfg
+from supermimic.world_model.world_model import WorldModelCfg
+from supermimic.world_model.wm_trainer import WMTrainerCfg
+
+
+def construct(cls, values):
+    return cls(**{k:tuple(v) if isinstance(v,list) else v for k,v in values.items()})
+
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--ckpt',type=Path,required=True)
+    p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--gpu',type=int,required=True)
+    p.add_argument('--shared-pid',type=int,required=True)
+    p.add_argument('--joint-weight',type=float,required=True)
+    p.add_argument('--steps',type=int,default=120)
+    p.add_argument('--envs',type=int,default=256)
+    p.add_argument('--batch',type=int,default=128)
+    p.add_argument('--max-seconds',type=float,default=240)
+    p.add_argument('--memory-fraction',type=float,default=.18)
+    args=p.parse_args()
+    if args.out.exists() or args.ckpt.name=='ckpt_latest.pt':p.error('Use a fresh output directory and immutable checkpoint')
+    if not -50<=args.joint_weight<=-2 or not 0<args.memory_fraction<=.2 or args.steps<45:
+        p.error('Invalid bounded comparison settings')
+    if os.environ.get('CUDA_VISIBLE_DEVICES')!=str(args.gpu):raise ValueError('Explicit physical GPU selection is required')
+    query=lambda fields:subprocess.check_output(['nvidia-smi','-i',str(args.gpu),'--query-gpu='+fields,'--format=csv,noheader,nounits'],text=True).strip()
+    free=int(query('memory.free'))
+    if free<7000:raise ValueError(f'Insufficient shared-card headroom: {free} MiB free')
+    listed=subprocess.check_output(['nvidia-smi','-i',str(args.gpu),'--query-compute-apps=pid','--format=csv,noheader,nounits'],text=True)
+    owners=[int(line.strip()) for line in listed.splitlines() if line.strip().isdigit()]
+    if owners!=[args.shared_pid] or Path(f'/proc/{args.shared_pid}').stat().st_uid!=os.getuid():
+        raise ValueError('Only the explicitly selected existing process owned by this project user may be shared')
+    torch.set_num_threads(1);torch.cuda.set_device(0);torch.cuda.set_per_process_memory_fraction(args.memory_fraction,0)
+    checkpoint=torch.load(args.ckpt,map_location='cpu',weights_only=False);c=checkpoint['config']
+    if c['robot']!='x2_ultra':raise ValueError('This comparison is for X2 Ultra')
+    cfg=TrainConfig();cfg.robot='x2_ultra';cfg.device='cuda:0';cfg.resume=args.ckpt
+    cfg.log_root=args.out.parent;cfg.run_name=args.out.name;cfg.seed=0
+    cfg.data=construct(DataCfg,c['data'])
+    cfg.data.npz_dir=Path(cfg.data.npz_dir)
+    if cfg.data.manifest is not None:cfg.data.manifest=Path(cfg.data.manifest)
+    cfg.env=construct(EnvCfg,c['env']);cfg.env.num_envs=args.envs;cfg.env.replay_capacity=128
+    cfg.env.domain_randomization=False;cfg.env.obs_noise=False;cfg.env.reset_noise=False;cfg.env.action_noise_std=0.
+    world=dict(c['world_model']);world['state_spec']=construct(StateSpecCfg,world['state_spec'])
+    cfg.world_model=construct(WorldModelCfg,world)
+    cfg.policy=construct(PolicyCfg,c['policy']);cfg.critic=construct(CriticCfg,c['critic'])
+    cfg.wm_trainer=construct(WMTrainerCfg,c['wm_trainer']);cfg.wm_trainer.batch_size=args.batch;cfg.wm_trainer.batches_per_update=2;cfg.wm_trainer.compile=None
+    cfg.policy_trainer=construct(PolicyTrainerCfg,c['policy_trainer']);cfg.policy_trainer.batch_size=args.batch;cfg.policy_trainer.compile=None;cfg.policy_trainer.obs_noise=False
+    cfg.schedule=construct(ScheduleCfg,c['schedule']);cfg.schedule.total_iterations=checkpoint['iteration']+args.steps
+    cfg.schedule.warmup_iterations=40;cfg.schedule.log_interval=10;cfg.schedule.checkpoint_interval=1_000_000
+    cfg.schedule.max_hours=args.max_seconds/3600;cfg.schedule.lr_final_ratio=1.
+    trainer=Trainer(cfg)
+    try:
+        if not all(torch.equal(v.cpu(),checkpoint['policy'][k]) for k,v in trainer.policy.state_dict().items()):
+            raise ValueError('Short-run initial policy differs from its source checkpoint')
+        term=trainer.env.reward_manager.get_term_cfg('joint_limit')
+        old_real=float(term.weight);old_imagined=float(trainer.wm.heads.reward_cfg.w_joint_limit)
+        term.weight=args.joint_weight;trainer.wm.heads.reward_cfg.w_joint_limit=args.joint_weight
+        if trainer.env.reward_manager.get_term_cfg('joint_limit').weight!=trainer.wm.heads.reward_cfg.w_joint_limit:
+            raise ValueError('Real and imagined reward weights differ')
+        metadata={'experiment_only':True,'approved_for_training':False,'physical_candidate_passed':False,
+            'source_checkpoint':str(args.ckpt),'source_sha256':hashlib.sha256(args.ckpt.read_bytes()).hexdigest(),
+            'initial_iteration':trainer.iteration,'initial_updates':trainer.num_updates,
+            'physical_gpu':args.gpu,'shared_pid':args.shared_pid,'gpu_uuid':query('uuid'),'free_gpu_mib_at_start':free,
+            'torch_memory_fraction':args.memory_fraction,'torch_memory_cap_excludes_native_Warp_allocations':True,
+            'reward_override':{'real_old':old_real,'imagined_old':old_imagined,'real_new':float(term.weight),
+                'imagined_new':float(trainer.wm.heads.reward_cfg.w_joint_limit)},
+            'scope':'Existing imperfect exploratory teacher, bounded joint-penalty test; source long jobs unmodified',
+            'arguments':vars(args)}
+        (args.out/'runtime-reward-overrides.json').write_text(json.dumps(metadata,indent=2,default=str))
+        (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
+        initial_updates=trainer.num_updates;started=time.monotonic()
+        trainer.run()
+        finite=all(torch.isfinite(v).all().item() for module in [trainer.wm,trainer.policy,trainer.critic]
+                   for v in module.state_dict().values() if torch.is_tensor(v))
+        if trainer.num_updates<=initial_updates or not finite:raise ValueError('No valid learning update completed')
+        evaluation={'config':asdict(cfg),'policy':{k:v.cpu() for k,v in trainer.policy.state_dict().items()},
+            'iteration':trainer.iteration,'num_updates':trainer.num_updates,'reward_override':metadata['reward_override'],
+            'policy_evaluation_only':True,'approved_for_training':False}
+        torch.save(evaluation,args.out/'policy_evaluation.pt')
+        summary={'elapsed_s':time.monotonic()-started,'final_iteration':trainer.iteration,
+            'completed_updates':trainer.num_updates-initial_updates,'parameters_finite':finite,
+            'torch_peak_allocated_mib':torch.cuda.max_memory_allocated(0)/2**20,
+            'torch_peak_reserved_mib':torch.cuda.max_memory_reserved(0)/2**20,
+            'evaluation_checkpoint_sha256':hashlib.sha256((args.out/'policy_evaluation.pt').read_bytes()).hexdigest(),
+            'approved_for_training':False,'physical_evaluation_pending':True}
+        (args.out/'completed.json').write_text(json.dumps(summary,indent=2));print(json.dumps(summary),flush=True)
+    finally:
+        trainer.env.close()
+        if trainer.writer is not None:trainer.writer.close()
+
+
+if __name__=='__main__':main()
