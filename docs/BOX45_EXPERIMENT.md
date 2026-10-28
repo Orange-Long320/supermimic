@@ -333,3 +333,8 @@
 - `dense-speed-screen.json`独立200Hz微分发现50Hz还漏掉更高峰：hand55左膝12.655秒31.34697rad/s/原30，ratio1.044899（失败）；step28/hand46/step43密集峰分别.530261/.391797/.514804（通过）。因此当前导出入口只查密集几何、50Hz批次才查速度不充分。新增原31关节/原速度上限的200Hz与50Hz严格导出门槛，保存resampling-velocity.json和manifest，任何密集速度超界则拒绝输出motion-fk，不放宽上限/不改时间尺度。新门槛尚未服务器回归。
 - 准备按原相同native模型/完整200Hz候选对3个有效家族做新导出正回归、hand55做拒绝回归，CPU最多2个单线程/每项120秒；验证原始完整来源/几何/速度一致后仅把step43/step28/hand46构成3家族探索批次。用户没有硬性家族数，保留55cm待修候选而非降低门槛把它混入；3家族仍未获最终受力/连续执行批准。原数据和失败产物全部保留。
 - 配对CUDA图探针已真实420秒超时、外层exit124，GPU2原1389188退出。eager8次预热后中位约5.917秒；cudagraphs只完成首更新93.685秒，后续没在预算内完成。没有完整数值/梯度/后权重一致性证据，不采用该后端，不变更正在训练包，不立即堆叠其他编译尝试。
+
+- 新导出速度门槛已真实回归：`omni_speed_gate_exports_20261029_r1`，step28/hand46/step43正例均退出0；hand55负例退出1、保存速度失败报告且无motion-fk。各正例原几何、31关节速度、0.9界通过且uniform_time_scale=1；没有慢放/裁剪掩盖突变。
+- 三家族组合prepare已退出0：dataset共1518帧（310/603/605），六个原箱体与对应动作同平移y-6/0/+6，terrain SHA67da6167d6f99ea123a76fb34788b71d0de16006896fea0a0c12beb22feb5437；各片段全组合场景最大穿透.869810/.849372/.942402mm、硬界0、50Hz速度比.368113/.432151/.391797。仍是探索批次，force_diagnostics_passed/complete_climb_verified/final_validation_approved均false。
+- 组合接口CPU复核interface-comparison.json通过：原两家族在新场景各平移+3m后，位姿误差<9e-16/速度差0，完整canonical特征最大差<6e-7/未来目标差<3e-8。weights-transfer-check.json验证WM/policy/critic在新18维地形接口下严格完整载入全部原张量且逐值相同/有限（feature93/goal729）。这些仅证明迁移接口，不代表新场景可静默full resume或实际控制通过。
+- 训练入口新增显式`--weights-only`仅允许capacity阶段：新场景必须显式保留同X2/无其他box或sole接口，完整载入匹配形状的三个模块，优化器/replay/计数器新建；普通resume仍要求同一地形内容。新地形pointer在构建新Trainer前显式写入，不篡改保存检查点。该选项尚未GPU容量验证，未启动三家族训练，当前GPU3运行入口8861a1d保持原样。

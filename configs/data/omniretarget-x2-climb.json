@@ -53,7 +53,7 @@
       "keep each clip paired with its measured terrain and contact phases"
     ],
     "mixing_gate": "Final usable-reference acceptance still requires physical/continuous checks. Explicit user-authorized exploratory training may proceed after finite data, original joint/speed, scene geometry and single-GPU capacity checks; it does not waive final acceptance.",
-    "status": "Four distinct complete geometry-checked families prepared. First-hour two-family pilot failed full ascent. A 2048-env/512-batch capacity check passed and a bounded20-minute start-of-motion curriculum is running; final validation remains unproven.",
+    "status": "Three distinct families passed fresh dense geometry/speed export and combined-scene checks (1518 frames). Fourth hand55 geometry candidate is excluded due an IK knee jump and dense speed ratio1.0449. Two-family20-minute curriculum is running; no final full-climb acceptance.",
     "height_selection_update": "Prioritize official ~46cm effective-rise hand climb before its failed ~69cm variant; retain other ~55cm/~60cm hand families and ~28cm/~39cm/~43cm step families. Variants are not counted as additional skills."
   },
   "multi_motion_review_queue": [
@@ -86,7 +86,7 @@
     {
       "motion": "robot-terrain/climb_11_z_scale_0.8.npz",
       "category": "higher hand-support candidate; source top/rise 0.563596m; X2 about 0.55506m",
-      "status": "Full458-source-frame retarget and native model completed. Strictly joined3049 dense200Hz samples and independently exported763 frames50Hz/15.24s; peak0.849995mm. No actual execution or final physical approval, not in first-hour training.",
+      "status": "Complete458-source-frame geometry candidate exists, but combined preparation rejected speed: dense200Hz knee31.347rad/s versus original30, ratio1.044899. Raw30Hz IK knee jumps0.765rad at source379\u2192380 while G1 source is smooth. Excluded from training batch; continuity repair pending, no final physics approval.",
       "prior_diagnostic_variant": "robot-terrain/climb_11_z_scale_1.2.npz",
       "wrist_reference_limit_deg": 0.0
     },
@@ -116,7 +116,13 @@
     "one_hour_complete_climb_verified": false,
     "prefix_curriculum": "omni_prefix_curriculum_20261029_r1",
     "rejected_servo_target_clipping": "omni_servo_target_ab_20261029_r1",
-    "paired_cuda_graph_probe": "omni_cuda_graph_profile_20261029_r1"
+    "paired_cuda_graph_probe": "omni_cuda_graph_profile_20261029_r1",
+    "three_family_exploratory_dataset": "omni_speed_gate_exports_20261029_r1/dataset",
+    "three_family_terrain_sha256": "67da6167d6f99ea123a76fb34788b71d0de16006896fea0a0c12beb22feb5437",
+    "dense_velocity_gate_regression": "omni_speed_gate_exports_20261029_r1/progress.json",
+    "three_family_interface_comparison": "omni_speed_gate_exports_20261029_r1/interface-comparison.json",
+    "three_family_weight_compatibility": "omni_speed_gate_exports_20261029_r1/weights-transfer-check.json",
+    "four_family_dataset_rejected": "omni_four_motion_dataset_20261029_r1"
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
