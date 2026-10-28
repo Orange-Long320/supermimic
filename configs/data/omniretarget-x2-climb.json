@@ -52,21 +52,21 @@
       "retain distinct source families rather than counting scaled copies as distinct skills",
       "keep each clip paired with its measured terrain and contact phases"
     ],
-    "mixing_gate": "Independent geometry, physical force/torque and continuous-execution checks per clip before single-GPU smoke",
-    "status": "Two distinct families now have complete geometry-checked 50 Hz inputs and an authorized one-hour pilot is running. Complete ascent/terminal hold and final physical validation remain unproven; further distinct families are being prepared separately.",
+    "mixing_gate": "Final usable-reference acceptance still requires physical/continuous checks. Explicit user-authorized exploratory training may proceed after finite data, original joint/speed, scene geometry and single-GPU capacity checks; it does not waive final acceptance.",
+    "status": "Four distinct complete geometry-checked families prepared. First one-hour pilot trained two families; both failed actual full ascent. Frozen-policy failure and throughput diagnostics are running before further bounded optimization.",
     "height_selection_update": "Prioritize official ~46cm effective-rise hand climb before its failed ~69cm variant; retain other ~55cm/~60cm hand families and ~28cm/~39cm/~43cm step families. Variants are not counted as additional skills."
   },
   "multi_motion_review_queue": [
     {
       "motion": "robot-terrain/climb_15_z_scale_1.1.npz",
       "category": "step-up; coarse effective rise 0.440m",
-      "status": "Latest full 186-frame 0.9-bound candidate: geometry passed, dynamic force motor gate only 63/182 frames; not usable. Reconditioned native motion failed at 1.05 seconds before ascent.",
+      "status": "New full dense geometry/export completed: 310 frames at50Hz, 6.18s, peak0.869810mm; not in first-hour training. Earlier force/native failures remain, no final physical approval.",
       "wrist_reference_limit_deg": 15.0
     },
     {
       "motion": "robot-terrain/climb_06_z_scale_0.8.npz",
       "category": "step-up; measured effective source rise 0.284764m; X2 scale gives about 0.28045m",
-      "status": "Complete corrected 200 Hz reference and geometry-checked 50 Hz pilot input ready; one of two families in current one-hour exploratory pilot. Full policy climb and final physics audit pending.",
+      "status": "First one-hour pilot completed; actual capture failed at2.90s, peak44.024mm penetration/hard joint violation0.121641rad; no complete climb. Up-and-hold task variant is evaluation-only.",
       "prior_diagnostic_variant": "robot-terrain/climb_06_z_scale_1.2.npz",
       "wrist_reference_limit_deg": 15.0
     },
@@ -79,14 +79,14 @@
     {
       "motion": "robot-terrain/climb_20_z_scale_0.8.npz",
       "category": "hand-supported source; measured effective source rise 0.468674m; X2 scale gives about 0.46157m",
-      "status": "Complete corrected 200 Hz reference and geometry-checked 50 Hz pilot input ready; one of two families in current one-hour exploratory pilot. Raw exact force audit failed; final policy validation remains pending.",
+      "status": "First one-hour pilot completed; actual capture failed at5.54s, peak46.733mm penetration/hard joint violation0.098250rad; no complete climb. Original force failures remain.",
       "prior_diagnostic_variant": "robot-terrain/climb_20_z_scale_1.2.npz",
       "wrist_reference_limit_deg": 0.0
     },
     {
       "motion": "robot-terrain/climb_11_z_scale_0.8.npz",
       "category": "higher hand-support candidate; source top/rise 0.563596m; X2 about 0.55506m",
-      "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
+      "status": "Full458-source-frame retarget and native model completed. Strictly joined3049 dense200Hz samples and independently exported763 frames50Hz/15.24s; peak0.849995mm. No actual execution or final physical approval, not in first-hour training.",
       "prior_diagnostic_variant": "robot-terrain/climb_11_z_scale_1.2.npz",
       "wrist_reference_limit_deg": 0.0
     },
@@ -109,7 +109,11 @@
     "dense_hand_reference": "omni_hand46_dense_geometry_full_20261029_r3/policy-input/resampling-geometry.json",
     "exploratory_pilot": "omni_two_motion_pilot_20261029_r2",
     "post_training_evaluation": "omni_two_motion_pilot_20261029_r2/posttrain_804cc13",
-    "final_validation_approved": false
+    "final_validation_approved": false,
+    "dense_step43_reference": "omni_additional_families_20261029_r1/0_step43/policy-input/resampling-geometry.json",
+    "dense_hand55_reference": "omni_hand55_dense_chunks_20261029_r3/policy-input/resampling-geometry.json",
+    "one_hour_final_checkpoint_sha256": "f653d90b41ee1aba0e37a4ea7f3279f3025a2b81ba87555613b0c2411cb78a49",
+    "one_hour_complete_climb_verified": false
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
