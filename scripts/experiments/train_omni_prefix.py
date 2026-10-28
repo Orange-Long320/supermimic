@@ -4,7 +4,7 @@ Full resume keeps the same clips and scene. An explicit weights-only capacity
 phase may initialize a separately reviewed terrain dataset with fresh training
 state. Concentrate resets on the true start and use small execution noise for
 diverse real transitions. Capacity is measured
-before a twenty-minute optimization; independent full-clip evaluation remains
+before a bounded optimization; independent full-clip evaluation remains
 mandatory. No servo protection or physics/acceptance changes are introduced.
 """
 import argparse
@@ -26,8 +26,13 @@ def main():
     p.add_argument('--phase',choices=['capacity','optimize'],required=True)
     p.add_argument('--proof',type=Path)
     p.add_argument('--source-commit',required=True)
+    p.add_argument('--package-commit',default='3bc46dc',help='Revision of the explicitly deployed package; recorded separately from this entry')
+    p.add_argument('--optimization-minutes',type=float,default=20.,help='Optimize phase only; bounded to at most60minutes after capacity validation')
+    p.add_argument('--mixed-start-fraction',type=float,help='Optional fraction of environments pinned to balanced source starts; remaining environments use the existing return sampler')
     p.add_argument('--weights-only',action='store_true',help='Capacity phase only: explicitly transfer matching X2 weights to a new terrain dataset with fresh optimizers, replay and counters')
     a=p.parse_args()
+    if not 0<a.optimization_minutes<=60:p.error('Optimization duration must be in (0,60] minutes')
+    if a.mixed_start_fraction is not None and not 0<=a.mixed_start_fraction<=1:p.error('Mixed start fraction must be in [0,1]')
     if a.weights_only and a.phase!='capacity':p.error('Weights-only transfer must start with capacity validation')
     if os.environ.get('CUDA_VISIBLE_DEVICES')!=str(a.gpu):raise ValueError('Explicit physical GPU required')
     busy=subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-compute-apps=pid','--format=csv,noheader,nounits'],text=True).strip()
@@ -62,33 +67,49 @@ def main():
     cfg.world_model.state_spec.terrain_manifest=cfg.env.terrain_manifest
     cfg.run_name=a.out.name;cfg.log_root=a.out.parent
     cfg.env.num_envs=2048;cfg.env.replay_capacity=256
-    cfg.env.sampling_mode='start';cfg.env.action_noise_std=.05
+    cfg.env.sampling_mode='start' if a.mixed_start_fraction is None else 'return'
+    cfg.env.action_noise_std=.05
     cfg.env.reset_noise=cfg.env.obs_noise=cfg.env.domain_randomization=False
     cfg.policy_trainer.obs_noise=False
     cfg.wm_trainer.batch_size=cfg.policy_trainer.batch_size=512
     cfg.wm_trainer.compile=cfg.policy_trainer.compile=None
     cfg.schedule.total_iterations=initial_iteration+100 if a.phase=='capacity' else 100_000_000
-    cfg.schedule.max_hours=.1 if a.phase=='capacity' else 1/3
-    cfg.schedule.log_interval=20 if a.phase=='capacity' else 100
+    cfg.schedule.max_hours=.1 if a.phase=='capacity' else a.optimization_minutes/60
+    # The existing loop checks its wall-clock budget on log boundaries.
+    # Keep short optimization runs within one small update block of the target.
+    cfg.schedule.log_interval=20
     cfg.schedule.checkpoint_interval=100 if a.phase=='capacity' else 200
     if a.phase=='optimize':
         if a.proof is None:p.error('Optimization requires capacity proof')
         proof=json.loads(a.proof.read_text())
         if (proof['status']!='completed' or proof['new_updates']<20 or proof['checkpoint_sha256']!=sha(a.checkpoint)
             or proof['terrain_sha256']!=manifest['terrain_sha256'] or proof['configuration']['env']['num_envs']!=2048
+            or proof.get('mixed_start_fraction')!=a.mixed_start_fraction
             or proof['configuration']['policy_trainer']['batch_size']!=512):raise ValueError('Capacity proof mismatch')
     a.out.mkdir(parents=True,exist_ok=False)
     record={'phase':a.phase,'status':'initializing','pid':os.getpid(),'physical_gpu':a.gpu,
-            'source_commit':a.source_commit,'package_commit':'3bc46dc','configuration':asdict(cfg),
+            'source_commit':a.source_commit,'package_commit':a.package_commit,'configuration':asdict(cfg),
             'terrain_sha256':manifest['terrain_sha256'],'initial_checkpoint_sha256':sha(a.checkpoint),
             'initial_iteration':initial_iteration,'initial_updates':initial_updates,
             'weights_only_transfer':a.weights_only,'source_iteration':source_iteration,'source_updates':source_updates,
+            'mixed_start_fraction':a.mixed_start_fraction,
             'final_validation_approved':False,'authorization':'User: first one hour, then continue optimizing',
             'scope':__doc__}
     def save(): (a.out/'capacity.json').write_text(json.dumps(record,indent=2,default=str))
     save();trainer=None;started=time.monotonic()
     try:
         trainer=Trainer(cfg)
+        if a.mixed_start_fraction is not None:
+            # Reuse the existing forced-frame hook; no simulator or reset
+            # implementation is changed. Actual evaluation always starts at0.
+            count=round(cfg.env.num_envs*a.mixed_start_fraction)
+            clips=torch.arange(count,device=cfg.device)%trainer.lib.num_clips
+            trainer.command.forced_frame[:count]=trainer.lib.clip_start[clips]
+            torch.save({'env_ids':torch.arange(count),'clip_ids':clips.cpu(),
+                        'reference_frames':trainer.command.forced_frame[:count].cpu()},a.out/'start-reset-assignment.pt')
+            record.update(pinned_start_environments=count,
+                          return_sampling_environments=cfg.env.num_envs-count,
+                          sampler_entropy_scope='Existing return sampler only; pinned source-start worlds are recorded separately')
         if a.weights_only:
             for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]:
                 module.load_state_dict(ck[key],strict=True)

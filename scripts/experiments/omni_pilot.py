@@ -29,27 +29,55 @@ def warmstart_terrain_module(module,state,first,base_feature_dim):
     state[first]=new;module.load_state_dict(state)
 
 
-def prepare(inputs,out):
+def prepare(inputs,out,include_task_variants=False):
     import mujoco
     import numpy as np
     from mjlab.scene import Scene
     from supermimic.envs.tracking_env_cfg import SuperMimicEnvCfgArgs,make_env_cfg
     from supermimic.robots.dimensions import PROFILE
     if len(inputs)<2:raise ValueError('Distinct motion families required')
+    scenes=[json.loads((source/'scene.json').read_text()) for source in inputs]
+    if len({s['source_motion'].split('_z_scale_')[0] for s in scenes})<2:
+        raise ValueError('Task variants do not increase the distinct source family count')
     out.mkdir(parents=True,exist_ok=False);(out/'motions').mkdir()
     boxes=[];clips=[];families=set()
-    for i,source in enumerate(inputs):
-        scene=json.loads((source/'scene.json').read_text())
-        if not scene.get('complete_source_clip'):raise ValueError('A diagnostic window is not a full training clip')
+    for i,(source,scene) in enumerate(zip(inputs,scenes)):
+        variant=scene.get('task_variant')
+        task='source_full_motion'
+        if not scene.get('complete_source_clip'):
+            if not (include_task_variants and scene.get('complete_source_prefix') and scene.get('source_start_frame')==0
+                and scene.get('dense_window_start_frame')==0 and isinstance(variant,dict)
+                and variant.get('kind') in ['ascent_then_hold','traverse_then_hold','return_then_hold'] and variant.get('hold_seconds',0)>=2-1e-9):
+                raise ValueError('A diagnostic window is not a complete source or verified task prefix')
+            parent=Path(scene['source_reference_path'])
+            parent_meta=json.loads((parent.parent/'result.json').read_text())
+            with np.load(parent,allow_pickle=False) as z:parent_count=len(z['qpos']);parent_fps=float(z['fps'].reshape(-1)[0])
+            if (sha(parent)!=scene['source_reference_sha256'] or not parent_meta.get('complete_source_clip')
+                or parent_meta.get('source_start_frame')!=0 or parent_meta['source_motion']!=scene['source_motion']
+                or parent_meta['model_sha256']!=scene['model_sha256'] or parent_fps!=200.
+                or not 0<=variant['brake_frame']<variant['stop_frame']<parent_count
+                or any(parent_meta[k]!=scene[k] for k in ['joint_limit_factor','wrist_reference_limit_deg','scene_boxes'])):
+                raise ValueError('Task prefix parent/source/model binding failed')
+            if variant['kind'] in ['traverse_then_hold','return_then_hold'] and variant['stop_frame']!=parent_count-1:
+                raise ValueError('Landing task must cover the complete original source interval')
+            task={'ascent_then_hold':'box_stand','traverse_then_hold':'vault_land','return_then_hold':'step_up_down_land'}[variant['kind']]
         family=scene['source_motion'].split('_z_scale_')[0]
-        if family in families:raise ValueError('Scaled copies do not count as different motions')
+        if family in families and not include_task_variants:raise ValueError('Scaled copies do not count as different motions')
         families.add(family);offset=np.array([0.,(i-(len(inputs)-1)/2)*6.,0.])
         with np.load(source/'motion-fk.npz',allow_pickle=False) as z:motion={k:z[k].copy() for k in z.files}
+        if include_task_variants:
+            exported=json.loads((source/'manifest.json').read_text())
+            reference_path=Path(str(np.asarray(motion['source']).reshape(-1)[0]))
+            if (sha(reference_path)!=exported['source_reference_sha256']
+                or not exported.get('resampling_velocity',{}).get('passed')
+                or exported['resampling_velocity']['maximum_dense_joint_velocity_ratio']>1.
+                or not exported['resampling_geometry']['passed']):
+                raise ValueError('Task dataset requires bound dense geometry and velocity export evidence')
         with np.load(source/'reference-qpos.npz',allow_pickle=False) as z:q=z['qpos'].copy();v=z['qvel'].copy()
         if float(motion['fps'][0])!=50. or q.shape!=(len(motion['joint_pos']),38):raise ValueError('Expected matching 50 Hz X2 reference')
         if list(motion['joint_names'])!=PROFILE['joint_names']:raise ValueError('Unexpected robot order')
         motion['body_pos_w']+=offset.astype(motion['body_pos_w'].dtype);q[:,:3]+=offset
-        name=f'{i:02d}_{Path(scene["source_motion"]).stem}'
+        name=f'{i:02d}_{Path(scene["source_motion"]).stem}'+('' if task=='source_full_motion' else '_'+task)
         np.savez_compressed(out/'motions'/f'{name}.npz',**motion)
         np.savez_compressed(out/f'{name}-qpos.npz',qpos=q,qvel=v,fps=np.array([50.]))
         first=len(boxes)
@@ -57,7 +85,9 @@ def prepare(inputs,out):
             boxes.append({**box,'center':(np.array(box['center'])+offset).tolist()})
         clips.append({'name':name,'source':str(source),'source_motion':scene['source_motion'],'offset':offset.tolist(),
             'frames':len(q),'motion_sha256':sha(out/'motions'/f'{name}.npz'),'reference_sha256':sha(source/'reference-qpos.npz'),
-            'box_indices':list(range(first,len(boxes)))})
+            'box_indices':list(range(first,len(boxes))),'source_family':family,'task_type':task,
+            'complete_source_clip':bool(scene.get('complete_source_clip')),'complete_source_prefix':bool(scene.get('complete_source_prefix')),
+            'task_variant':variant})
     manifest=out/'terrain.json';manifest.write_text(json.dumps({'boxes':boxes,'clips':clips},indent=2))
     cfg=make_env_cfg(SuperMimicEnvCfgArgs(npz_files=[],terrain_manifest=manifest))
     m=Scene(cfg.scene,device='cpu').compile();cfg.sim.mujoco.apply(m);d=mujoco.MjData(m)
@@ -77,7 +107,36 @@ def prepare(inputs,out):
             peak=max(peak,-min(float(mujoco.mj_geomDistance(m,d,g,o,.02,witness)) for g in robot for o in terrain))
         clip.update(maximum_penetration_m=peak,hard_joint_violation_rad=hard,joint_velocity_ratio=float((abs(v[:,6:])/speed).max()))
         if peak>.001 or hard>1e-8 or clip['joint_velocity_ratio']>1.:raise ValueError(f'Gross input/scene check failed: {clip}')
+        if clip['task_type']!='source_full_motion':
+            if len(q)<101 or abs(v[-100:]).max()>1e-6 or abs(q[-100:]-q[-1]).max()>1e-6:
+                raise ValueError('Task reference must retain two stationary terminal seconds')
+            d.qpos[:]=q[-1];mujoco.mj_forward(m,d)
+            root_up=float(d.xmat[root].reshape(3,3)[2,2])
+            target=max(clip['box_indices'],key=lambda i:boxes[i]['center'][2]+boxes[i]['half_size'][2])
+            top=boxes[target]['center'][2]+boxes[target]['half_size'][2]
+            supported=[]
+            for side in ['left','right']:
+                body=m.body(f'robot/{side}_ankle_roll_link').id;points=[]
+                for g in robot:
+                    if m.geom_bodyid[g]!=body:continue
+                    if m.geom_type[g]!=int(mujoco.mjtGeom.mjGEOM_MESH):raise ValueError('Expected original full foot meshes')
+                    mesh=int(m.geom_dataid[g]);first,count=m.mesh_vertadr[mesh],m.mesh_vertnum[mesh]
+                    points.extend(m.mesh_vert[first:first+count]@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])
+                if not points:raise ValueError('Missing physical foot')
+                points=np.array(points);surfaces=set()
+                if -.001<=points[:,2].min()<=.002:surfaces.add(-1)
+                for i in clip['box_indices']:
+                    box=boxes[i];local=(points-box['center'])@np.array(box['rotation_world']);half=np.array(box['half_size'])
+                    if (abs(local[:,:2])<=half[:2]+1e-6).all() and -.001<=local[:,2].min()-half[2]<=.002:surfaces.add(i)
+                supported.append(surfaces)
+            shared=supported[0]&supported[1]
+            if clip['task_type']=='box_stand':valid=target in shared
+            else:valid=any(i==-1 or boxes[i]['center'][2]+boxes[i]['half_size'][2]<top-.05 for i in shared)
+            if not valid or root_up<.9:raise ValueError('Terminal task/reference surface or upright geometry failed')
+            clip['terminal_reference_kinematics']={'passed':True,'root_up_z':root_up,'shared_support_surfaces':sorted(shared),
+                'scope':'Stationary full-foot reference geometry only, not actual contact force or policy success'}
     record={'clips':clips,'terrain':str(manifest.resolve()),'terrain_sha256':sha(manifest),'frames':sum(c['frames'] for c in clips),
+        'distinct_source_families':len(families),'task_categories':sorted({c['task_type'] for c in clips}),
         'exploratory_training_authorized':True,'authorization':'User: if no particularly outrageous issues, train one hour then continue optimizing',
         'force_diagnostics_passed':False,'complete_climb_verified':False,'final_validation_approved':False,
         'scope':'Two or more motion-conditioned scenes spatially separated in each independent simulator world; no generic terrain perception claim'}
@@ -156,11 +215,12 @@ def main():
     p.add_argument('--capacity',type=Path)
     p.add_argument('--gpu',type=int,default=3)
     p.add_argument('--source-commit',required=True)
+    p.add_argument('--include-task-variants',action='store_true',help='Prepare only: accept source-bound complete ascent/landing goals without counting variants as new families')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
-    if a.phase=='prepare':prepare(a.inputs,a.out)
+    if a.phase=='prepare':prepare(a.inputs,a.out,a.include_task_variants)
     else:train(a)
 
 

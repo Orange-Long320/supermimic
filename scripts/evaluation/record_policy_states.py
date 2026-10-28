@@ -27,6 +27,7 @@ def main():
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--hold-last-reference',action='store_true',help='Ignore clip-end timeout and hold its last reference state; original physical failures still stop capture')
     p.add_argument('--record-observations',action='store_true')
+    p.add_argument('--record-contact-forces',action='store_true',help='Record actual engine contact wrenches with the installed MuJoCo-Warp extraction API')
     p.add_argument('--clip-servo-targets',action='store_true',help='Diagnostic only: clamp proposed motor position targets to original hard joint ranges; not policy-alone execution')
     p.add_argument('--residual-commands',type=Path,help='Explicit 50 Hz additive action proposal; marks capture as hybrid control')
     p.add_argument('--prefix-trace',type=Path,help='Directory containing recorded 50 Hz actions and initial native state')
@@ -97,6 +98,16 @@ def main():
         np.savez(args.out/'initial-state.npz',state=np.r_[initial_q,initial_v][None],qpos=initial_q,qvel=initial_v)
         prefix_actions=None;prefix_details=None;prefix_errors=[];observation_trace=[]
         residual_actions=None;residual_details=None
+        contact_offsets=[0];contact_geoms=[];contact_wrenches=[];contact_points=[];contact_normals=[];contact_errors=[]
+        if args.record_contact_forces:
+            import warp as wp
+            import mujoco_warp as mjwarp
+            raw_data=env.sim.wp_data
+            contact_ids=wp.array(np.arange(raw_data.contact.geom.shape[0],dtype=np.int32),device=raw_data.qpos.device)
+            contact_output=wp.zeros(contact_ids.size,dtype=wp.spatial_vector,device=raw_data.qpos.device)
+            robot_root=int(model.jnt_bodyid[0])
+            robot_geometry=np.array([model.body_rootid[model.geom_bodyid[g]]==robot_root for g in range(model.ngeom)])
+            mjwarp.contact_force(env.sim.wp_model,raw_data,contact_ids,True,contact_output)
         if args.residual_commands:
             with np.load(args.residual_commands) as proposal:
                 if str(proposal['source_checkpoint_sha256'])!=checkpoint_sha or str(proposal['reference_sha256'])!=hashlib.sha256(args.source.read_bytes()).hexdigest():
@@ -134,6 +145,20 @@ def main():
             external_force_max[0]=max(external_force_max[0],float(env.sim.data.qfrc_applied[0].abs().max()),
                 float(env.sim.data.xfrc_applied[0].abs().max()))
             positions.append(q);velocities.append(v);forces.append(f)
+            if args.record_contact_forces:
+                count=int(raw_data.nacon.numpy()[0])
+                if not 0<=count<=contact_ids.size:raise RuntimeError('Invalid actual contact count')
+                mjwarp.contact_force(env.sim.wp_model,raw_data,contact_ids,True,contact_output)
+                wrench=contact_output.numpy()[:count].copy()
+                geoms=raw_data.contact.geom.numpy()[:count].copy()
+                points=raw_data.contact.pos.numpy()[:count].copy()-origin
+                normals=raw_data.contact.frame.numpy()[:count,0,:].copy()
+                if np.any(geoms<0) or np.any(geoms>=model.ngeom):raise RuntimeError('Unsupported flexible contact geometry')
+                sign=robot_geometry[geoms[:,1]].astype(float)-robot_geometry[geoms[:,0]].astype(float)
+                total=(wrench[:,:3]*sign[:,None]).sum(axis=0)
+                contact_errors.append(float(abs(total-constraint_forces[-1][:3]).max()))
+                contact_offsets.append(contact_offsets[-1]+count)
+                contact_geoms.append(geoms);contact_wrenches.append(wrench);contact_points.append(points);contact_normals.append(normals)
             # Use a separate native data object: Warp geometry caches precede
             # integration, and measurement must not refresh the executing sim.
             measured_data.qpos[:]=q;measured_data.qvel[:]=v;mujoco.mj_forward(model,measured_data)
@@ -183,6 +208,11 @@ def main():
             initial_qpos=initial_q,initial_qvel=initial_v,fps=np.array([1/model.opt.timestep]))
         np.savez(args.out/'baseline-trajectory.npz',qpos=np.array(positions)[ratio-1::ratio],
             qvel=np.array(velocities)[ratio-1::ratio],actions=actions,fps=np.array([1/env.step_dt]))
+        if args.record_contact_forces:
+            np.savez_compressed(args.out/'contacts-actual.npz',offsets=np.array(contact_offsets,dtype=np.int64),
+                geom=np.concatenate(contact_geoms),force_torque_on_geom2_world=np.concatenate(contact_wrenches),
+                position_world=np.concatenate(contact_points),normal_geom1_to_geom2_world=np.concatenate(contact_normals),
+                fps=np.array([1/model.opt.timestep]))
         a=np.array(physics)
         report={'checkpoint_sha256':checkpoint_sha,'source_sha256':hashlib.sha256(args.source.read_bytes()).hexdigest(),
             'start_reference_frame':args.start_frame,'physics_steps':len(physics),'actions':len(actions),
@@ -198,6 +228,13 @@ def main():
             'maximum_foot_compression_m':float(max(-a[:,7:9].min(),0)),
             'metric_state_alignment':'Independent native mj_forward of each post-integration recorded state; execution sim untouched',
             'external_applied_force_max':external_force_max[0],'state_resets_after_entry':0,
+            'last_reference_frame':int(cmd.frame[0]-cmd.library.clip_start[0]),
+            'reference_frame_count':int(cmd.library.clip_len[0]),
+            'actual_contact_forces_recorded':args.record_contact_forces,
+            'contact_force_root_translation_maximum_error_n':max(contact_errors) if contact_errors else None,
+            'contact_force_balance_verified':bool(contact_errors and max(contact_errors)<=1e-3),
+            'contact_trace_sha256':hashlib.sha256((args.out/'contacts-actual.npz').read_bytes()).hexdigest() if args.record_contact_forces else None,
+            'contact_force_state_alignment':'Engine preintegration contact solution; pose trajectory stores the following postintegration state',
             'metric_columns':['com_z','com_vz','H_x','H_y','H_z','com_speed','root_angular_speed',
                 'left_foot_min','right_foot_min','nonfoot_min','root_pitch','root_up_z',
                 'soft_violation','speed_ratio','effort_ratio','hard_violation'],

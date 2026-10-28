@@ -21,6 +21,7 @@ def main():
     p.add_argument('--brake-frame',type=int,help='Optional input-reference frame where ascent braking starts (requires a complete 200 Hz parent)')
     p.add_argument('--stop-frame',type=int,help='Input-reference frame held after smooth braking; never counts as a different source family')
     p.add_argument('--hold-seconds',type=float,default=2.)
+    p.add_argument('--task-kind',choices=['ascent_then_hold','traverse_then_hold','return_then_hold'],default='ascent_then_hold')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
     if a.out.exists() or min(a.start_frame,a.frames)<0:p.error('New output and nonnegative window required')
@@ -39,6 +40,8 @@ def main():
     if warp and (fps!=200. or not meta.get('complete_source_clip') or a.brake_frame is None or a.stop_frame is None
         or not 0<=a.brake_frame<a.stop_frame<len(q) or a.hold_seconds<2 or a.start_frame or a.frames):
         raise ValueError('Braking requires a complete 200 Hz parent, ordered input frames and at least two seconds holding')
+    if a.task_kind in ['traverse_then_hold','return_then_hold'] and (not warp or a.stop_frame!=len(q)-1):
+        raise ValueError('Traverse/landing must retain the complete source interval before holding')
     duration=(len(q)-1)/fps;steps=int(np.ceil(duration*50))*4
     times=np.arange(len(q))/fps;query=np.linspace(0,duration,steps+1)
     time_map=None
@@ -51,7 +54,7 @@ def main():
         slowed=begin+braking*(u-2.5*u**4+3*u**5-u**6)
         query=np.where(clock<=begin,clock,np.where(clock>=begin+braking,stop,slowed))
         if np.any(np.diff(query)<-1e-12):raise ValueError('Source-time mapping must remain monotone')
-        time_map={'kind':'ascent_then_hold','input_fps':fps,'brake_frame':a.brake_frame,'stop_frame':a.stop_frame,
+        time_map={'kind':a.task_kind,'input_fps':fps,'brake_frame':a.brake_frame,'stop_frame':a.stop_frame,
             'braking_duration_s':braking,'hold_seconds':float(clock[-1]-begin-braking),'requested_hold_seconds':a.hold_seconds,
             'description':'Source-time velocity smoothly falls from 1 to 0 with zero acceleration at both ends; original ascent prefix retained'}
     cols=np.r_[np.arange(3),np.arange(7,38)];dense=np.zeros((len(query),38))
@@ -120,6 +123,7 @@ def main():
     result={**{k:meta[k] for k in ['source_motion','source_start_frame','scene_boxes','joint_limit_factor','wrist_reference_limit_deg']},
         'frames':len(accepted),'fps':200.,'dense_window_start_frame':a.start_frame,'dense_window_start_time_s':a.start_frame/200.,
         'source_reference_sha256':hashlib.sha256((a.candidate/'x2-reference.npz').read_bytes()).hexdigest(),
+        'source_reference_path':str((a.candidate/'x2-reference.npz').resolve()),
         'model_sha256':hashlib.sha256(a.model.read_bytes()).hexdigest(),'restoration_helper_sha256':hashlib.sha256(a.helper.read_bytes()).hexdigest(),
         'uniform_time_scale':None if warp else (steps/200.)/duration,'complete_source_clip':complete and not warp,
         'task_variant':time_map,'complete_source_prefix':bool(complete and warp),
