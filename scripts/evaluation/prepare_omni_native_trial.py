@@ -22,6 +22,7 @@ def main():
     p.add_argument('--wall-seconds',type=int,default=180)
     p.add_argument('--joint-task-weight',type=float,default=.1)
     p.add_argument('--foot-task-weight',type=float,default=.1)
+    p.add_argument('--entry-contact-mode',choices=['align','preserve'],default='align',help='Preserve an explicitly calibrated reference height or align both feet initially')
     p.add_argument('--source-start-frame',type=int,help='Required only when the source artifact lacks origin metadata')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
@@ -57,7 +58,8 @@ def main():
         gap,o,w=min(values,key=lambda x:x[0]);vector=w[:3]-w[3:];length=np.linalg.norm(vector)
         if length<1e-12 or (np.sign(gap)*vector/length)[2]<.99:raise ValueError('Initial nearest foot surface is not horizontal')
         gaps[side]=gap;support[side]={'geom':m.geom(o).name,'height_m':float(w[5])}
-    offset=-.0005-max(gaps.values());entry=q[0].copy();entry[2]+=offset;d.qpos[:]=entry;mujoco.mj_forward(m,d)
+    offset=0. if a.entry_contact_mode=='preserve' else -.0005-max(gaps.values())
+    entry=q[0].copy();entry[2]+=offset;d.qpos[:]=entry;mujoco.mj_forward(m,d)
     contacts={side:[float(c.dist) for c in d.contact if body in [int(m.geom_bodyid[int(g)]) for g in c.geom] and c.dist<0] for side,body in feet.items()}
     if not all(contacts.values()) or min(x for values in contacts.values() for x in values)<-.005:raise ValueError('Initial actual contacts exceed existing native foot limits')
     heights=[0.]
@@ -70,7 +72,7 @@ def main():
     if a.joint_predictor:(a.out/'joint-prediction-snapshot.py').write_bytes(a.joint_predictor.read_bytes())
     np.savez_compressed(a.out/'reference-qpos.npz',qpos=q,qvel=v,fps=np.array([fps]))
     np.savez_compressed(a.out/'controller-posture-seed.npz',qpos=entry)
-    info={'minimum_predictor_interior_margin_rad':margin,'entry_root_z_offset_m':offset,'initial_foot_gaps_m':gaps,
+    info={'minimum_predictor_interior_margin_rad':margin,'entry_root_z_offset_m':offset,'entry_contact_mode':a.entry_contact_mode,'initial_foot_gaps_m':gaps,
         'initial_contacts_m':contacts,'support_witnesses':support,'source_start_frame':source_start,'local_start_frame':0,'entry_velocity':'zero',
         'simulation_seconds':a.seconds,'wall_seconds':a.wall_seconds,'original_reference':str(a.reference),
         'original_reference_sha256':hashlib.sha256(a.reference.read_bytes()).hexdigest(),'training_approved':False}
