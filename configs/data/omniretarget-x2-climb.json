@@ -19,7 +19,7 @@
     "revision": "b739a6cb7b1f8b9918669f8f776edb1855bfda1a",
     "package": "src/holosoma_retargeting",
     "raw_climbing_demo_count": 5,
-    "x2_support": "Custom mapping and 163-frame kinematic adaptation executed; independent dynamics and continuous execution pending"
+    "x2_support": "Independent source FK verified. Adapter hinge-Jacobian correction passed 38-column/15-body central differences and 5-frame articulation smoke; full-reference physics pending."
   },
   "server": {
     "raw": "/home/2025-Long.xh/HHD/data/supermimic/data/external/omniretarget_20261028_r1/raw",
@@ -30,7 +30,7 @@
     {
       "motion": "robot-terrain/climb_14_z_scale_1.0.npz",
       "approximate_platform_top_m": 0.475,
-      "status": "163-frame X2 kinematic candidate; world top differs from effective rise due to raised approach mat; dynamics pending",
+      "status": "Earlier 163-frame X2 candidate invalidated: upstream enum-membership skipped hinge Jacobians; re-adaptation required",
       "approximate_effective_source_rise_m": 0.4
     },
     {

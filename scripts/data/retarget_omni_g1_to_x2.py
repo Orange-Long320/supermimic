@@ -38,11 +38,12 @@ def main():
     from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
     from holosoma_retargeting.src.utils import extract_foot_sticking_sequence_velocity
     class X2Retargeter(InteractionMeshRetargeter):
-        def _build_transform_qdot_to_qvel_fast(self, use_world_omega=False):
-            # MuJoCo free-joint angular velocities are body-local. Also avoid
-            # tuple membership between NumPy scalars and pybind enums: the
+        def _build_transform_qdot_to_qvel_fast(self, use_world_omega=True):
+            # Retain the upstream default quaternion formula, checked below
+            # against native FK differences. Avoid tuple membership between
+            # NumPy scalars and pybind enums: the
             # enum's reverse equality can silently miss every hinge joint.
-            transform=super()._build_transform_qdot_to_qvel_fast(use_world_omega=False)
+            transform=super()._build_transform_qdot_to_qvel_fast(use_world_omega=True)
             for joint in range(self.robot_model.njnt):
                 if int(self.robot_model.jnt_type[joint]) in (int(mujoco.mjtJoint.mjJNT_HINGE),int(mujoco.mjtJoint.mjJNT_SLIDE)):
                     transform[int(self.robot_model.jnt_dofadr[joint]),int(self.robot_model.jnt_qposadr[joint])]=1.
