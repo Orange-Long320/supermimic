@@ -62,6 +62,7 @@ def main():
     a.out.mkdir(parents=True)
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (a.out/'restore-as-run.py').write_bytes(a.helper.read_bytes())
+    (a.out/'original-adapter-result.json').write_bytes((a.candidate/'result.json').read_bytes())
     rows=[];accepted=[]
     for index in range(a.start_frame,end):
         pose=dense[index].copy();source_index=min(int(np.searchsorted(times,query[index],side='right')-1),len(q)-2)
@@ -86,9 +87,10 @@ def main():
             'maximum_joint_correction_rad':float(abs(pose[7:]-dense[index,7:]).max()),'restoration':info})
         if index%100==0:print(json.dumps({k:v for k,v in rows[-1].items() if k!='restoration'}),flush=True)
     accepted=np.asarray(accepted)
-    np.savez_compressed(a.out/'x2-reference.npz',qpos=accepted,fps=np.array([200.]),source_start_frame=a.start_frame)
+    np.savez_compressed(a.out/'x2-reference.npz',qpos=accepted,fps=np.array([200.]),dense_window_start_frame=a.start_frame)
     complete=a.start_frame==0 and end==len(dense)
-    result={**meta,'frames':len(accepted),'fps':200.,'source_start_frame':a.start_frame,
+    result={**{k:meta[k] for k in ['source_motion','source_start_frame','scene_boxes','joint_limit_factor','wrist_reference_limit_deg']},
+        'frames':len(accepted),'fps':200.,'dense_window_start_frame':a.start_frame,'dense_window_start_time_s':a.start_frame/200.,
         'source_reference_sha256':hashlib.sha256((a.candidate/'x2-reference.npz').read_bytes()).hexdigest(),
         'model_sha256':hashlib.sha256(a.model.read_bytes()).hexdigest(),'restoration_helper_sha256':hashlib.sha256(a.helper.read_bytes()).hexdigest(),
         'uniform_time_scale':(steps/200.)/duration,'complete_source_clip':complete,
