@@ -82,6 +82,7 @@ def main():
     p.add_argument("--floor-penalty-linear",type=float,default=0.,help="Penalize nonfoot clearance below 5 mm and foot compression beyond 5 mm")
     p.add_argument("--high-frequency-geometry",action="store_true",help="Audit post-integration foot/body geometry at every 5 ms physics step")
     p.add_argument("--preserve-feasible-core",action="store_true",help="Prefer body-clear, within-speed/effort candidates and keep elites in that set when available")
+    p.add_argument("--repair-contact-min-apex",type=float,help="Takeoff-only feasibility restoration: retain this measured apex estimate and single-leg rising flight, then prioritize hard/contact constraints over score")
     p.add_argument("--air-rotation-weight",type=float,default=0.,help="Weight the rotation deficit in the first continuous airborne segment")
     p.add_argument("--air-rotation-target",type=float,default=3.8)
     p.add_argument("--landing-window-seconds",type=float,default=.2)
@@ -104,6 +105,8 @@ def main():
     if any(x is not None and (not np.isfinite(x) or x<=0) for x in [args.residual_sigma,args.clock_sigma]):p.error('Search deviations must be finite and positive')
     if args.joint_phases and (not args.tail_of or args.phase!='full' or args.baseline_air_scales):p.error('Joint phases require full phase, a preparation seed, and no air-scale-only grid')
     if args.preserve_feasible_core and (args.phase!='full' or not args.high_frequency_geometry):p.error('Core-preserving search requires a full rollout with physics-rate geometry')
+    if args.repair_contact_min_apex is not None and (args.phase!='takeoff' or not args.high_frequency_geometry or not np.isfinite(args.repair_contact_min_apex) or args.repair_contact_min_apex<=0):
+        p.error('Contact repair needs takeoff phase, physics-rate geometry and positive finite apex bound')
     if args.landing_guide_delay is not None and (not args.landing_ckpt or not np.isfinite(args.landing_guide_delay) or args.landing_guide_delay<-.3 or len(args.landing_switch_times)!=1):p.error('Guide-relative landing needs one landing policy and a finite offset of at least -0.3 seconds')
     if bool(args.early_recovery_joints)!=bool(args.early_recovery_offsets):p.error('Early recovery requires both joint names and offsets')
     if args.early_recovery_offsets:
@@ -287,7 +290,8 @@ def main():
     best=None
     physics_limits=np.zeros((args.num_envs,4))
     physics_geometry=np.zeros((args.num_envs,3));physics_geometry[:,2]=1e3
-    from supermimic.data.design_limits import joint_limit_statistics,core_valid,candidate_priority
+    from supermimic.data.design_limits import joint_limit_statistics,core_valid,candidate_priority,contact_repair_priority,contact_repair_eligible
+    priority=(lambda report:contact_repair_priority(report,args.repair_contact_min_apex)) if args.repair_contact_min_apex is not None else (lambda report:candidate_priority(report,args.phase=='takeoff',args.preserve_feasible_core))
     limit_constants=[torch.as_tensor(x,dtype=torch.float64,device=device) for x in
                      [lower,upper,hard_lower,hard_upper,velocity_limit,effort]]
     device_limits=torch.zeros((args.num_envs,4),dtype=torch.float64,device=device)
@@ -668,7 +672,7 @@ def main():
                 for e,report in enumerate(reports):
                     parameters=population[a+e].copy()
                     outcomes.append((report["cost"],parameters,report))
-                    preferred=best is None or candidate_priority(report,args.phase=='takeoff',args.preserve_feasible_core)<candidate_priority(best[2],args.phase=='takeoff',args.preserve_feasible_core)
+                    preferred=best is None or priority(report)<priority(best[2])
                     if preferred:
                         best=(report["cost"],parameters,report)
                         canonical_q=payload[0][:len(payload[3][e]),e].copy()
@@ -679,9 +683,14 @@ def main():
                         temporary.replace(args.out/"best-trajectory.npz")
                         (args.out/"best-frames.json").write_text(json.dumps(payload[3][e]))
                 if time.monotonic()-start>args.max_seconds:break
-            outcomes.sort(key=lambda x:x[0])
+            outcomes.sort(key=(lambda x:priority(x[2])) if args.repair_contact_min_apex is not None else (lambda x:x[0]))
             core_pool=[r for r in outcomes if core_valid(r[2])] if args.preserve_feasible_core else []
             elite_pool=core_pool or outcomes
+            if args.repair_contact_min_apex is not None:
+                repair_pool=[r for r in outcomes if contact_repair_eligible(r[2],args.repair_contact_min_apex)]
+                hard_pool=[r for r in repair_pool if r[2]['maxima']['hard']<1e-4]
+                contact_pool=[r for r in hard_pool if r[2]['maxima']['foot_penetration']<.005]
+                elite_pool=contact_pool or hard_pool or repair_pool or outcomes
             elite=np.array([r[1] for r in elite_pool[:max(2,len(outcomes)//(16 if args.local_refinement else 4))]])
             mean=(.25*mean+.5*elite.mean(axis=0)+.25*best[1]) if args.local_refinement else .3*mean+.7*elite.mean(axis=0)
             empirical_covariance=np.cov(elite,rowvar=False) if len(elite)>1 else np.zeros_like(covariance)
@@ -690,6 +699,7 @@ def main():
             record["iteration_elapsed_s"]=time.monotonic()-iteration_start
             record["device"]=str(device)
             if args.preserve_feasible_core:record.update(core_valid_candidates=len(core_pool),elite_pool_size=len(elite_pool),best_core_valid=bool(core_valid(best[2])))
+            if args.repair_contact_min_apex is not None:record.update(contact_repair_eligible=bool(contact_repair_eligible(best[2],args.repair_contact_min_apex)),elite_pool_size=len(elite_pool))
             if device.type=="cuda":
                 record["torch_peak_allocated_mib"]=torch.cuda.max_memory_allocated(device)/2**20
                 record["torch_peak_reserved_mib"]=torch.cuda.max_memory_reserved(device)/2**20
