@@ -38,9 +38,10 @@ def main():
     p.add_argument('--max-seconds', type=float, default=300.)
     p.add_argument('--seconds', type=float, default=2.)
     p.add_argument('--sigma', type=float, default=.04)
+    p.add_argument('--sigma-floor', type=float, default=.005)
     p.add_argument('--initialize', type=Path, help='Same-source residual coefficients for local refinement')
     p.add_argument('--terminal-seconds', type=float, default=.3)
-    p.add_argument('--phase', choices=['landing','preparation'], default='landing')
+    p.add_argument('--phase', choices=['landing','preparation','landing_limits'], default='landing')
     p.add_argument('--base-residual', type=Path)
     p.add_argument('--base-capture', type=Path, help='Independent seven-second capture of the fixed base residual')
     args = p.parse_args()
@@ -50,10 +51,14 @@ def main():
         p.error('Invalid bounded native search')
     if not 0 < args.sigma <= .1 or not 0 < args.max_seconds <= 900:
         p.error('Invalid search budget')
+    if not 0 < args.sigma_floor <= args.sigma:
+        p.error('Covariance floor must be positive and no larger than initial sigma')
     if not .3 <= args.terminal_seconds <= 1. or args.terminal_seconds > args.seconds:
         p.error('Invalid terminal stability window')
     if bool(args.base_residual) != bool(args.base_capture) or (args.phase == 'preparation' and (not args.base_residual or args.seconds != 7 or args.terminal_seconds != 1)):
         p.error('Preparation search requires an independently recorded base and full7s/terminal1s coverage')
+    if args.phase == 'landing_limits' and (not args.base_residual or args.seconds != 7 or args.terminal_seconds != 1):
+        p.error('Landing-limit refinement requires an independently recorded full7s base')
     if os.environ.get('CUDA_VISIBLE_DEVICES') != str(args.gpu):
         raise ValueError('Explicit physical GPU selection is required')
     query = lambda kind, fields: subprocess.check_output(
@@ -119,6 +124,9 @@ def main():
         tokens = ['hip_', 'knee_', 'ankle_'] if args.phase == 'preparation' else ['hip_', 'knee_', 'ankle_', 'waist_']
         joints = [i for i, n in enumerate(names) if any(s in n for s in tokens)]
         knots = np.array([-.02, 0., .06, .12, .22, .40, .60, .70] if args.phase == 'preparation' else [.70, .82, .96, 1.10, 1.26, 1.50, 1.70])
+        if args.phase == 'landing_limits':
+            joints = [names.index(n) for n in ['waist_pitch_joint','waist_roll_joint','right_ankle_pitch_joint']]
+            knots = np.array([.88,.94,.98,1.02,1.06,1.10,1.16,1.22,1.28,1.34,1.42])
         times = np.arange(350)*.02
         basis = np.zeros((350, len(knots)-2))
         for row, t in enumerate(times):
@@ -281,7 +289,7 @@ def main():
             if iteration:
                 elite = population[order[:max(4,args.envs//8)]]
                 mean = .2*mean+.8*elite.mean(0)
-                std = (.2*std+.8*elite.std(0)).clamp(min=.005)
+                std = (.2*std+.8*elite.std(0)).clamp(min=args.sigma_floor)
             entry = {'iteration':iteration,'elapsed_s':time.monotonic()-start,'best':best_summary,
                 'population_winner':summaries[winner], 'initial_state_maximum_error':initial_error,
                 'population_original_failure_count':sum(s['original_failure'] for s in summaries),
