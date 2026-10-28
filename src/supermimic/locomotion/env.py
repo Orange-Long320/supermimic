@@ -77,6 +77,11 @@ class VelocityMotionCommand(MultiClipMotionCommand):
         self.reference_exhausted[env_ids] = False
         self._sample_velocity(env_ids[self.is_velocity[env_ids]])
 
+    def reset_to_frame(self, env_ids, frame):
+        super().reset_to_frame(env_ids, frame)
+        self.reference_exhausted[env_ids] = False
+        self._sample_velocity(env_ids[self.is_velocity[env_ids]])
+
     def _write_reference_state_to_sim(self, env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel):
         from supermimic.kinematics.rotations import heading_quat
 

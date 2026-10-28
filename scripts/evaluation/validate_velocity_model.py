@@ -19,7 +19,7 @@ def main(checkpoint: Path, manifest: Path, out: Path, collection_steps: int = 30
         raise ValueError("Need at least 34 collection steps for a 32-step check")
     cfg = tyro.cli(TrainConfig, args=[
         "--robot", "x2_ultra", "--velocity.enabled", "--env.anchor-obs", "--seed", str(seed),
-        "--run-name", out.parent.name + "_validation", "--resume", str(checkpoint),
+        "--run-name", out.parent.name + "_" + out.stem + "_validation", "--resume", str(checkpoint),
         "--data.manifest", str(manifest), "--env.num-envs", "128",
         "--env.replay-capacity", str(collection_steps + 64),
         "--wm-trainer.batch-size", "128", "--wm-trainer.compile", "None",

@@ -327,5 +327,8 @@ def test_velocity_clip_end_does_not_reset_physical_state():
         cmd._resample_command(ids)
         assert not cmd.reference_exhausted[ids].any()
         assert cmd.reference_exhausted[cmd.is_velocity.nonzero().squeeze(-1)[1:]].all()
+        ids = cmd.is_velocity.nonzero().squeeze(-1)[1:]
+        cmd.reset_to_frame(ids, torch.zeros_like(ids))
+        assert not cmd.reference_exhausted[cmd.is_velocity].any()
     finally:
         env.close()
