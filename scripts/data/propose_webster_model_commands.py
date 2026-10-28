@@ -1,7 +1,7 @@
 """Propose bounded preparation changes with a frozen short-horizon world model.
 
-Uses recorded actions and bias-corrected, four-step predictions. This is an
-open-loop proposal only: no actual state, policy, physics or checkpoint is edited.
+Uses recorded actions or optional frozen-policy feedback and bias-corrected,
+four-step predictions. No actual state, policy, physics or checkpoint is edited.
 Every exported parameter row still requires independent native simulation.
 """
 import argparse
@@ -32,6 +32,7 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--steps', type=int, default=40)
     parser.add_argument('--trust', type=float, default=.1, help='Maximum normalized effort coefficient change')
+    parser.add_argument('--policy-feedback', action='store_true', help='Recompute frozen policy actions and observation histories through predicted states; requires captured native observations')
     args = parser.parse_args()
     if args.ckpt.name == 'ckpt_latest.pt' or args.steps <= 0 or not 0 < args.trust <= .2:
         parser.error('Use an immutable checkpoint, positive steps and trust in (0,.2]')
@@ -71,6 +72,60 @@ def main():
     cfg = dict(wm_data['config']['world_model']); cfg['state_spec'] = StateSpecCfg(**cfg['state_spec'])
     wm = WorldModel(WorldModelCfg(**cfg), None, 'cpu')
     wm.load_state_dict(wm_data['wm']); wm.eval(); wm.requires_grad_(False)
+    feedback_validation = None
+    if args.policy_feedback:
+        unsupported = [k for k in ('landing_ckpt', 'bounded_target_joints', 'joint_stop_margin', 'physics_command_projection')
+                       if configuration['arguments'].get(k)]
+        if unsupported:
+            raise ValueError(f'Feedback prediction does not implement these captured controllers: {unsupported}')
+        from supermimic.envs.mdp.motion_library import MotionLibrary
+        from supermimic.eval.benchmark import load_policy_from_checkpoint
+        from supermimic.world_model.heads import OBS_TERMS, analytic_observation, anchor_relative_obs, flatten_history_term_major
+        captured = np.load(args.trace/'baseline-observations.npz')
+        policy, policy_cfg = load_policy_from_checkpoint(args.ckpt, 'cpu')
+        policy.requires_grad_(False)
+        q0 = torch.tensor([PROFILE['default_joint_pos'][n] for n in PROFILE['joint_names']], dtype=states.dtype)
+        tracked = tuple(PROFILE['tracked_bodies']); anchor = tracked.index(PROFILE['anchor_body'])
+        source = Path(configuration['arguments']['source'])
+        if digest(source) != configuration['source_sha256']:
+            raise ValueError('Reference source changed after calibration capture')
+        lib = MotionLibrary([source], tracked, q0, device='cpu')
+        frames = torch.tensor(captured['reference_frame'], dtype=torch.long)
+        native_goals = torch.tensor(captured['goal']); native_obs = torch.tensor(captured['policy'])
+        history_length = native_obs.shape[-1]//sum(d for _, d in OBS_TERMS)
+        if len(native_obs) != len(states): raise ValueError('Observation/state capture timelines differ')
+        histories = []; offset = 0
+        for _, size in OBS_TERMS:
+            histories.append(native_obs[:, offset:offset+history_length*size].reshape(len(states), history_length, size))
+            offset += history_length*size
+        histories = torch.cat(histories, -1).permute(1, 0, 2)
+        anchor_index = fk.body_index(PROFILE['anchor_body'])
+        future_frames = policy_cfg['env'].get('future_frames', 10)
+        def feedback_goal(state, indices):
+            frame = frames[indices]
+            goal = lib.goal_window(frame, future_frames)
+            if policy_cfg['env'].get('anchor_obs', False):
+                out = fk(state[:, :nq]); reference = lib.bodies(frame)
+                rel = anchor_relative_obs(out['pos'][:, anchor_index], out['quat'][:, anchor_index],
+                    reference.pos_w[:, anchor], reference.quat_w[:, anchor])
+                goal = torch.cat([goal, rel], -1)
+            return goal
+        with torch.no_grad():
+            before = torch.cat([torch.tensor(np.r_[captured['initial_qpos'], captured['initial_qvel']], dtype=states.dtype)[None], states[:-1]])
+            reproduced_goals = feedback_goal(before, torch.arange(len(states)))
+            goal_error = float((reproduced_goals-native_goals).abs().max())
+            # Independently verify the full rolling input history, not just its newest sample.
+            history = histories[:, :1].clone(); observation_error = 0.
+            for t in range(1, len(states)):
+                current = analytic_observation(states[t-1:t], actions[t-1:t], torch.zeros(1, XI_DIM), q0)
+                history = torch.cat([history[1:], current[None]], 0)
+                observation_error = max(observation_error, float((flatten_history_term_major(history)[0]-native_obs[t]).abs().max()))
+            if max(goal_error, observation_error) >= 3e-5:
+                raise ValueError(f'Native feedback reconstruction failed: goal={goal_error}, history={observation_error}')
+            native_base_actions = policy(native_obs, native_goals)
+            residuals = actions-native_base_actions
+        feedback_validation = {'maximum_goal_error': goal_error, 'maximum_history_error': observation_error,
+            'observations_sha256': digest(args.trace/'baseline-observations.npz'), 'reference_frames_from_native_capture': True}
     foot_geoms = [g for g in range(model.ngeom) if 'foot_' in model.geom(g).name]
     assert foot_geoms and np.allclose(model.geom_friction[foot_geoms, 0], 1)
     xi = torch.zeros((len(starts), XI_DIM)); xi[:, 0] = 1
@@ -106,27 +161,34 @@ def main():
                             abs(float(check[i, 1])-native_data.subtree_linvel[root, 2]))
         assert max(pose_error, com_error) < 3e-5, 'Asset FK differs from the recorded native scene; proposal rejected'
         native_features = torch.stack([physical_features(states[starts+h]) for h in range(1, 5)])
-        s = states[starts]; baseline_states = []
-        for h in range(1, 5):
-            s = wm.step(s, actions[starts+h], xi); baseline_states.append(s)
-        baseline_states = torch.stack(baseline_states)
-        baseline_features = torch.stack([physical_features(s) for s in baseline_states])
     # Native servo conversion; bounds and torque clipping remain in actual simulation.
     scale = PROFILE['action_scale']
     conversion = torch.tensor([PROFILE['effort_limit'][n]/PROFILE['stiffness'][n]/(scale[n] if isinstance(scale, dict) else scale) for n in joints])
     basis = preparation_command_basis((starts[None, :]+torch.arange(1, 5)[:, None])*.02, float(p[0]))
+    def predict(change_parameters):
+        s = states[starts]; predicted = []
+        history = histories[:, starts+1].clone() if args.policy_feedback else None
+        for h in range(4):
+            indices = starts+h+1
+            change = (basis[h, :, 2:4]@change_parameters.reshape(2, 2))*conversion
+            action = (policy(flatten_history_term_major(history), feedback_goal(s, indices))+residuals[indices]
+                      if args.policy_feedback else actions[indices].clone())
+            action = action.clone(); action[:, joint_indices] += change
+            s = wm.step(s, action, xi); predicted.append(s)
+            if args.policy_feedback:
+                current = analytic_observation(s, action, xi, q0)
+                history = torch.cat([history[1:], current[None]], 0)
+        return torch.stack(predicted)
+    with torch.no_grad():
+        baseline_states = predict(torch.zeros(4))
+        baseline_features = torch.stack([physical_features(s) for s in baseline_states])
     lo = as_tensor(model.jnt_range[1:, 0]); hi = as_tensor(model.jnt_range[1:, 1])
     lower = torch.maximum(torch.full((4,), -args.trust), as_tensor(-1.5-p[columns]))
     upper = torch.minimum(torch.full((4,), args.trust), as_tensor(1.5-p[columns]))
     delta = torch.zeros(4, requires_grad=True); opt = torch.optim.Adam([delta], lr=.01)
     best = None; history = []
     for iteration in range(args.steps):
-        s = states[starts]; predicted = []
-        for h in range(4):
-            change = (basis[h, :, 2:4]@delta.reshape(2, 2))*conversion
-            action = actions[starts+h+1].clone(); action[:, joint_indices] += change
-            s = wm.step(s, action, xi); predicted.append(s)
-        predicted = torch.stack(predicted)
+        predicted = predict(delta)
         features = torch.stack([physical_features(s) for s in predicted])
         corrected = native_features+(features-baseline_features)
         # This vertical-energy proxy also scores supported states; it is not a flight certificate.
@@ -148,7 +210,9 @@ def main():
         row = p.copy(); row[columns] = np.clip(row[columns]+factor*best[1].numpy(), -1.5, 1.5); candidates.append(row)
     np.savez(args.out/'parameter-grid.npz', parameters=np.asarray(candidates))
     result = {'approved_for_training': False, 'actual_state_modified': False, 'policy_trained': False,
-        'scope': 'Bias-corrected four-step, recorded-action model proposals; native replay remains mandatory.',
+        'scope': ('Bias-corrected four-step frozen-policy feedback proposals; native replay remains mandatory.' if args.policy_feedback
+                  else 'Bias-corrected four-step, recorded-action model proposals; native replay remains mandatory.'),
+        'policy_feedback': args.policy_feedback, 'feedback_validation': feedback_validation,
         'native_fk_validation': {'maximum_link_position_error_m': pose_error, 'maximum_COM_height_or_velocity_error': com_error},
         'columns': columns, 'joints': joints, 'scales': scales, 'best_delta': best[1].tolist(), 'history': history,
         'elapsed_s': time.monotonic()-started, 'input_sha256': {'ckpt': digest(args.ckpt), 'solution': digest(args.solution),

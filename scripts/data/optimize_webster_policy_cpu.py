@@ -79,6 +79,7 @@ def main():
     p.add_argument("--hard-penalty-linear",type=float,default=0.,help="Additional exact-penalty term to avoid trading small hard-limit violations for score")
     p.add_argument("--local-refinement",action="store_true",help="Refine a warm start with smaller steps, top 1/16 elites and a best-anchored mean")
     p.add_argument("--residual-sigma",type=float,help="Initial search deviation in normalized motor-effort fractions")
+    p.add_argument("--residual-sigma-floor",type=float,default=.01,help="Per-iteration residual covariance regularization deviation; choose below the initial deviation for micro-refinement")
     p.add_argument("--clock-sigma",type=float,help="Initial search deviation for the preparation duration or air scale")
     p.add_argument("--search-groups",help="Comma-separated first joint names of residual groups to optimize; retain all other warm-start coefficients")
     p.add_argument("--search-parameter-indices",type=int,nargs='+',help="Restrict search to these exact coefficient indices; timing stays frozen unless explicitly included")
@@ -101,6 +102,8 @@ def main():
     p.add_argument("--projection-frequency",type=float,default=35.)
     p.add_argument("--projection-margin",type=float,default=.04)
     args=p.parse_args()
+    if not np.isfinite(args.residual_sigma_floor) or args.residual_sigma_floor<0:
+        p.error('Residual covariance floor must be finite and nonnegative')
     if not np.isfinite(args.apex_height_weight) or args.apex_height_weight<0 or not np.isfinite(args.target_apex_height) or args.target_apex_height<=0:
         p.error('Apex objective requires finite nonnegative weight and positive height')
     if args.air_rotation_weight<0 or args.air_rotation_target<=0 or not 0<args.landing_window_seconds<=args.seconds:
@@ -295,7 +298,7 @@ def main():
     lo=np.r_[.6 if args.tail_of else .45,np.full(dimension-1,-1.5)]
     hi=np.r_[1.4 if args.tail_of else 1.2,np.full(dimension-1,1.5)]
     if args.joint_phases:lo[0]=.45;hi[0]=1.2;lo[preparation_dimension]=.6;hi[preparation_dimension]=1.4
-    covariance_floor=np.full(dimension,.01);covariance_floor[clock_indices]=.003
+    covariance_floor=np.full(dimension,args.residual_sigma_floor);covariance_floor[clock_indices]=.003
     start=time.monotonic()
     evaluations=0
     best=None
