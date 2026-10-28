@@ -39,8 +39,60 @@ def main():
     from scipy.spatial.transform import Rotation
     from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
     from holosoma_retargeting.src.utils import extract_foot_sticking_sequence_velocity
+    from holosoma_retargeting.src.utils import calculate_laplacian_coordinates
     from holosoma_retargeting.config_types.retargeter import FootLockConfig
     class X2Retargeter(InteractionMeshRetargeter):
+        def _update_jacobians_and_phis_from_q(self,q):
+            jacobians,distances=super()._update_jacobians_and_phis_from_q(q)
+            if a.collision_backtracking:
+                m=self.robot_model;d=self.robot_data
+                for pair in list(distances):
+                    robot=[g for g in pair if m.geom(g).name.startswith('foot_')]
+                    obstacle=[g for g in pair if m.geom(g).name=='ground' or m.geom(g).name.startswith('multi_boxes_')]
+                    if len(robot)!=1 or len(obstacle)!=1:continue
+                    g,o=robot[0],obstacle[0];w=np.zeros(6);distance=float(mujoco.mj_geomDistance(m,d,g,o,.02,w));vector=w[:3]-w[3:];length=np.linalg.norm(vector)
+                    if length<1e-10:continue
+                    normal=np.sign(distance)*vector/length
+                    if normal[2]<.999999 or int(m.geom_type[g])!=int(mujoco.mjtGeom.mjGEOM_MESH):continue
+                    mesh=int(m.geom_dataid[g]);adr,count=m.mesh_vertadr[mesh],m.mesh_vertnum[mesh]
+                    vertices=m.mesh_vert[adr:adr+count]@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
+                    if int(m.geom_type[o])==int(mujoco.mjtGeom.mjGEOM_BOX):
+                        relative=(vertices-d.geom_xpos[o])@d.geom_xmat[o].reshape(3,3)
+                        vertices=vertices[(abs(relative[:,:2])<=m.geom_size[o,:2]).all(1)]
+                    if not len(vertices):continue
+                    vertices=vertices[vertices[:,2]<=vertices[:,2].min()+.02]
+                    directions=np.array([[np.cos(t),np.sin(t)] for t in np.arange(8)*np.pi/4])
+                    indices=np.unique(np.r_[vertices[:,2].argmin(),(vertices[:,:2]@directions.T).argmax(0)])
+                    body=int(m.geom_bodyid[g]);rotation=d.xmat[body].reshape(3,3).copy();position=d.xpos[body].copy()
+                    for number,index in enumerate(indices):
+                        point=rotation.T@(vertices[index]-position);key=('active_sole_vertex',g,o,number)
+                        jacobians[key]=normal@self._calc_contact_jacobian_from_point(body,point)
+                        distances[key]=float(normal@(vertices[index]-w[3:]))
+            # A flat sole can have several equally closest points. A single
+            # selected witness does not constrain the other active corners.
+            # Cuts retain actual rigid-body surface points from rejected
+            # steps; no new collision volume or support surface is invented.
+            for i,(body,point,anchor,normal) in enumerate(getattr(self,'_plane_cuts',[])):
+                world=self.robot_data.xpos[body]+self.robot_data.xmat[body].reshape(3,3)@point
+                jacobians[('plane_witness',i)]=normal@self._calc_contact_jacobian_from_point(body,point)
+                distances[('plane_witness',i)]=float(normal@(world-anchor))
+            return jacobians,distances
+
+        def _add_horizontal_plane_witnesses(self,q):
+            m=self.robot_model;d=self.robot_data;d.qpos[:]=q;mujoco.mj_forward(m,d);added=0
+            obstacles=[g for g in range(m.ngeom) if m.geom(g).name=='ground' or m.geom(g).name.startswith('multi_boxes_')]
+            robot=[g for g in range(m.ngeom) if g not in obstacles and (m.geom_contype[g] or m.geom_conaffinity[g])]
+            for g in robot:
+                for o in obstacles:
+                    witness=np.zeros(6);distance=float(mujoco.mj_geomDistance(m,d,g,o,.02,witness));vector=witness[:3]-witness[3:];length=np.linalg.norm(vector)
+                    if distance>=-self.penetration_tolerance or length<1e-10:continue
+                    normal=np.sign(distance)*vector/length
+                    if normal[2]<.999999:continue
+                    body=int(m.geom_bodyid[g]);point=d.xmat[body].reshape(3,3).T@(witness[:3]-d.xpos[body]);anchor=witness[3:].copy()
+                    if any(b==body and np.linalg.norm(p-point)<1e-7 and abs(float(n@(a-anchor)))<1e-7 for b,p,a,n in self._plane_cuts):continue
+                    self._plane_cuts.append((body,point,anchor,normal));added+=1
+            return added
+
         def _maximum_environment_penetration(self,q):
             m=self.robot_model;d=self.robot_data;d.qpos[:]=q;mujoco.mj_forward(m,d)
             obstacles=[g for g in range(m.ngeom) if m.geom(g).name=='ground' or m.geom(g).name.startswith('multi_boxes_')]
@@ -48,30 +100,58 @@ def main():
             witness=np.zeros(6)
             return max(0.,max(-float(mujoco.mj_geomDistance(m,d,g,o,.02,witness)) for g in robot for o in obstacles))
 
+        def _actual_tracking_cost(self,q,kwargs):
+            d=self.robot_data;d.qpos[:]=q;mujoco.mj_kinematics(self.robot_model,d)
+            points=np.array([d.xpos[self.robot_model.body(name).id].copy() for name in self.laplacian_match_links.values()])
+            lap=calculate_laplacian_coordinates(np.vstack([points,kwargs['obj_pts_local']]),kwargs['adj_list'])
+            tracking=self.laplacian_weights*float(np.square(lap-kwargs['target_laplacian']).sum())
+            smooth=self.smooth_weight*float(np.square(q[self.q_a_indices]-kwargs['q_t_last'][self.q_a_indices]).sum())
+            return tracking+smooth+float(np.sum(self.Q_diag*np.square(q[self.q_a_indices])))
+
         def iterate(self,**kwargs):
             if not a.collision_backtracking:return super().iterate(**kwargs)
             if a.source_flat_foot_lock:raise ValueError('Backtracking with new foot-lock equalities requires a separate constraint merit; do not silently combine')
-            q=kwargs.pop('q_n').copy();budget=kwargs.pop('n_iter')*3;last_cost=np.inf;backtracks=0
+            q=kwargs.pop('q_n').copy();budget=kwargs.pop('n_iter')*3;last_cost=np.inf;backtracks=0;self._plane_cuts=[]
+            last_actual=self._actual_tracking_cost(q,kwargs);stopping_reason='iteration_budget'
             allowed=self.penetration_tolerance+5e-5
             for iteration in range(budget):
                 before=self._maximum_environment_penetration(q)
-                proposed,cost=self.solve_single_iteration(q_a_n_last=q[self.q_a_indices],**kwargs)
                 accepted=None
-                for reduction in range(15):
-                    alpha=2.**(-reduction);trial=q+alpha*(proposed-q);mujoco.mj_normalizeQuat(self.robot_model,trial)
-                    penetration=self._maximum_environment_penetration(trial)
-                    if penetration<=allowed or penetration<before-1e-8:
-                        accepted=trial;backtracks+=reduction;break
-                if accepted is None:raise RuntimeError(f'No collision-merit descent at frame {kwargs["frame_idx"]}; penetration={before}')
-                q=accepted
-                if reduction==0 and np.isclose(cost,last_cost) and penetration<=allowed:break
+                original_step=self.step_size
+                try:
+                    for contraction in range(7):
+                        self.step_size=original_step*2.**(-contraction)
+                        solve_kwargs=dict(kwargs)
+                        # The initial feasibility fallback may drop the trust
+                        # region only for the first initialization step.
+                        solve_kwargs['init_t']=kwargs.get('init_t',False) and iteration==0
+                        proposed,cost=self.solve_single_iteration(q_a_n_last=q[self.q_a_indices],**solve_kwargs)
+                        for reduction in range(15):
+                            alpha=2.**(-reduction);trial=q+alpha*(proposed-q);mujoco.mj_normalizeQuat(self.robot_model,trial)
+                            penetration=self._maximum_environment_penetration(trial)
+                            if penetration<=allowed or penetration<before-1e-8:
+                                accepted=trial;backtracks+=reduction;break
+                        if accepted is not None:break
+                finally:self.step_size=original_step
+                if accepted is None:
+                    if self._add_horizontal_plane_witnesses(proposed):continue
+                    np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q,proposed=proposed)
+                    raise RuntimeError(f'No collision-merit descent at frame {kwargs["frame_idx"]}; penetration={before}')
+                accepted_step=float(np.linalg.norm(accepted-q));q=accepted
+                actual=self._actual_tracking_cost(q,kwargs)
+                if iteration>=2 and accepted_step<1e-4 and abs(actual-last_actual)<1e-5*max(1.,abs(actual)) and penetration<=allowed:
+                    stopping_reason='small_accepted_step_and_actual_objective_change';break
+                if reduction==0 and np.isclose(cost,last_cost) and penetration<=allowed:
+                    stopping_reason='full_step_cost_converged';break
                 last_cost=cost
+                last_actual=actual
             final=self._maximum_environment_penetration(q)
             if final>allowed:
                 np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q)
                 raise RuntimeError(f'Collision SQP did not converge at frame {kwargs["frame_idx"]}: {final}m after {budget} iterations')
             if not hasattr(self,'backtracking_records'):self.backtracking_records=[]
-            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'maximum_penetration_m':final})
+            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'maximum_penetration_m':final,'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
+            if kwargs['frame_idx']%30==0:(a.out/'collision-backtracking-progress.json').write_text(json.dumps(self.backtracking_records,indent=2)+'\n')
             return q,cost
 
         def _build_transform_qdot_to_qvel_fast(self, use_world_omega=True):
