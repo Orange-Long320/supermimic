@@ -47,7 +47,7 @@ def main():
         'actuator_gainprm','actuator_biasprm','actuator_forcerange','geom_friction','geom_solref','geom_solimp',
         'geom_contype','geom_conaffinity','mesh_vert','mesh_face']
     before={n:np.asarray(getattr(m,n)).copy() for n in protected}
-    rows=[]
+    rows=[];profile=[]
     for side in ['left','right']:
         b=m.body('robot/'+side+'_ankle_roll_link').id
         candidates=[g for g in range(m.ngeom) if m.geom_bodyid[g]==b and (m.geom_contype[g] or m.geom_conaffinity[g])]
@@ -65,6 +65,10 @@ def main():
         m.geom_type[g]=int(mujoco.mjtGeom.mjGEOM_BOX);m.geom_dataid[g]=-1
         m.geom_size[g]=[hx,hy,hz];m.geom_sameframe[g]=0
         m.geom_rbound[g]=np.linalg.norm([hx,hy,hz]);m.geom_aabb[g]=[0,0,0,hx,hy,hz]
+        profile.append({'side':side,'geom':m.geom(g).name.rsplit('/',1)[-1],
+            'half_size_m':m.geom_size[g].tolist(),'position_in_body_m':m.geom_pos[g].tolist(),
+            'quaternion_in_body_wxyz':m.geom_quat[g].tolist(),
+            'source_mesh_vertices_sha256':hashlib.sha256(m.mesh_vert[a:a+n].tobytes()).hexdigest()})
         rows.append({'side':side,'geom':m.geom(g).name,'full_dimensions_m':[2*hx,2*hy,2*hz],
             'bottom_above_original_mesh_minimum_m':.00025,'hull_constraint_violation_m':violation,
             'footprint_area_m2':float(4*hx*hy),'center_in_level_basis_m':[cx,cy,cz]})
@@ -77,6 +81,8 @@ def main():
         'scope':'Independent model copy; existing training models and inputs untouched.',
         'approved_for_training':False,'dynamic_tracking_verified':False}
     (args.out/'result.json').write_text(json.dumps(report,indent=2))
+    (args.out/'sole-boxes.json').write_text(json.dumps({'robot':'x2_ultra','sole_boxes':profile,
+        'source_model_sha256':report['source_model_sha256'],'fit_report':'result.json'},indent=2))
     print(json.dumps(report),flush=True)
 
 

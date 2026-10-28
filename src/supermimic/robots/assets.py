@@ -9,7 +9,8 @@ from supermimic.robots.dimensions import PROFILE, ROBOT, robot_xml_path
 
 
 def get_spec():
-    return mujoco.MjSpec.from_file(str(robot_xml_path()))
+    from supermimic.robots.sole_collision import apply_sole_box_profile
+    return apply_sole_box_profile(mujoco.MjSpec.from_file(str(robot_xml_path())))
 
 
 def get_robot_cfg():

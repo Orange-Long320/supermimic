@@ -9,6 +9,15 @@ from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation
 
 
+def collision_vertices(model,geom):
+    if int(model.geom_type[geom])==int(mujoco.mjtGeom.mjGEOM_BOX):
+        return np.array([[x,y,z] for x in [-1.,1.] for y in [-1.,1.] for z in [-1.,1.]])*model.geom_size[geom]
+    k=int(model.geom_dataid[geom])
+    if k<0:raise ValueError('Unsupported collision geometry')
+    a,n=model.mesh_vertadr[k],model.mesh_vertnum[k]
+    return model.mesh_vert[a:a+n].astype(float)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--model',type=Path,required=True);p.add_argument('--initial',type=Path,required=True)
@@ -29,7 +38,7 @@ def main():
         candidates=[]
         for g in range(m.ngeom):
             if int(m.geom_bodyid[g])!=body or not (m.geom_contype[g] or m.geom_conaffinity[g]):continue
-            k=int(m.geom_dataid[g]);a,n=m.mesh_vertadr[k],m.mesh_vertnum[k];vertices=m.mesh_vert[a:a+n].astype(float)
+            vertices=collision_vertices(m,g)
             hull=ConvexHull(vertices);tri=vertices[hull.simplices]
             areas=np.linalg.norm(np.cross(tri[:,1]-tri[:,0],tri[:,2]-tri[:,0]),axis=1)/2
             planes,index=np.unique(np.round(hull.equations,5),axis=0,return_inverse=True)
@@ -58,8 +67,7 @@ def main():
             vertices=[]
             for g in range(m.ngeom):
                 if int(m.geom_bodyid[g])!=body or not(m.geom_contype[g] or m.geom_conaffinity[g]):continue
-                k=int(m.geom_dataid[g]);a,n=m.mesh_vertadr[k],m.mesh_vertnum[k]
-                world=m.mesh_vert[a:a+n]@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
+                world=collision_vertices(m,g)@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
                 local=Rotation.from_matrix(d.xmat[body].reshape(3,3)).inv().apply(world-d.xpos[body])
                 vertices.append(rotation.apply(local))
             offsets=np.concatenate(vertices)@basis
@@ -127,8 +135,7 @@ def main():
             if int(m.body_rootid[int(m.geom_bodyid[g])])!=root or not (m.geom_contype[g] or m.geom_conaffinity[g]):continue
             group=next((s for s,b in feet.items() if int(m.geom_bodyid[g])==b),'nonfoot')
             if group!=side:continue
-            k=m.geom_dataid[g];a,n=m.mesh_vertadr[k],m.mesh_vertnum[k]
-            height.append(float((m.mesh_vert[a:a+n]@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])[:,2].min()))
+            height.append(float((collision_vertices(m,g)@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])[:,2].min()))
         item['heights'][side]=min(height)
     normal={s:0. for s in feet};loaded_points={s:[] for s in feet}
     for i,c in enumerate(d.contact[:d.ncon]):

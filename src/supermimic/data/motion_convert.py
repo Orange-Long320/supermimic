@@ -27,6 +27,7 @@ from __future__ import annotations
 from supermimic.robots.dimensions import NJ, NQ, NV, STATE_DIM, FEAT_DIM, DELTA_DIM, XI_DIM, OBS_DIM, GOAL_FEAT_DIM, PROFILE, ROBOT
 
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,7 +79,11 @@ def g1_xml_path() -> Path:
 
 def load_g1_model(xml_path: str | Path | None = None) -> mujoco.MjModel:
     """Standalone CPU MjModel of the G1. Asserts the joint order matches the CSV order."""
-    model = mujoco.MjModel.from_xml_path(str(xml_path or g1_xml_path()))
+    if xml_path is None and os.environ.get('SM_SOLE_BOX_CONFIG'):
+        from supermimic.robots.sole_collision import apply_sole_box_profile
+        model=apply_sole_box_profile(mujoco.MjSpec.from_file(str(g1_xml_path()))).compile()
+    else:
+        model = mujoco.MjModel.from_xml_path(str(xml_path or g1_xml_path()))
     names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(model.njnt)]
     assert model.jnt_type[0] == mujoco.mjtJoint.mjJNT_FREE, "first joint must be the free joint"
     assert tuple(names[1:]) == G1_JOINT_NAMES, f"joint order mismatch: {names[1:]}"

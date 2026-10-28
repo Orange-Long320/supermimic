@@ -53,11 +53,13 @@ class Geometry:
             if not (model.geom_contype[g] or model.geom_conaffinity[g]):
                 continue
             k = int(model.geom_dataid[g])
-            if k < 0:
-                raise ValueError('Expected robot collision meshes')
-            a, n = model.mesh_vertadr[k], model.mesh_vertnum[k]
+            if int(model.geom_type[g])==int(mujoco.mjtGeom.mjGEOM_BOX):
+                vertices=np.array([[x,y,z] for x in [-1.,1.] for y in [-1.,1.] for z in [-1.,1.]])*model.geom_size[g]
+            elif k>=0:
+                a,n=model.mesh_vertadr[k],model.mesh_vertnum[k];vertices=model.mesh_vert[a:a+n].copy()
+            else:raise ValueError('Unsupported robot collision geometry')
             group = next((s for s, b in self.feet.items() if model.geom_bodyid[g] == b), 'nonfoot')
-            self.meshes.append((g, model.mesh_vert[a:a+n].copy(), group))
+            self.meshes.append((g, vertices, group))
 
     def update(self, pose):
         self.data.qpos[:] = pose
@@ -95,7 +97,10 @@ def main():
     (args.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'hostname':socket.gethostname(),
         'command':[sys.executable,*sys.argv],'cuda_visible_devices':os.environ.get('CUDA_VISIBLE_DEVICES'),
         'python':sys.version,'mujoco':mujoco.__version__,'numpy':np.__version__,
+        'sole_box_config':os.environ.get('SM_SOLE_BOX_CONFIG'),
         'script_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()},indent=2))
+    if os.environ.get('SM_SOLE_BOX_CONFIG'):
+        (args.out/'sole-boxes-as-run.json').write_bytes(Path(os.environ['SM_SOLE_BOX_CONFIG']).read_bytes())
     from supermimic.data.motion_convert import load_g1_model
     from supermimic.data.physics_motion import differentiate_qpos, export_qpos_motion
     from supermimic.robots.dimensions import PROFILE
