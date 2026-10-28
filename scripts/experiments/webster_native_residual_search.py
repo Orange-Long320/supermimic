@@ -6,6 +6,7 @@ Search scores are proposals, not full-motion acceptance certificates.
 """
 import argparse
 import hashlib
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -39,9 +40,10 @@ def main():
     p.add_argument('--seconds', type=float, default=2.)
     p.add_argument('--sigma', type=float, default=.04)
     p.add_argument('--sigma-floor', type=float, default=.005)
+    p.add_argument('--coefficient-limit', type=float, default=.2, help='Command search bound; native actuator force limits remain unchanged')
     p.add_argument('--initialize', type=Path, help='Same-source residual coefficients for local refinement')
     p.add_argument('--terminal-seconds', type=float, default=.3)
-    p.add_argument('--phase', choices=['landing','preparation','landing_limits'], default='landing')
+    p.add_argument('--phase', choices=['landing','preparation','landing_limits','landing_brake_grid'], default='landing')
     p.add_argument('--base-residual', type=Path)
     p.add_argument('--base-capture', type=Path, help='Independent seven-second capture of the fixed base residual')
     args = p.parse_args()
@@ -53,12 +55,16 @@ def main():
         p.error('Invalid search budget')
     if not 0 < args.sigma_floor <= args.sigma:
         p.error('Covariance floor must be positive and no larger than initial sigma')
+    if not .01 <= args.coefficient_limit <= 1:
+        p.error('Invalid ordinary-command search bound')
     if not .3 <= args.terminal_seconds <= 1. or args.terminal_seconds > args.seconds:
         p.error('Invalid terminal stability window')
     if bool(args.base_residual) != bool(args.base_capture) or (args.phase == 'preparation' and (not args.base_residual or args.seconds != 7 or args.terminal_seconds != 1)):
         p.error('Preparation search requires an independently recorded base and full7s/terminal1s coverage')
-    if args.phase == 'landing_limits' and (not args.base_residual or args.seconds != 7 or args.terminal_seconds != 1):
+    if args.phase in ['landing_limits','landing_brake_grid'] and (not args.base_residual or args.seconds != 7 or args.terminal_seconds != 1):
         p.error('Landing-limit refinement requires an independently recorded full7s base')
+    if args.phase == 'landing_brake_grid' and (args.envs < 216 or args.iterations != 0 or args.coefficient_limit != 1 or args.initialize):
+        p.error('Directed brake grid requires at least 216 worlds, zero iterations, bound 1 and no initializer')
     if os.environ.get('CUDA_VISIBLE_DEVICES') != str(args.gpu):
         raise ValueError('Explicit physical GPU selection is required')
     query = lambda kind, fields: subprocess.check_output(
@@ -127,6 +133,9 @@ def main():
         if args.phase == 'landing_limits':
             joints = [names.index(n) for n in ['waist_pitch_joint','waist_roll_joint','right_ankle_pitch_joint']]
             knots = np.array([.88,.94,.98,1.02,1.06,1.10,1.16,1.22,1.28,1.34,1.42])
+        if args.phase == 'landing_brake_grid':
+            joints = [names.index(n) for n in ['waist_pitch_joint','waist_roll_joint','right_ankle_pitch_joint']]
+            knots = np.array([.76,.80,.84,.88,.92,.96,1.,1.04,1.08,1.12,1.16,1.20,1.24,1.28,1.32,1.36,1.42])
         times = np.arange(350)*.02
         basis = np.zeros((350, len(knots)-2))
         for row, t in enumerate(times):
@@ -248,7 +257,7 @@ def main():
                 if str(seed['source_checkpoint_sha256']) != digest(args.ckpt) or str(seed['reference_sha256']) != digest(args.source):
                     raise ValueError('Initialization belongs to a different source policy/reference')
                 coefficients = seed['parameters'].copy()
-                if coefficients.shape != dim or not np.isfinite(coefficients).all() or abs(coefficients).max() > .200001 or not np.array_equal(seed['knot_times'], knots):
+                if coefficients.shape != dim or not np.isfinite(coefficients).all() or abs(coefficients).max() > args.coefficient_limit+1e-6 or not np.array_equal(seed['knot_times'], knots):
                     raise ValueError('Initialization coefficient layout/bounds differ')
                 reproduced = torch.einsum('tk,kg,gj->tj', basis_t,
                     torch.tensor(coefficients, dtype=torch.float32, device=device), mapping).cpu().numpy()+base_actions.cpu().numpy()
@@ -261,9 +270,19 @@ def main():
         for iteration in range(args.iterations+1):
             if iteration and time.monotonic()-start >= args.max_seconds: break
             population = mean+torch.randn(args.envs, *dim, device=device)*std
-            population.clamp_(-.2,.2)
+            population.clamp_(-args.coefficient_limit,args.coefficient_limit)
             population[0] = best_parameters
-            if iteration == 0:
+            if args.phase == 'landing_brake_grid':
+                population.zero_()
+                # Three independent, inward braking amplitudes; every action
+                # still goes through the original force-limited actuators.
+                levels = [0.,.125,.25,.5,.75,1.]
+                for row, amplitudes in enumerate(product(levels,repeat=3)):
+                    for k,t in enumerate(knots[1:-1]):
+                        if .84-1e-9 <= t <= 1.+1e-9: population[row,k,0] = amplitudes[0]
+                        if .92-1e-9 <= t <= 1.12+1e-9: population[row,k,1] = -amplitudes[1]
+                        if 1.16-1e-9 <= t <= 1.32+1e-9: population[row,k,2] = -amplitudes[2]
+            elif iteration == 0:
                 population[:] = mean
                 population[-1].zero_()  # Retain a real zero-additional-correction control.
             rows, failed = rollout(population)
