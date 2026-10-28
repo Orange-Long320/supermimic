@@ -18,6 +18,7 @@ def main():
     p.add_argument('--out',type=Path,required=True)
     p.add_argument('--max-nfev',type=int,default=60)
     p.add_argument('--check-jacobian',action='store_true')
+    p.add_argument('--resume',type=Path,help='Continue the same source/objective from saved solver knots')
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
     from supermimic.robots.paths import select_robot
@@ -134,6 +135,18 @@ def main():
         return r,cache['j']
 
     start=np.clip(initial,low+1e-8,high-1e-8).ravel()
+    if a.resume:
+        saved=np.load(a.resume)
+        if 'x' in saved:
+            prior_hash=str(saved['source_sha256'])
+            np.testing.assert_array_equal(saved['indices'],indices)
+            start=saved['x'].copy()
+        else:
+            prior_hash=json.loads((a.resume.parent/'launch.json').read_text())['source_sha256']
+            prior=saved['qpos'][indices]
+            start=np.c_[prior[:,:3],prior[:,qcols]].ravel()
+        if prior_hash!=hashlib.sha256(a.source.read_bytes()).hexdigest():raise ValueError('Resume source differs')
+        if start.shape!=initial.ravel().shape:raise ValueError('Resume dimension differs')
     if a.check_jacobian:
         r,jac=evaluate(start);checks=[]
         for i in [0,min(n-1,42),n-1]:
@@ -148,6 +161,7 @@ def main():
         return
     result=least_squares(lambda x:evaluate(x)[0],start,jac=lambda x:evaluate(x)[1],bounds=(low.ravel(),high.ravel()),max_nfev=a.max_nfev,ftol=1e-6,xtol=1e-6,gtol=1e-6,verbose=1,tr_solver='lsmr')
     solved=result.x.reshape(n,nv);knots=base.copy();knots[:,:3]=solved[:,:3];knots[:,qcols]=solved[:,3:]
+    np.savez_compressed(a.out/'solver-knots.npz',x=result.x,indices=indices,source_sha256=hashlib.sha256(a.source.read_bytes()).hexdigest())
     dense_times=np.arange(end+1)/fps
     bc=([(1,np.zeros(m.nq-4)),(2,np.zeros(m.nq-4))],[(1,np.zeros(m.nq-4)),(2,np.zeros(m.nq-4))])
     scalars=np.c_[knots[:,:3],knots[:,7:]]
