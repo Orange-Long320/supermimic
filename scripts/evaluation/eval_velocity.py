@@ -48,12 +48,16 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
     records = []
     failed_at = torch.full((num_envs,), -1., device=device)
     resets = torch.zeros(num_envs, dtype=torch.long, device=device)
+    error_sum = torch.zeros(num_envs, 3, device=device)
+    error_count = torch.zeros(num_envs, device=device)
+    stop_speed_sum = torch.zeros(num_envs, device=device)
+    stop_count = torch.zeros(num_envs, device=device)
     try:
         observations, _ = env.reset()
         with torch.no_grad():
             for step in range(round(seconds / env.step_dt)):
                 elapsed = step * env.step_dt
-                target = next(values for start, values in reversed(schedule) if elapsed >= start)
+                phase_start, target = next((start, values) for start, values in reversed(schedule) if elapsed >= start)
                 mailbox.put(target, now=elapsed)
                 cmd.set_manual_command(mailbox.read(env.step_dt, now=elapsed))
                 used_command = cmd.velocity_command.clone()
@@ -62,6 +66,12 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
                 measured = measured_velocity(cmd.state_io.read())
                 newly_failed = (terminated | timeout) & (failed_at < 0)
                 failed_at[newly_failed] = elapsed + env.step_dt
+                valid = (failed_at < 0) & (elapsed - phase_start >= 1.)
+                error_sum += (measured - used_command).square() * valid[:, None]
+                error_count += valid
+                if target == (0., 0., 0.):
+                    stop_speed_sum += measured[:, :2].norm(dim=-1) * valid
+                    stop_count += valid
                 if step % 10 == 0:
                     records.append({"time_s": elapsed + env.step_dt, "command": used_command.cpu().tolist(), "velocity": measured.cpu().tolist(), "active": (failed_at < 0).cpu().tolist()})
                 done = (terminated | timeout).nonzero().squeeze(-1)
@@ -74,6 +84,10 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
             "checkpoint": str(ckpt.resolve()), "duration_s": seconds, "seed": args.seed,
             "num_envs": num_envs, "survived_without_reset": int((failed_at < 0).sum()),
             "first_failure_s": failed_at.cpu().tolist(), "resets": resets.cpu().tolist(),
+            "steady_rmse_vx_vy_wz": torch.sqrt(error_sum / error_count.clamp_min(1)[:, None]).cpu().tolist(),
+            "steady_samples": error_count.cpu().tolist(),
+            "mean_stop_planar_speed_mps": (stop_speed_sum / stop_count.clamp_min(1)).cpu().tolist(),
+            "stop_samples": stop_count.cpu().tolist(),
             "schedule": schedule, "velocity_config": asdict(vc), "samples": records,
             "scope": "Deterministic simulation from default standing; survival alone does not prove command tracking.",
         }

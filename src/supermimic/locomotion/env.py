@@ -9,7 +9,13 @@ from mjlab.managers.termination_manager import TerminationTermCfg
 from supermimic.envs.mdp.commands import MultiClipMotionCommand, MultiClipMotionCommandCfg
 from supermimic.envs.state_io import StateIO
 from supermimic.locomotion.config import VelocityCfg
-from supermimic.locomotion.task import bounded_reference, fall_signals, measured_velocity, reference_command_table, velocity_reward
+from supermimic.locomotion.task import (
+    bounded_reference,
+    fall_signals,
+    measured_velocity,
+    reference_command_table,
+    velocity_reward,
+)
 
 
 class VelocityMotionCommand(MultiClipMotionCommand):

@@ -10,11 +10,20 @@ import torch
 
 from supermimic.imagination.objective import gae_targets, policy_objective
 from supermimic.imagination.policy_trainer import PolicyTrainer
-from supermimic.imagination.rollout import ImagRollout, OBS_NOISE_HALF
+from supermimic.imagination.rollout import OBS_NOISE_HALF, ImagRollout
 from supermimic.locomotion.policy import VelocityCritic
-from supermimic.locomotion.task import bounded_reference, fall_signals, reference_command_table, velocity_reward
+from supermimic.locomotion.task import (
+    bounded_reference,
+    fall_signals,
+    reference_command_table,
+    velocity_reward,
+)
 from supermimic.training.distributed import allreduce_grads, broadcast_params
-from supermimic.world_model.heads import analytic_observation, anchor_relative_obs, flatten_history_term_major
+from supermimic.world_model.heads import (
+    analytic_observation,
+    anchor_relative_obs,
+    flatten_history_term_major,
+)
 from supermimic.world_model.wm_trainer import reference_at
 
 

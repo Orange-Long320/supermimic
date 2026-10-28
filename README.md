@@ -75,3 +75,28 @@
 3. 连续策略录像可见翻转与落地，但片段结束后失稳，2.7秒触发root_height；尚未达到落地后持续站稳，详见实验记录。
 
 代理执行约束见 [AGENTS.md](AGENTS.md)。具体已执行阶段与结果以[本项目实验记录](docs/LOCAL_EXPERIMENT.md)和服务器日志为准；上游历史记录不代表本项目结果。
+
+## 键盘行走实验分支
+
+`codex/x2-velocity-control` 增加了共享解码器的速度编码器、动作跟踪/速度联合训练、浏览器键盘输入与连续启停评测。默认关闭；原训练入口通过 `--velocity.enabled` 启用。当前仅完成流程 smoke，尚未验证可用的键盘行走策略。实测与运行位置见[速度控制记录](docs/VELOCITY_CONTROL_20261028.md)。
+
+在服务器的独立源码快照中，使用明确解释器和当前源码路径。例如先验证配置：
+
+```bash
+PYTHONPATH="$PWD/src" CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/training/train.py \
+  --robot x2_ultra --preset smoke --velocity.enabled --env.anchor-obs \
+  --data.clips walk1_subject1 walk2_subject1 --print-config
+```
+
+训练权重兼容时可用 `--initialize-from <跟踪检查点>` 初始化；`--resume <速度检查点>` 恢复速度训练。选择新的运行名称和输出目录，启动前检查 GPU 与任务所有者。
+
+速度检查点的连续评测与交互入口（均在服务器运行）：
+
+```bash
+PYTHONPATH="$PWD/src" CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/robot.py x2_ultra \
+  scripts/evaluation/eval_velocity.py --ckpt <速度检查点> --out <新评测文件.json>
+PYTHONPATH="$PWD/src" CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/robot.py x2_ultra \
+  scripts/evaluation/play_velocity.py --ckpt <速度检查点>
+```
+
+交互时通过 SSH 转发查看器端口（通常为 8080，以输出为准）和键盘端口 8081。在键盘页面按住 W 前进、A/D 转向，松键、空格或失焦归零。连续评测会保存每次首次失败、重置次数和实际速度，未达到要求的试验不会因重置而被计为成功。

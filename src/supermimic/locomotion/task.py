@@ -6,7 +6,12 @@ Linear commands use the robot's heading frame. No motion-reference input is used
 
 import torch
 
-from supermimic.kinematics.rotations import heading_quat, projected_gravity, quat_apply, quat_apply_inverse
+from supermimic.kinematics.rotations import (
+    heading_quat,
+    projected_gravity,
+    quat_apply,
+    quat_apply_inverse,
+)
 from supermimic.robots.dimensions import NQ
 
 

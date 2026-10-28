@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from supermimic.policy.nets import Policy, _obs_scale_vector
-from supermimic.robots.dimensions import FEAT_DIM, XI_DIM, OBS_DIM
+from supermimic.robots.dimensions import FEAT_DIM, OBS_DIM, XI_DIM
 from supermimic.world_model.dynamics import MLP
 
 
