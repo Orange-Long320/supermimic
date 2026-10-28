@@ -121,14 +121,27 @@ def main():
                 begin_window=max(0,first-round(.6*fps/stride));end_window=min(len(frames),end+1)
                 distance=np.linalg.norm(np.maximum(abs(local_hands)-half,0),axis=2)
                 possible_hands=bool((distance[begin_window:end_window]<.08).any())
-                ground=bool((abs(foot[begin_window,:,2])<.06).all())
-                candidates.append({'motion':entry,'box':box,'height_m':height,'dimensions_m':(half*2).tolist(),
+                support_planes=[]
+                for point in foot[begin_window]:
+                    planes=[(abs(point[2]),0.)] if abs(point[2])<.04 else []
+                    for other in scene_boxes:
+                        other_center=np.array(other['center']);other_half=np.array(other['half_size'])
+                        local_point=(point-other_center)@np.array(other['rotation_world'])
+                        gap=abs(local_point[2]-other_half[2])
+                        if (abs(local_point[:2])<=other_half[:2]+.02).all() and gap<.04:planes.append((float(gap),float(other['high'][2])))
+                    if planes:support_planes.append(min(planes)[1])
+                approach=min(support_planes) if support_planes else None
+                rise=height-approach if approach is not None else None
+                if rise is not None and rise<.12:continue
+                ground=approach is not None and abs(approach)<.01
+                candidates.append({'motion':entry,'box':box,'height_m':rise,'platform_top_world_m':height,
+                    'approach_surface_height_m':approach,'dimensions_m':(half*2).tolist(),
                     'start_frame':int(frames[begin_window]),'end_frame':int(frames[min(end_window-1,len(frames)-1)]),
                     'both_feet_near_top_seconds':length*stride/fps,'possible_hand_contact':possible_hands,'starts_near_ground':ground,
-                    'height_error_m':abs(height-a.preferred_height),'fps':fps})
+                    'height_error_m':abs((rise if rise is not None else height)-a.preferred_height),'fps':fps})
             rows.append({'motion':entry,'sha256':hashlib.sha256(content).hexdigest(),'frames':len(q),'fps':fps,'quaternion_error':quaternion_error,'boxes':scene_boxes})
             if number%25==0:print(f'screened={number+1}',flush=True)
-    candidates.sort(key=lambda c:(c['possible_hand_contact'],not c['starts_near_ground'],c['height_error_m']))
+    candidates.sort(key=lambda c:(c['possible_hand_contact'],c['approach_surface_height_m'] is None,c['height_error_m']))
     report={'motions':rows,'candidate_windows':candidates,'preferred_height_m':a.preferred_height,'height_is_hard_constraint':False,
         'joint_order_source':str(config),'limitations':'G1 FK and 10Hz proximity screening only. Hand proximity is not measured support; foot markers are not force contacts. Not X2 data, not trained policy, not a physical feasibility certificate.'}
     (a.out/'screening.json').write_text(json.dumps(report,indent=2)+'\n')

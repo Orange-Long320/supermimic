@@ -28,9 +28,10 @@ def main():
     p.add_argument('--equilibrium',type=Path,required=True)
     p.add_argument('--motion',required=True)
     p.add_argument('--frames',type=int,default=5)
+    p.add_argument('--penetration-target-m',type=float,default=.0008,help='IK target tighter than the independent 1mm collision gate')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
-    if a.out.exists() or a.frames<2:p.error('New output and at least two frames required')
+    if a.out.exists() or a.frames<2 or not 0<a.penetration_target_m<.001:p.error('New output, at least two frames, and a positive IK penetration target below 1mm required')
     import mujoco
     import numpy as np
     from scipy.spatial.transform import Rotation
@@ -86,7 +87,7 @@ def main():
     constants=SimpleNamespace(ROBOT_URDF_FILE=str(a.x2_model/'x2.urdf'),OBJECT_NAME='multi_boxes',SCENE_XML_FILE=str(scene),ROBOT_DOF=31,
         FOOT_STICKING_LINKS=meta['foot_sticking_links'],DEMO_JOINTS=demo_names,JOINTS_MAPPING=mapping,
         MANUAL_LB={str(i):float(v) for i,v in enumerate(lower)},MANUAL_UB={str(i):float(v) for i,v in enumerate(upper)},MANUAL_COST={},NOMINAL_TRACKING_INDICES=np.array([],dtype=int))
-    retargeter=InteractionMeshRetargeter(constants,object_urdf_path=None,visualize=False,debug=False)
+    retargeter=InteractionMeshRetargeter(constants,object_urdf_path=None,visualize=False,debug=False,penetration_tolerance=a.penetration_target_m)
     # Complete qpos-address bounds avoid the upstream named-free-joint indexing
     # assumption; every actuated range is checked against the actual X2 model.
     np.testing.assert_array_equal(retargeter.q_a_lb,lower);np.testing.assert_array_equal(retargeter.q_a_ub,upper)
@@ -95,6 +96,8 @@ def main():
     retargeter.retarget_motion(landmarks,objects,objects,anchors,anchors,sticking,q_a_init=seed,original=True,dest_res_path=str(a.out/'upstream-result.npz'))
     with np.load(a.out/'upstream-result.npz',allow_pickle=False) as z:result=z['qpos'].copy()
     if not np.isfinite(result).all():raise ValueError('Non-finite result')
+    quaternion_error=float(abs(np.linalg.norm(result[:,3:7],axis=1)-1).max())
+    if quaternion_error>1e-6:raise ValueError('Non-unit output root quaternion')
     np.testing.assert_array_equal(result[:,38:],objects)
     hard=0.;penetration=0.;data=mujoco.MjData(model);witness=np.zeros(6)
     obstacles=[g for g in range(model.ngeom) if model.geom(g).name=='ground' or model.geom(g).name.startswith('multi_boxes_')]
@@ -108,6 +111,7 @@ def main():
     np.savez_compressed(a.out/'x2-reference.npz',qpos=result[:,:38],fps=fps)
     report={'source_motion':a.motion,'frames':len(result),'fps':fps,'uniform_source_scene_scale':scale,'scene_boxes':target_boxes,
         'hard_joint_violation_rad':hard,'max_environment_penetration_m':penetration,'bounds_match_x2_model':True,
+        'maximum_root_quaternion_norm_error':quaternion_error,'ik_penetration_target_m':a.penetration_target_m,
         'source_model_sha256':meta['source_sha256'],'policy_evaluation':False,'training_approved':False,
         'scope':'Bounded OmniRetarget custom-data smoke only; not full climbing, inverse-dynamics feasibility or policy execution.'}
     (a.out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2),flush=True)
