@@ -33,6 +33,7 @@ def main():
     p.add_argument('--joint-limit-factor',type=float,default=1.,help='Optimizer range as a fraction of mechanical ranges; 0.9 matches the project reset soft limits')
     p.add_argument('--penetration-target-m',type=float,default=.0008,help='IK target tighter than the independent 1mm collision gate')
     p.add_argument('--source-flat-foot-lock',action='store_true',help='Pin sole marker heights only during source-confirmed flat support')
+    p.add_argument('--source-foot-surface-lock',action='store_true',help='Preserve source-confirmed horizontal foot contact, including toe pivots; actual X2 mesh gap is constrained')
     p.add_argument('--collision-backtracking',action='store_true',help='Check actual collision distance before accepting each SQP step')
     p.add_argument('--restoration-helper',type=Path,help='Explicit nonlinear support-restoration module; enables one restoration attempt per failed support-transition frame')
     p.add_argument('--out',type=Path,required=True)
@@ -46,6 +47,7 @@ def main():
     from holosoma_retargeting.src.utils import calculate_laplacian_coordinates
     from holosoma_retargeting.config_types.retargeter import FootLockConfig
     restore_pose=None
+    if a.source_foot_surface_lock and not a.collision_backtracking:p.error('Surface contact locks require actual-distance backtracking')
     if a.restoration_helper:
         if not a.source_flat_foot_lock or not a.collision_backtracking:p.error('Restoration requires both contact locks and native constraint backtracking')
         import importlib.util
@@ -87,6 +89,19 @@ def main():
                 world=self.robot_data.xpos[body]+self.robot_data.xmat[body].reshape(3,3)@point
                 jacobians[('plane_witness',i)]=normal@self._calc_contact_jacobian_from_point(body,point)
                 distances[('plane_witness',i)]=float(normal@(world-anchor))
+            # A source toe pivot is still a support contact even when the
+            # four-sphere flat-foot detector is false. Constrain the actual
+            # X2 collision mesh against the same fixed surface, without
+            # forcing the foot flat or adding a collision/support volume.
+            for g,o in getattr(self,'source_surface_pairs',{}).get(getattr(self,'surface_frame',-1),[]):
+                m,d=self.robot_model,self.robot_data;w=np.zeros(6)
+                gap=float(mujoco.mj_geomDistance(m,d,g,o,10.,w));vector=w[:3]-w[3:];length=np.linalg.norm(vector)
+                if length<1e-10:raise ValueError('Undefined source foot contact witness')
+                normal=np.sign(gap)*vector/length;body=int(m.geom_bodyid[g])
+                point=d.xmat[body].reshape(3,3).T@(w[:3]-d.xpos[body])
+                jac=normal@self._calc_contact_jacobian_from_point(body,point)
+                jacobians[('source_surface_upper',g,o)]=-jac
+                distances[('source_surface_upper',g,o)]=.001-gap-self.penetration_tolerance
             return jacobians,distances
 
         def _add_horizontal_plane_witnesses(self,q):
@@ -129,15 +144,21 @@ def main():
                 for name,body in self.foot_links.items():
                     target=self._is_foot_locked_in_window(name,frame)
                     if target is not None:foot_error=max(foot_error,abs(float(self.robot_data.xpos[self.robot_model.body(body).id,2])-target))
-            violation=max(0.,penetration-self.penetration_tolerance,foot_error-self.foot_lock.tolerance)
+            contact_gap=0.
+            for g,o in getattr(self,'source_surface_pairs',{}).get(frame,[]):
+                contact_gap=max(contact_gap,float(mujoco.mj_geomDistance(self.robot_model,self.robot_data,g,o,10.,np.zeros(6))))
+            self.last_source_contact_gap=contact_gap
+            violation=max(0.,penetration-self.penetration_tolerance,foot_error-self.foot_lock.tolerance,contact_gap-.001)
             return violation,penetration,foot_error
 
         def iterate(self,**kwargs):
             if not a.collision_backtracking:return super().iterate(**kwargs)
+            self.surface_frame=kwargs['frame_idx']
             q=kwargs.pop('q_n').copy();budget=kwargs.pop('n_iter')*3;last_cost=np.inf;backtracks=0;self._plane_cuts=[];restoration_attempts=0
             last_actual=self._actual_tracking_cost(q,kwargs);stopping_reason='iteration_budget'
             allowed=5e-5
             new_support=any(start==kwargs['frame_idx'] for ranges in self._foot_lock_windows.values() for start,end in ranges)
+            new_support=new_support or bool(set(getattr(self,'source_surface_pairs',{}).get(self.surface_frame,[]))-set(getattr(self,'source_surface_pairs',{}).get(self.surface_frame-1,[])))
             for iteration in range(budget):
                 before,_,_=self._constraint_merit(q,kwargs['frame_idx'])
                 accepted=None
@@ -201,7 +222,7 @@ def main():
             if not hasattr(self,'backtracking_records'):self.backtracking_records=[]
             if not hasattr(self,'_accepted_poses'):self._accepted_poses=[]
             self._accepted_poses.append(q[:38].copy())
-            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'restoration_attempts':restoration_attempts,'maximum_penetration_m':final,'maximum_locked_sole_height_error_m':final_foot_error,'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
+            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'restoration_attempts':restoration_attempts,'maximum_penetration_m':final,'maximum_locked_sole_height_error_m':final_foot_error,'maximum_source_foot_contact_gap_m':self.last_source_contact_gap,'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
             if kwargs['frame_idx']%30==0:
                 (a.out/'collision-backtracking-progress.json').write_text(json.dumps(self.backtracking_records,indent=2)+'\n')
                 np.savez_compressed(a.out/f'accepted-prefix-{kwargs["frame_idx"]:05d}.npz',qpos=np.asarray(self._accepted_poses),fps=30.,source_start_frame=a.start_frame,source_motion=a.motion)
@@ -230,7 +251,23 @@ def main():
         with np.load(io.BytesIO(archive.read(a.motion)),allow_pickle=False) as z:poses=z['qpos'][a.start_frame:a.start_frame+a.frames].copy();fps=float(np.asarray(z['fps']).reshape(-1)[0])
     if len(poses)<2:raise ValueError('Source window contains fewer than two frames')
     if fps!=30:raise ValueError('The upstream core currently writes 30Hz; explicit resampling is needed for other sources')
-    g1=mujoco.MjModel.from_binary_path(str(a.source_audit/'source-g1.mjb'));gd=mujoco.MjData(g1)
+    g1=mujoco.MjModel.from_binary_path(str(a.source_audit/'source-g1.mjb'))
+    source_terrain=[]
+    if a.source_foot_surface_lock:
+        g1_spec=mujoco.MjSpec.from_file(str(a.source_audit/'source-g1.urdf'))
+        g1_spec.worldbody.add_geom(name='source_contact_ground',type=mujoco.mjtGeom.mjGEOM_PLANE,size=(0,0,.05))
+        for i,box in enumerate(row['boxes']):
+            g1_spec.worldbody.add_geom(name=f'source_contact_box_{i}',type=mujoco.mjtGeom.mjGEOM_BOX,
+                pos=box['center'],size=box['half_size'],quat=Rotation.from_matrix(box['rotation_world']).as_quat()[[3,0,1,2]])
+        checked=g1_spec.compile()
+        # Added terrain is fixed world geometry, and must not alter the
+        # independently verified robot FK, order, mass or inertia.
+        if (checked.nq,checked.nv,checked.nbody)!=(g1.nq,g1.nv,g1.nbody):raise ValueError('Source terrain changed robot layout')
+        for name in ['body_mass','body_inertia','jnt_range','jnt_qposadr']:
+            np.testing.assert_allclose(getattr(checked,name),getattr(g1,name),rtol=0,atol=1e-12)
+        g1=checked
+        source_terrain=[(-1,g1.geom('source_contact_ground').id)]+[(i,g1.geom(f'source_contact_box_{i}').id) for i in range(len(row['boxes']))]
+    gd=mujoco.MjData(g1)
     source_columns=[int(g1.jnt_qposadr[g1.joint(n).id]) for n in source_names]
     ids=[g1.body(source_mapping[n]).id for n in demo_names];landmarks=[];source_soles=[]
     source_hand_centers={}
@@ -253,8 +290,30 @@ def main():
             if not geoms or any(int(g1.geom_type[g])!=int(mujoco.mjtGeom.mjGEOM_SPHERE) for g in geoms):raise ValueError('Expected source sole spheres')
             radii.append(float(g1.geom_size[geoms[0],0]))
         sole_radii.append(radii)
+    source_foot_geoms={}
+    for side in ('left','right'):
+        ancestor=g1.body(side+'_ankle_roll_link').id;geoms=[]
+        for g in range(g1.ngeom):
+            body=int(g1.geom_bodyid[g])
+            while body and body!=ancestor:body=int(g1.body_parentid[body])
+            if body==ancestor and (g1.geom_contype[g] or g1.geom_conaffinity[g]):geoms.append(g)
+        source_foot_geoms[side]=geoms
+    source_surface_contacts=[]
     for pose in poses:
         gd.qpos[:3]=pose[4:7];gd.qpos[3:7]=pose[:4];gd.qpos[source_columns]=pose[7:];mujoco.mj_kinematics(g1,gd)
+        contacts=[]
+        if a.source_foot_surface_lock:
+            mujoco.mj_forward(g1,gd)
+            for side,geoms in source_foot_geoms.items():
+                for surface,o in source_terrain:
+                    values=[]
+                    for g in geoms:
+                        w=np.zeros(6);gap=float(mujoco.mj_geomDistance(g1,gd,g,o,10.,w));length=np.linalg.norm(w[:3]-w[3:])
+                        normal=np.sign(gap)*(w[:3]-w[3:])/length if length>1e-10 else np.array([0.,0.,1.])
+                        values.append((gap,normal[2]))
+                    gap,normal_z=min(values,key=lambda x:x[0])
+                    if abs(gap)<=.003 and normal_z>.95:contacts.append({'side':side,'surface':surface,'source_gap_m':gap})
+        source_surface_contacts.append(contacts)
         points=gd.xpos[ids].copy()
         for name,(body,offset) in source_hand_centers.items():points[demo_names.index(name)]+=gd.xmat[body].reshape(3,3)@offset
         # The upstream human-mocap "Foot" maps to an ankle marker, whereas
@@ -325,6 +384,20 @@ def main():
     (a.out/'source-flat-support.json').write_text(json.dumps({'enabled':a.source_flat_foot_lock,'windows':windows,'source_sphere_bottom_tolerance_m':.003,'x2_marker_height_offset_m':.0005},indent=2)+'\n')
     retargeter=X2Retargeter(constants,object_urdf_path=None,visualize=False,debug=False,penetration_tolerance=a.penetration_target_m,
         foot_lock=FootLockConfig(enable=a.source_flat_foot_lock,windows=windows,tolerance=.001),w_nominal_tracking_init=.05 if a.wrist_reference_limit_deg==0 else 5.)
+    retargeter.source_surface_pairs={}
+    for frame,contacts in enumerate(source_surface_contacts):
+        pairs=[]
+        for contact in contacts:
+            body=model.body(contact['side']+'_ankle_roll_link').id
+            geoms=[g for g in range(model.ngeom) if model.geom_bodyid[g]==body and (model.geom_contype[g] or model.geom_conaffinity[g])]
+            if len(geoms)!=1:raise ValueError('Expected a single original X2 foot collision mesh')
+            obstacle=model.geom('ground' if contact['surface']==-1 else f'multi_boxes_{contact["surface"]}').id
+            pairs.append((geoms[0],obstacle))
+        retargeter.source_surface_pairs[frame]=pairs
+    (a.out/'source-surface-contacts.json').write_text(json.dumps({'enabled':a.source_foot_surface_lock,
+        'source_distance_tolerance_m':.003,'target_gap_upper_m':.001,'source_start_frame':a.start_frame,
+        'foot_geometry_inventory':{side:[g1.body(int(g1.geom_bodyid[g])).name for g in geoms] for side,geoms in source_foot_geoms.items()},
+        'frames':source_surface_contacts,'scope':'Geometric source contact intent only; no force or execution certification'},indent=2)+'\n')
     # Complete qpos-address bounds avoid the upstream named-free-joint indexing
     # assumption; every actuated range is checked against the actual X2 model.
     np.testing.assert_array_equal(retargeter.q_a_lb,lower);np.testing.assert_array_equal(retargeter.q_a_ub,upper)
@@ -375,6 +448,7 @@ def main():
         'jacobian_max_absolute_error':derivative_error,'max_actuated_joint_range_rad':float(np.ptp(result[:,7:38],axis=0).max()),
         'source_foot_landmarks':'Heel/toe sole surface points from paired G1 spheres; upstream ankle marker is not a heel',
         'collision_backtracking':a.collision_backtracking,
+        'source_foot_surface_lock':a.source_foot_surface_lock,
         'wrist_reference_limit_deg':a.wrist_reference_limit_deg,'paired_hand_collision_centroids':bool(source_hand_centers),
         'restoration_helper_sha256':hashlib.sha256(a.restoration_helper.read_bytes()).hexdigest() if a.restoration_helper else None,
         'source_model_sha256':meta['source_sha256'],'policy_evaluation':False,'training_approved':False,
