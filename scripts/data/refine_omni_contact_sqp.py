@@ -19,6 +19,7 @@ def main():
     p.add_argument('--start-frame',type=int,required=True);p.add_argument('--end-frame',type=int,required=True)
     p.add_argument('--iterations',type=int,default=12)
     p.add_argument('--solver-backend',choices=['osqp','clarabel'],default='osqp')
+    p.add_argument('--restore-feasibility',action='store_true',help='Explicit offline phaseI: minimize reported motor violations at unchanged caps; never a physical pass')
     a=p.parse_args()
     if a.out.exists() or not 1<=a.iterations<=20:p.error('New output and at most20 SQP iterations required')
     if os.environ.get('CUDA_VISIBLE_DEVICES')!='':raise ValueError('CPU-only diagnostic required')
@@ -36,7 +37,8 @@ def main():
     m,d=helper.m,helper.d;start,end=helper.start,helper.end;qs=helper.source.copy()
     count=end-start+1;n=end-start-1;pose_size=n*37
     sizes=[4*len(points) for points in helper.contacts];offsets=np.r_[pose_size,pose_size+np.cumsum(sizes)].astype(int)
-    residual_offset=int(offsets[-1]);total=residual_offset+count*6
+    residual_offset=int(offsets[-1]);motor_violation_offset=residual_offset+count*6
+    total=motor_violation_offset+(count*31 if a.restore_feasibility else 0)
     coefficients=[]
     for i,frame in enumerate(range(start,end+1)):
         required=helper.inverse(qs,frame);basis=helper.basis(helper.contacts[i])
@@ -48,6 +50,8 @@ def main():
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     trust=1.;initial=helper.measure(qs,coefficients);history=[];started=time.monotonic()
     record=dict(pid=os.getpid(),source_reference_sha256=sha(a.reference),frames50hz=[start,end],time_scale=1.,
+        phase='offline_feasibility_restoration' if a.restore_feasibility else 'strict_motor_linearization',
+        physical_effort_caps_unchanged=True,motor_violation_variables_are_not_actuator_forces=True,
         approved_for_training=False,actual_controller_execution_verified=False,scope=__doc__,initial=initial)
     def progress(**extra):(a.out/'progress.json').write_text(json.dumps(dict(record,history=history,**extra),indent=2))
     progress(status='running');print(json.dumps(dict(initial=initial)),flush=True)
@@ -69,6 +73,7 @@ def main():
                 hi[6:]=np.minimum(hi[6:],helper.centre+helper.radius-qs[frame,7:])
                 low[i*37:(i+1)*37]=lo;high[i*37:(i+1)*37]=hi
             low[pose_size:residual_offset]=0.;high[pose_size:residual_offset]=4.
+            if a.restore_feasibility:low[motor_violation_offset:]=0.
             if np.any(low>high):raise ValueError('Current candidate left original source/soft-limit domain')
             for i,frame in enumerate(range(start,end+1)):
                 required=helper.inverse(qs,frame);basis=helper.basis(helper.contacts[i]);velocity=d.qvel.copy()
@@ -104,6 +109,13 @@ def main():
                     ii=list(indices)+force_indices.tolist();dd=np.r_[derivative[j],reaction[j]]/scale
                     if j<6:
                         ii.append(residual_offset+i*6+j);dd=np.r_[dd,-1.];add(ii,dd,-required[j]/scale,-required[j]/scale)
+                    elif a.restore_feasibility:
+                        violation=motor_violation_offset+i*31+j-6
+                        # The cap stays .95 of the original motor rating.
+                        # Positive violation is an explicit unsatisfied offline
+                        # constraint; it is never applied or called feasible.
+                        add(ii+[violation],np.r_[dd,-1.],-np.inf,.95-required[j]/scale)
+                        add(ii+[violation],np.r_[dd,1.],-.95-required[j]/scale,np.inf)
                     else:add(ii,dd,-.95-required[j]/scale,.95-required[j]/scale)
                 # Hinge velocity is linear in neighboring hinge positions.
                 for j in range(31):
@@ -134,7 +146,8 @@ def main():
             A=sp.coo_matrix((values,(rows,cols)),shape=(row,total)).tocsc()
             A=sp.vstack([A,sp.eye(total,format='csc')],format='csc');l=np.r_[lower,low];u=np.r_[upper,high]
             weights=np.r_[np.full(3,10.),np.full(3,5.),np.ones(31)]
-            diagonal=np.r_[np.tile(weights**2,n),np.full(residual_offset-pose_size,1e-4),np.full(count*6,1e4)]
+            diagonal=np.r_[np.tile(weights**2,n),np.full(residual_offset-pose_size,1e-4),np.full(count*6,1e4),
+                np.full(count*31 if a.restore_feasibility else 0,1e5)]
             P=sp.diags(diagonal,format='csc');linear=np.zeros(total)
             linear[:pose_size]=(correction[start+1:end]*weights**2).ravel()
             sr=[];sc=[];sv=[];smooth_current=[];smooth_weights=np.r_[np.full(3,500.),np.full(3,50.),np.full(31,5.)]
@@ -172,6 +185,7 @@ def main():
                 if feasible and measured['merit']<current['merit']*(1.-1e-6):
                     qs,coefficients=trial,forces;accepted=True;break
             item=dict(iteration=iteration,trust=trust,accepted=accepted,trials=trials,solver=solver,elapsed_seconds=time.monotonic()-started)
+            if a.restore_feasibility:item['qp_motor_violation_max_ratio']=float(np.max(solution[motor_violation_offset:]))
             history.append(item)
             if not accepted:trust*=.5
             arrays=dict(qpos=qs,qvel=differentiate_qpos(m,qs,50.),fps=np.array([50.]),
