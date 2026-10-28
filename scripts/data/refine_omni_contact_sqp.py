@@ -18,6 +18,7 @@ def main():
     for name in ['reference','model','scene','out','solver-python','solver-script']:p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--start-frame',type=int,required=True);p.add_argument('--end-frame',type=int,required=True)
     p.add_argument('--iterations',type=int,default=12)
+    p.add_argument('--solver-backend',choices=['osqp','clarabel'],default='osqp')
     a=p.parse_args()
     if a.out.exists() or not 1<=a.iterations<=20:p.error('New output and at most20 SQP iterations required')
     if os.environ.get('CUDA_VISIBLE_DEVICES')!='':raise ValueError('CPU-only diagnostic required')
@@ -148,7 +149,7 @@ def main():
             np.savez_compressed(directory/'vectors.npz',q=linear,lower=l,upper=u)
             solver_env=os.environ.copy();solver_env.pop('PYTHONPATH',None)
             with (directory/'solver.log').open('w') as log:
-                completed=subprocess.run([str(a.solver_python),str(a.solver_script),str(directory)],env=solver_env,
+                completed=subprocess.run([str(a.solver_python),str(a.solver_script),str(directory),'--backend',a.solver_backend],env=solver_env,
                     stdout=log,stderr=subprocess.STDOUT,timeout=90)
             if completed.returncode:raise RuntimeError('Isolated QP solver process failed')
             solver=json.loads((directory/'solver.json').read_text())
