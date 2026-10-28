@@ -92,6 +92,11 @@ def main():
         files=[Path(__file__),s/'scripts/experiments/train_omni_prefix.py',s/'src/supermimic/kinematics/g1_fk.py',
                s/'scripts/evaluation/record_policy_states.py',s/'scripts/evaluation/audit_omni_execution.py']
         (r/'source-sha256.json').write_text(json.dumps({str(f):sha(f) for f in files},indent=2))
+        profile=(s/'assets/robots/x2_ultra/profile.json').resolve()
+        xml=Path(json.loads(profile.read_text())['xml_path'])
+        if not xml.is_absolute():xml=profile.parent/xml
+        descriptors={str(f):sha(f) for f in [profile,xml.resolve()]}
+        (r/'asset-descriptor-sha256.json').write_text(json.dumps(descriptors,indent=2))
         source_stat=a.initial_checkpoint.stat()
         if sha(a.initial_checkpoint)!=a.expected_checkpoint_sha256:raise ValueError('Unexpected initial weights')
         initial=r/'initial-weights.pt'
@@ -115,6 +120,7 @@ def main():
               '--proof',str(r/'capacity/capacity.json'),'--optimization-minutes',str(a.minutes)],True,a.minutes*60+600)
         final=json.loads((r/'train_1h/capacity.json').read_text());checkpoint=final['checkpoint']
         if final['status']!='completed' or final['new_updates']<=0:raise RuntimeError('No completed parameter optimization')
+        if any(sha(f)!=value for f,value in descriptors.items()):raise RuntimeError('Robot asset descriptors changed during training')
         stage('benchmark',[py,str(s/'scripts/evaluation/eval_benchmark.py'),'--ckpt',checkpoint,'--npz-dir',str(a.dataset/'motions'),
               '--num-envs','3','--device','cuda:0','--out',str(r/'benchmark.json')],True,300)
         reports=[];(r/'videos').mkdir()
