@@ -37,6 +37,16 @@ def main():
     from scipy.spatial.transform import Rotation
     from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
     from holosoma_retargeting.src.utils import extract_foot_sticking_sequence_velocity
+    class X2Retargeter(InteractionMeshRetargeter):
+        def _build_transform_qdot_to_qvel_fast(self, use_world_omega=False):
+            # MuJoCo free-joint angular velocities are body-local. Also avoid
+            # tuple membership between NumPy scalars and pybind enums: the
+            # enum's reverse equality can silently miss every hinge joint.
+            transform=super()._build_transform_qdot_to_qvel_fast(use_world_omega=False)
+            for joint in range(self.robot_model.njnt):
+                if int(self.robot_model.jnt_type[joint]) in (int(mujoco.mjtJoint.mjJNT_HINGE),int(mujoco.mjtJoint.mjJNT_SLIDE)):
+                    transform[int(self.robot_model.jnt_dofadr[joint]),int(self.robot_model.jnt_qposadr[joint])]=1.
+            return transform
     a.out.mkdir(parents=True);(a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     meta=json.loads((a.x2_model/'model.json').read_text())
     source=json.loads((a.source_audit/'screening.json').read_text())
@@ -87,11 +97,30 @@ def main():
     constants=SimpleNamespace(ROBOT_URDF_FILE=str(a.x2_model/'x2.urdf'),OBJECT_NAME='multi_boxes',SCENE_XML_FILE=str(scene),ROBOT_DOF=31,
         FOOT_STICKING_LINKS=meta['foot_sticking_links'],DEMO_JOINTS=demo_names,JOINTS_MAPPING=mapping,
         MANUAL_LB={str(i):float(v) for i,v in enumerate(lower)},MANUAL_UB={str(i):float(v) for i,v in enumerate(upper)},MANUAL_COST={},NOMINAL_TRACKING_INDICES=np.array([],dtype=int))
-    retargeter=InteractionMeshRetargeter(constants,object_urdf_path=None,visualize=False,debug=False,penetration_tolerance=a.penetration_target_m)
+    retargeter=X2Retargeter(constants,object_urdf_path=None,visualize=False,debug=False,penetration_tolerance=a.penetration_target_m)
     # Complete qpos-address bounds avoid the upstream named-free-joint indexing
     # assumption; every actuated range is checked against the actual X2 model.
     np.testing.assert_array_equal(retargeter.q_a_lb,lower);np.testing.assert_array_equal(retargeter.q_a_ub,upper)
     objects=np.tile([0.,0.,0.,1.,0.,0.,0.],(len(poses),1))
+    # Independent central differences validate the complete robot Jacobian,
+    # including its free-root quaternion and every actuated qpos coordinate.
+    test_pose=np.r_[seed,objects[0]];check_data=mujoco.MjData(model);epsilon=1e-6;derivative_error=0.
+    retargeter.robot_data.qpos[:]=test_pose
+    for body_name in mapping.values():
+        body=model.body(body_name).id
+        retargeter.robot_data.qpos[:]=test_pose
+        analytic=retargeter._calc_contact_jacobian_from_point(body,np.zeros(3))[:,:38]
+        numeric=np.zeros((3,38))
+        for column in range(38):
+            samples=[]
+            for sign in (1,-1):
+                check_data.qpos[:]=test_pose;check_data.qpos[column]+=sign*epsilon
+                mujoco.mj_normalizeQuat(model,check_data.qpos);mujoco.mj_kinematics(model,check_data)
+                samples.append(check_data.xpos[body].copy())
+            numeric[:,column]=(samples[0]-samples[1])/(2*epsilon)
+        derivative_error=max(derivative_error,float(abs(analytic-numeric).max()))
+    (a.out/'jacobian-check.json').write_text(json.dumps({'max_absolute_error':derivative_error,'columns':38,'bodies':len(mapping),'epsilon':epsilon,'passed':derivative_error<1e-6},indent=2)+'\n')
+    if derivative_error>=1e-6:raise ValueError(f'Independent X2 Jacobian check failed: {derivative_error}')
     sticking=extract_foot_sticking_sequence_velocity(landmarks,demo_names,['LeftToeBase','RightToeBase'])
     retargeter.retarget_motion(landmarks,objects,objects,anchors,anchors,sticking,q_a_init=seed,original=True,dest_res_path=str(a.out/'upstream-result.npz'))
     with np.load(a.out/'upstream-result.npz',allow_pickle=False) as z:result=z['qpos'].copy()
@@ -112,6 +141,7 @@ def main():
     report={'source_motion':a.motion,'frames':len(result),'fps':fps,'uniform_source_scene_scale':scale,'scene_boxes':target_boxes,
         'hard_joint_violation_rad':hard,'max_environment_penetration_m':penetration,'bounds_match_x2_model':True,
         'maximum_root_quaternion_norm_error':quaternion_error,'ik_penetration_target_m':a.penetration_target_m,
+        'jacobian_max_absolute_error':derivative_error,'max_actuated_joint_range_rad':float(np.ptp(result[:,7:38],axis=0).max()),
         'source_model_sha256':meta['source_sha256'],'policy_evaluation':False,'training_approved':False,
         'scope':'Bounded OmniRetarget custom-data smoke only; not full climbing, inverse-dynamics feasibility or policy execution.'}
     (a.out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2),flush=True)
