@@ -23,6 +23,7 @@ def main():
     from scipy.interpolate import PchipInterpolator
     from scipy.spatial.transform import Rotation,Slerp
     from supermimic.robots.assets import get_spec
+    from supermimic.robots.dimensions import PROFILE
     from supermimic.data.physics_motion import differentiate_qpos,export_qpos_motion
     with np.load(a.candidate/'x2-reference.npz',allow_pickle=False) as z:
         q=z['qpos'].copy();fps=float(np.asarray(z['fps']).reshape(-1)[0])
@@ -55,7 +56,23 @@ def main():
         'model_sha256':hashlib.sha256(a.native_model.read_bytes()).hexdigest()}
     (a.out/'resampling-geometry.json').write_text(json.dumps(check,indent=2)+'\n')
     if bad:raise RuntimeError('Resampled reference fails unchanged 1mm geometry gate; no policy input exported')
-    velocity=differentiate_qpos(m,dense,200.)[::4]
+    dense_velocity=differentiate_qpos(m,dense,200.)
+    velocity=dense_velocity[::4]
+    names=list(PROFILE['joint_names'])
+    if [m.joint(i).name for i in range(1,m.njnt)]!=names:raise ValueError('Velocity limits do not match native joint order')
+    limits=np.array([PROFILE['velocity_limit'][name] for name in names])
+    if not np.isfinite(limits).all() or not (limits>0).all():raise ValueError('Invalid original velocity limits')
+    if not np.isfinite(dense_velocity).all():raise ValueError('Nonfinite differentiated reference')
+    ratios=abs(dense_velocity[:,6:])/limits
+    t,j=np.unravel_index(ratios.argmax(),ratios.shape)
+    speed_check={'passed':bool(ratios.max()<=1.),'dense_samples':len(dense),'dense_fps':200.,
+        'maximum_dense_joint_velocity_ratio':float(ratios[t,j]),
+        'maximum_export_joint_velocity_ratio':float((abs(velocity[:,6:])/limits).max()),
+        'peak_joint':names[j],'peak_frame':int(t),'peak_time_s':float(t/200.),
+        'peak_speed_rad_s':float(dense_velocity[t,6+j]),'original_limit_rad_s':float(limits[j]),
+        'scope':'Original actuated joint speed limits checked at dense200Hz and exported50Hz; no dynamics certificate'}
+    (a.out/'resampling-velocity.json').write_text(json.dumps(speed_check,indent=2)+'\n')
+    if not speed_check['passed']:raise RuntimeError('Resampled reference fails unchanged joint speed limits; no policy input exported')
     export_qpos_motion(m,result,a.out/'motion-fk.npz',50.,qvel=velocity,source=a.candidate/'x2-reference.npz')
     np.savez_compressed(a.out/'reference-qpos.npz',qpos=result,qvel=velocity,fps=np.array([50.]))
     (a.out/'scene.json').write_bytes((a.candidate/'result.json').read_bytes())
@@ -64,6 +81,7 @@ def main():
         'duration_s':nsteps/50,'uniform_time_scale':(nsteps/50)/duration,
         'interpolation':'PCHIP translations/joints and quaternion SLERP; generalized velocities differentiated at 200 Hz and sampled at 50 Hz',
         'resampling_geometry':check,
+        'resampling_velocity':speed_check,
         'reset_soft_violation_rad':soft,'training_approved':False,'purpose':__doc__}
     (a.out/'manifest.json').write_text(json.dumps(info,indent=2)+'\n');(a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     print(json.dumps(info,indent=2))
