@@ -53,7 +53,7 @@
       "keep each clip paired with its measured terrain and contact phases"
     ],
     "mixing_gate": "Final usable-reference acceptance still requires physical/continuous checks. Explicit user-authorized exploratory training may proceed after finite data, original joint/speed, scene geometry and single-GPU capacity checks; it does not waive final acceptance.",
-    "status": "Four distinct complete geometry-checked families prepared. First one-hour pilot trained two families; both failed actual full ascent. Frozen-policy failure and throughput diagnostics are running before further bounded optimization.",
+    "status": "Four distinct complete geometry-checked families prepared. First-hour two-family pilot failed full ascent. A 2048-env/512-batch capacity check passed and a bounded20-minute start-of-motion curriculum is running; final validation remains unproven.",
     "height_selection_update": "Prioritize official ~46cm effective-rise hand climb before its failed ~69cm variant; retain other ~55cm/~60cm hand families and ~28cm/~39cm/~43cm step families. Variants are not counted as additional skills."
   },
   "multi_motion_review_queue": [
@@ -113,7 +113,10 @@
     "dense_step43_reference": "omni_additional_families_20261029_r1/0_step43/policy-input/resampling-geometry.json",
     "dense_hand55_reference": "omni_hand55_dense_chunks_20261029_r3/policy-input/resampling-geometry.json",
     "one_hour_final_checkpoint_sha256": "f653d90b41ee1aba0e37a4ea7f3279f3025a2b81ba87555613b0c2411cb78a49",
-    "one_hour_complete_climb_verified": false
+    "one_hour_complete_climb_verified": false,
+    "prefix_curriculum": "omni_prefix_curriculum_20261029_r1",
+    "rejected_servo_target_clipping": "omni_servo_target_ab_20261029_r1",
+    "paired_cuda_graph_probe": "omni_cuda_graph_profile_20261029_r1"
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
