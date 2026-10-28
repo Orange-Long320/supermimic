@@ -60,36 +60,42 @@
     {
       "motion": "robot-terrain/climb_15_z_scale_1.1.npz",
       "category": "step-up; coarse effective rise 0.440m",
-      "status": "Latest full 186-frame 0.9-bound candidate: geometry passed, dynamic force motor gate only 63/182 frames; not usable. Reconditioned native motion failed at 1.05 seconds before ascent."
+      "status": "Latest full 186-frame 0.9-bound candidate: geometry passed, dynamic force motor gate only 63/182 frames; not usable. Reconditioned native motion failed at 1.05 seconds before ascent.",
+      "wrist_reference_limit_deg": 15.0
     },
     {
       "motion": "robot-terrain/climb_06_z_scale_0.8.npz",
       "category": "step-up; measured effective source rise 0.284764m; X2 scale gives about 0.28045m",
       "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
-      "prior_diagnostic_variant": "robot-terrain/climb_06_z_scale_1.2.npz"
+      "prior_diagnostic_variant": "robot-terrain/climb_06_z_scale_1.2.npz",
+      "wrist_reference_limit_deg": 15.0
     },
     {
       "motion": "robot-terrain/climb_14_z_scale_1.0.npz",
       "category": "step-up; X2 kinematic candidate, effective source rise about 0.400m",
-      "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved."
+      "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved.",
+      "wrist_reference_limit_deg": 15.0
     },
     {
       "motion": "robot-terrain/climb_20_z_scale_0.8.npz",
       "category": "hand-supported source; measured effective source rise 0.468674m; X2 scale gives about 0.46157m",
       "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
-      "prior_diagnostic_variant": "robot-terrain/climb_20_z_scale_1.2.npz"
+      "prior_diagnostic_variant": "robot-terrain/climb_20_z_scale_1.2.npz",
+      "wrist_reference_limit_deg": 0.0
     },
     {
       "motion": "robot-terrain/climb_11_z_scale_0.8.npz",
       "category": "higher hand-support candidate; source top/rise 0.563596m; X2 about 0.55506m",
       "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
-      "prior_diagnostic_variant": "robot-terrain/climb_11_z_scale_1.2.npz"
+      "prior_diagnostic_variant": "robot-terrain/climb_11_z_scale_1.2.npz",
+      "wrist_reference_limit_deg": 0.0
     },
     {
       "motion": "robot-terrain/climb_25_z_scale_0.8.npz",
       "category": "higher hand-support candidate; source effective rise 0.611056m; X2 about 0.60180m",
       "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
-      "prior_diagnostic_variant": "robot-terrain/climb_25_z_scale_1.2.npz"
+      "prior_diagnostic_variant": "robot-terrain/climb_25_z_scale_1.2.npz",
+      "wrist_reference_limit_deg": 0.0
     }
   ],
   "latest_evidence": {
@@ -99,5 +105,13 @@
     "moving_execution_failure": "omni_native_reconditioned_20261029_r1/independent-replay/report.json",
     "complete_hand_candidate_failure": "omni_x2_hand_full_20261029_r1/audit/report.json",
     "training_approved": false
+  },
+  "adapter_options": {
+    "joint_limit_factor": 0.9,
+    "default_wrist_reference_limit_deg": 15.0,
+    "source_flat_foot_lock": true,
+    "source_foot_surface_lock": true,
+    "collision_backtracking": true,
+    "nonlinear_restoration": true
   }
 }
