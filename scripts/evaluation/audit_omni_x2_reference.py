@@ -114,18 +114,24 @@ def main():
         data.qvel[:]=velocity[i];data.qacc[:]=acceleration[i];mujoco.mj_inverse(model,data);dynamic=data.qfrc_inverse.copy()
         fits={}
         for label,required in [('static',static),('dynamic',dynamic)]:
-            if columns:
-                basis=np.concatenate(columns,axis=1)
-                fit=solve_contact_effort(basis,required,limits)
-                fits[label]={'feasible_base_wrench':bool(fit.success),'minimum_motor_ratio':float(fit.x[-1]) if fit.success else None,'solver_status':int(fit.status)}
-                if fit.success:
-                    torque=required[6:]-basis[6:]@fit.x[:-1];fraction=abs(torque)/limits
-                    dual=np.asarray(fit.ineqlin.marginals)
-                    fits[label]['largest_motor_demands_in_one_optimal_solution']=[
-                        {'joint':names[j],'required_torque_nm':float(torque[j]),'physical_limit_nm':float(limits[j]),
-                         'motor_ratio':float(fraction[j]),'upper_inequality_dual':float(dual[j]),'lower_inequality_dual':float(dual[j+len(names)])}
-                        for j in np.argsort(-fraction)[:5]]
-            else:fits[label]={'feasible_base_wrench':False,'minimum_motor_ratio':None,'solver_status':None}
+            # The same LP also handles a zero-column basis. Flight requires
+            # exactly zero unactuated-base wrench (within the unchanged LP
+            # tolerance), while every motor retains its original limit.
+            # Held-in-air poses still fail gravity balance. Do not invent a
+            # support force, or reject a valid ballistic phase merely because
+            # no foot/palm is touching terrain.
+            basis=np.concatenate(columns,axis=1) if columns else np.zeros((model.nv,0))
+            fit=solve_contact_effort(basis,required,limits)
+            fits[label]={'feasible_base_wrench':bool(fit.success),'minimum_motor_ratio':float(fit.x[-1]) if fit.success else None,
+                'solver_status':int(fit.status),'support_ray_count':int(basis.shape[1]),
+                'required_root_wrench_max_abs':float(abs(required[:6]).max())}
+            if fit.success:
+                torque=required[6:]-basis[6:]@fit.x[:-1];fraction=abs(torque)/limits
+                dual=np.asarray(fit.ineqlin.marginals)
+                fits[label]['largest_motor_demands_in_one_optimal_solution']=[
+                    {'joint':names[j],'required_torque_nm':float(torque[j]),'physical_limit_nm':float(limits[j]),
+                     'motor_ratio':float(fraction[j]),'upper_inequality_dual':float(dual[j]),'lower_inequality_dual':float(dual[j+len(names)])}
+                    for j in np.argsort(-fraction)[:5]]
         rows.append({'frame':i,'patches':patches,**fits})
         if i%100==0:print(f'audited {i}/{len(q)}',flush=True)
     a.out.mkdir(parents=True)
