@@ -42,3 +42,18 @@ def test_fast_braking_can_replan_before_reaching_the_opposite_stop():
         v=v+.005*a;q=q+.005*v
         assert (q>=lo-1e-10).all() and (q<=hi+1e-10).all()
         assert (abs(v)<=14.456).all()
+
+
+@pytest.mark.parametrize('direction',[-1.,1.])
+def test_replanned_stop_keeps_numerical_headroom_for_the_next_step(direction):
+    from supermimic.policy.joint_prediction import replanned_acceleration_bounds
+    # The native waist stop was exceeded by 4.2e-11 rad with effectively
+    # zero velocity. Do not relax the stop; require an interior sampled state.
+    bound=.468692;dt=.005;q=np.array([direction*(bound-1e-10)]);v=np.array([direction*1e-8])
+    low,high,_=replanned_acceleration_bounds(q,v,-bound,bound,np.array([30.]),dt)
+    acceleration=high if direction>0 else low
+    following_velocity=v+dt*acceleration
+    following=q+dt*following_velocity+direction*1e-10
+    assert np.max(abs(following))<bound-5e-7
+    next_low,next_high,_=replanned_acceleration_bounds(following,following_velocity,-bound,bound,np.array([30.]),dt)
+    assert (next_low<=next_high).all()

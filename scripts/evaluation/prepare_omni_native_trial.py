@@ -17,6 +17,7 @@ def main():
     p.add_argument('--reference',type=Path,required=True)
     p.add_argument('--tracker',type=Path,required=True)
     p.add_argument('--controller',type=Path,required=True)
+    p.add_argument('--joint-predictor',type=Path,help='Private predictor snapshot; never overwrite shared project modules')
     p.add_argument('--seconds',type=float,default=2.)
     p.add_argument('--wall-seconds',type=int,default=180)
     p.add_argument('--joint-task-weight',type=float,default=.1)
@@ -65,6 +66,7 @@ def main():
             heights.append(float(d.geom_xpos[g,2]+m.geom_size[g,2]))
     a.out.mkdir(parents=True);(a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (a.out/'tracker.py').write_bytes(a.tracker.read_bytes());(a.out/'native-inverse-snapshot.py').write_bytes(a.controller.read_bytes())
+    if a.joint_predictor:(a.out/'joint-prediction-snapshot.py').write_bytes(a.joint_predictor.read_bytes())
     np.savez_compressed(a.out/'reference-qpos.npz',qpos=q,qvel=v,fps=np.array([fps]))
     np.savez_compressed(a.out/'controller-posture-seed.npz',qpos=entry)
     info={'minimum_predictor_interior_margin_rad':margin,'entry_root_z_offset_m':offset,'initial_foot_gaps_m':gaps,
@@ -77,6 +79,7 @@ def main():
         '--entry-velocity-mode','zero','--entry-root-z-offset',str(offset),'--joint-task-weight',str(a.joint_task_weight),
         '--recover-planned-contacts','--support-surface-heights',*[str(h) for h in sorted(set(heights))],
         '--native-controller-source',str(a.out/'native-inverse-snapshot.py'),'--out',str(a.out/'trace')]
+    if a.joint_predictor:command+=['--joint-prediction-source',str(a.out/'joint-prediction-snapshot.py')]
     (a.out/'command.json').write_text(json.dumps(command,indent=2)+'\n')
     (a.out/'runner.py').write_text('''import json,subprocess,os
 from pathlib import Path

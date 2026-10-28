@@ -27,6 +27,7 @@ def main():
                    help='Keep planned planted-foot tasks during contact loss and add soft normal feedback')
     p.add_argument('--native-controller-source',type=Path,
                    help='Explicit controller source snapshot; avoids replacing shared server modules')
+    p.add_argument('--joint-prediction-source',type=Path,help='Explicit private predictor snapshot; requires a controller snapshot')
     p.add_argument('--entry-root-velocity',type=float,nargs=6,default=[0.]*6,
                    help='Initial-only free-root velocity perturbation: world xyz then local angular xyz')
     p.add_argument('--entry-root-z-offset',type=float,default=0.,help='Recorded initial-only root height offset for contact initialization')
@@ -34,7 +35,9 @@ def main():
     p.add_argument('--support-surface-heights',type=float,nargs='+',help='Explicit horizontal support heights for planned contact recovery')
     p.add_argument('--hard-grounded-com',action='store_true',help='Require the primary COM task when ground contact exists; reject physically infeasible requests')
     p.add_argument('--joint-task-weight',type=float,default=.01,help='Posture task priority; design-controller default is weak, reference tracking may require stronger posture control')
-    args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
+    args=p.parse_args()
+    if args.joint_prediction_source and not args.native_controller_source:p.error('A private predictor requires an explicit private controller snapshot')
+    args.out.mkdir(parents=True,exist_ok=False)
     (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (args.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'command':[sys.executable,*sys.argv],
         'mujoco':mujoco.__version__,'cuda_visible_devices':os.environ.get('CUDA_VISIBLE_DEVICES')},indent=2))
@@ -46,6 +49,14 @@ def main():
         NativeContactController=module.NativeContactController
         controller_source=args.native_controller_source.read_bytes()
         (args.out/'native_inverse-as-run.py').write_bytes(controller_source)
+    prediction_source=None
+    if args.joint_prediction_source:
+        prediction_spec=importlib.util.spec_from_file_location('native_joint_prediction_snapshot',args.joint_prediction_source)
+        prediction_module=importlib.util.module_from_spec(prediction_spec);prediction_spec.loader.exec_module(prediction_module)
+        module.replanned_acceleration_bounds=prediction_module.replanned_acceleration_bounds
+        module.position_acceleration_bounds=prediction_module.position_acceleration_bounds
+        prediction_source=args.joint_prediction_source.read_bytes()
+        (args.out/'joint_prediction-as-run.py').write_bytes(prediction_source)
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));actual=mujoco.MjData(m);desired=mujoco.MjData(m)
     z=np.load(args.reference);q=z['qpos'].copy();v=z['qvel'].copy()
@@ -162,6 +173,7 @@ def main():
         'model_sha256':hashlib.sha256(args.model.read_bytes()).hexdigest(),
         'reference_sha256':hashlib.sha256(args.reference.read_bytes()).hexdigest(),
         'controller_source_sha256':hashlib.sha256(controller_source).hexdigest() if controller_source else None,
+        'joint_prediction_source_sha256':hashlib.sha256(prediction_source).hexdigest() if prediction_source else None,
         'status':status,'seconds_executed':len(rows)*m.opt.timestep,'failure':failure,
         'maximum_hard_violation_rad':max((x['hard_violation_rad'] for x in rows),default=0),
         'maximum_motor_ratio':max((x['motor_ratio'] for x in rows),default=0),

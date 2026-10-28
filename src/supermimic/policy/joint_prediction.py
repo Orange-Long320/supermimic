@@ -21,16 +21,19 @@ def position_acceleration_bounds(position,velocity,lower,upper,horizon):
     return minimum,maximum
 
 
-def replanned_acceleration_bounds(position,velocity,lower,upper,velocity_limit,timestep,horizon=.08):
+def replanned_acceleration_bounds(position,velocity,lower,upper,velocity_limit,timestep,horizon=.08,sample_position_buffer=1e-6):
     """Keep constant-acceleration predictions local during rapid braking.
 
     A long constant-acceleration interval may require both braking at the near
     stop and avoiding the opposite stop after reversing. Replanning can change
     acceleration, so reduce that interval to at least two actual physics steps.
     Preserve continuous bounds and add semi-implicit integration sample bounds.
+    Keep sampled states slightly inside those same bounds so floating-point
+    integration error cannot turn an active stop into a rejected next state.
     This does not alter physical limits or guarantee changing-contact dynamics.
     """
     if timestep<=0 or horizon<2*timestep:raise ValueError('Prediction needs at least two positive physics steps')
+    if not np.isfinite(sample_position_buffer) or sample_position_buffer<0 or np.any(np.asarray(upper)-np.asarray(lower)<=2*sample_position_buffer):raise ValueError('Invalid sampled-position numerical buffer')
     q=np.asarray(position);v=np.asarray(velocity);limit=np.asarray(velocity_limit)
     while True:
         minimum,maximum=position_acceleration_bounds(q,v,lower,upper,horizon)
@@ -38,8 +41,8 @@ def replanned_acceleration_bounds(position,velocity,lower,upper,velocity_limit,t
         # Include the endpoint if it falls between discrete simulation samples.
         times=times[times<=horizon+1e-12]
         denominator=.5*times[:,None]*(times[:,None]+timestep)
-        minimum=np.maximum(minimum,((np.asarray(lower)-q-times[:,None]*v)/denominator).max(axis=0))
-        maximum=np.minimum(maximum,((np.asarray(upper)-q-times[:,None]*v)/denominator).min(axis=0))
+        minimum=np.maximum(minimum,((np.asarray(lower)+sample_position_buffer-q-times[:,None]*v)/denominator).max(axis=0))
+        maximum=np.minimum(maximum,((np.asarray(upper)-sample_position_buffer-q-times[:,None]*v)/denominator).min(axis=0))
         minimum=np.maximum(minimum,(-limit-v)/horizon)
         maximum=np.minimum(maximum,(limit-v)/horizon)
         if np.all(minimum<=maximum):return minimum,maximum,horizon
