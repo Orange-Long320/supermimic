@@ -75,7 +75,18 @@ def main():
         sole_radii.append(radii)
     for pose in poses:
         gd.qpos[:3]=pose[4:7];gd.qpos[3:7]=pose[:4];gd.qpos[source_columns]=pose[7:];mujoco.mj_kinematics(g1,gd)
-        landmarks.append(gd.xpos[ids].copy()*scale)
+        points=gd.xpos[ids].copy()
+        # The upstream human-mocap "Foot" maps to an ankle marker, whereas
+        # our X2 "Foot" is a sole heel. Reusing those semantic labels would
+        # force the X2 heel upward and leave only toe-edge support. Construct
+        # corresponding heel/toe sole points from the actual G1 foot spheres.
+        for side_index,side in enumerate(('left','right')):
+            sole_up=gd.xmat[g1.body(side+'_ankle_roll_link').id].reshape(3,3)[:,2]
+            centers=gd.xpos[sole_bodies[side_index]]
+            prefix=('Left','Right')[side_index]
+            for label,subset in [('Foot',[0,1]),('ToeBase',[2,3])]:
+                points[demo_names.index(prefix+label)]=centers[subset].mean(0)-float(np.asarray(sole_radii[side_index])[subset].mean())*sole_up
+        landmarks.append(points*scale)
         bottoms=gd.xpos[np.array(sole_bodies)].copy();bottoms[:,:,2]-=np.asarray(sole_radii)
         source_soles.append(bottoms)
     landmarks=np.asarray(landmarks)
@@ -173,6 +184,7 @@ def main():
         'hard_joint_violation_rad':hard,'max_environment_penetration_m':penetration,'bounds_match_x2_model':True,
         'maximum_root_quaternion_norm_error':quaternion_error,'ik_penetration_target_m':a.penetration_target_m,
         'jacobian_max_absolute_error':derivative_error,'max_actuated_joint_range_rad':float(np.ptp(result[:,7:38],axis=0).max()),
+        'source_foot_landmarks':'Heel/toe sole surface points from paired G1 spheres; upstream ankle marker is not a heel',
         'source_model_sha256':meta['source_sha256'],'policy_evaluation':False,'training_approved':False,
         'scope':'Bounded OmniRetarget custom-data smoke only; not full climbing, inverse-dynamics feasibility or policy execution.'}
     (a.out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2),flush=True)
