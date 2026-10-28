@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 def load_repair():
@@ -41,3 +42,19 @@ def test_settling_preserves_entry_speed_without_overshooting_soft_limit():
     np.testing.assert_allclose(curve.derivative()(seconds),0.,atol=1e-12)
     values=curve(np.linspace(0,seconds,501))
     assert values.min()>=-2.238 and values.max()<=-.118
+
+
+def test_landing_decelerates_without_forward_then_backward_swing():
+    from scipy.interpolate import BPoly
+    module=load_repair();start=np.array([2.328,.451]);end=np.array([2.371,.480]);rate=np.array([.873,.996])
+    seconds=module.monotone_settling_duration(start,end,rate,.54,.04)
+    curve=BPoly.from_derivatives([0,seconds],[[start,rate,np.zeros(2)],[end,np.zeros(2),np.zeros(2)]])
+    sample=curve(np.linspace(0,seconds,501))
+    assert np.all(np.diff(sample,axis=0)>=-1e-12)
+    np.testing.assert_allclose(curve.derivative()(0),rate,atol=1e-12)
+    np.testing.assert_allclose(sample[-1],end,atol=1e-12)
+
+
+def test_opposing_foot_motion_requires_earlier_boundary_instead_of_clipping():
+    with pytest.raises(ValueError,match='start the repair earlier'):
+        load_repair().monotone_settling_duration([0.,0.],[.1,-.1],[1.,1.],.5,.04)

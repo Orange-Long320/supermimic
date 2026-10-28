@@ -39,6 +39,26 @@ def bounded_settling_curve(start,end,rate,duration,low,high,min_duration):
     return curve,seconds
 
 
+def monotone_settling_duration(start,end,rate,duration,min_duration):
+    """Bound quintic Bezier control points between horizontal endpoints.
+
+    With zero endpoint accelerations and zero final velocity, P1=start+vT/5
+    and P2=start+2vT/5. Keeping both inside the endpoint interval prevents a
+    forward swing followed by a return. Opposing entry motion needs an earlier
+    repair boundary, rather than clipping the trajectory or its velocity.
+    """
+    delta=np.asarray(end)-np.asarray(start);rate=np.asarray(rate)
+    seconds=float(duration)
+    for distance,velocity in zip(delta.ravel(),rate.ravel()):
+        if abs(velocity)<1e-9:continue
+        if distance*velocity<=0:
+            raise ValueError('Incoming motion opposes the endpoint; start the repair earlier')
+        seconds=min(seconds,2.5*abs(distance/velocity)*.98)
+    if seconds<min_duration:
+        raise ValueError('Monotone landing needs an earlier repair boundary')
+    return seconds
+
+
 def smooth_wrists(poses, names, strength=30.):
     """Penalize second differences without moving the first/last wrist pose."""
     result = poses.copy()
@@ -105,11 +125,15 @@ def main():
     p.add_argument('--resume',type=Path,help='Warm start from a saved optimization qpos sequence')
     p.add_argument('--match-entry-velocity',action='store_true',help='Match incoming joint and foot twists and include the incoming samples in smoothing')
     p.add_argument('--capture-recovery-steps',action='store_true',help='Plant the moving right foot, step left toward the capture target, then align right; constrain COM instead of returning the root')
+    p.add_argument('--fixed-endpoint',type=Path,help='Keep the exact final qpos of an existing reference qpos.npz')
+    p.add_argument('--monotone-landing',action='store_true',help='Shorten root/landing deceleration to avoid horizontal overshoot while preserving incoming velocity')
     args = p.parse_args()
     if args.wrist_strength<0 or args.max_nfev<1 or args.seconds<=.2:
         p.error('Nonnegative smoothing strength, positive evaluations and seconds > .2 required')
     if args.capture_recovery_steps and not args.match_entry_velocity:
         p.error('Capture recovery requires matching incoming velocities')
+    if args.monotone_landing and (not args.match_entry_velocity or args.capture_recovery_steps):
+        p.error('Monotone landing requires entry matching and the right-then-left foot plan')
     args.out.mkdir(parents=True, exist_ok=False)
     (args.out / 'as-run.py').write_bytes(Path(__file__).read_bytes())
     (args.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'hostname':socket.gethostname(),
@@ -193,7 +217,12 @@ def main():
     capture_time = np.sqrt(initial_com[2] / 9.81)
     geo.update(end)
     final_com_unshifted = geo.data.subtree_com[geo.root].copy()
-    end[:2] += initial_com[:2] + capture_time*com_velocity[:2] - final_com_unshifted[:2]
+    if args.fixed_endpoint:
+        fixed=np.load(args.fixed_endpoint)['qpos']
+        end=fixed[-1].copy() if fixed.ndim==2 else fixed.copy()
+        if end.shape!=initial.shape:raise ValueError('Fixed endpoint dimension mismatch')
+    else:
+        end[:2] += initial_com[:2] + capture_time*com_velocity[:2] - final_com_unshifted[:2]
     # Do not place the right landing foot across/too close to the left support
     # foot. A raw lateral capture target can create an unreachable narrow stance.
     geo.update(end)
@@ -201,7 +230,7 @@ def main():
     lateral = Rotation.from_euler('z',heading).apply([0.,1.,0.])
     right_lateral = float(geo.foot('right')[0] @ lateral)
     allowed_lateral = float(initial_feet['left'][0] @ lateral) - .20
-    if not args.capture_recovery_steps:
+    if not args.capture_recovery_steps and not args.fixed_endpoint:
         end[:2] -= max(right_lateral-allowed_lateral,0)*lateral[:2]
     geo.update(end)
     final_feet = {s: geo.foot(s) for s in geo.feet}
@@ -211,6 +240,8 @@ def main():
     count = round(args.seconds * fps)
     duration = count / fps
     stop_time = min(duration*.6, 2*capture_time)
+    if args.monotone_landing:
+        stop_time=monotone_settling_duration(initial[:2],end[:2],velocity[:2],stop_time,2/fps)
     support_com = final_com.copy()
     support_com += Rotation.from_euler('z',heading).apply([0.,-.09,0.])
     curve = BPoly.from_derivatives([0, stop_time, duration*.7, duration],
@@ -258,8 +289,11 @@ def main():
         flat_time=min(.25,duration*.4)
         left_angle_curve=boundary_curve(np.zeros(3),(lr.inv()*final_feet['left'][1]).as_rotvec(),flat_time,left_omega)
         rp,rr=initial_feet['right'];ep,er=final_feet['right']
-        right_pos_curve=boundary_curve(rp,ep,duration*.45,right_velocity)
-        right_angle_curve=boundary_curve(np.zeros(3),(rr.inv()*er).as_rotvec(),duration*.45,right_omega)
+        landing_time=duration*.45
+        if args.monotone_landing:
+            landing_time=monotone_settling_duration(rp[:2],ep[:2],right_velocity[:2],landing_time,2/fps)
+        right_pos_curve=boundary_curve(rp,ep,landing_time,right_velocity)
+        right_angle_curve=boundary_curve(np.zeros(3),(rr.inv()*er).as_rotvec(),landing_time,right_omega)
         plant_time=min(.12,duration*.2);plant_end=pivot.copy();plant_end[:2]+=.5*plant_time*pivot_velocity[:2]
         plant_end[2]=final_pivot[2]
         pivot_curve=boundary_curve(pivot,plant_end,plant_time,pivot_velocity)
@@ -295,8 +329,8 @@ def main():
             contact[2]+=.025*np.sin(np.pi*step)**2
             foot_pos=contact-foot_rot.apply(local_pivot)
             foot_pos[2]=max(foot_pos[2],right_floor_height-foot_rot.apply(left_local)[:,2].min())
-            right_pos=right_pos_curve(min(t,duration*.45))
-            right_rot=rr*Rotation.from_rotvec(right_angle_curve(min(t,duration*.45)))
+            right_pos=right_pos_curve(min(t,landing_time))
+            right_rot=rr*Rotation.from_rotvec(right_angle_curve(min(t,landing_time)))
             right_pos[2]=max(right_pos[2],right_floor_height-right_rot.apply(right_local)[:,2].min())
             root_rot=rot0*Rotation.from_rotvec(root_angle_curve(t))
             posture[7:]=[float(c(min(t,seconds))) for c,seconds in zip(joint_curves,joint_durations)]
@@ -410,6 +444,9 @@ def main():
             'standing_sha256':hashlib.sha256(args.standing.read_bytes()).hexdigest(),
             'output_sha256':hashlib.sha256((args.out/'webster.npz').read_bytes()).hexdigest(),
             'frames':len(full),'fps':fps,'transition_frame':frame,'transition_seconds':duration,
+            'right_landing_seconds':landing_time if args.match_entry_velocity else duration*.45,
+            'root_stopping_seconds':stop_time,
+            'fixed_endpoint_sha256':hashlib.sha256(args.fixed_endpoint.read_bytes()).hexdigest() if args.fixed_endpoint else None,
             'optimizer_success':bool(solved.success),'optimizer_nfev':int(solved.nfev),
             'shortened_posture_curves_s':{name:seconds for name,seconds in zip(names,joint_durations) if seconds<duration-1e-8} if args.match_entry_velocity else {},
             'wrist_before':jitter(original),'wrist_after':jitter(source),
