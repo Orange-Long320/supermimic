@@ -33,6 +33,7 @@ def main():
     p.add_argument('--penetration-target-m',type=float,default=.0008,help='IK target tighter than the independent 1mm collision gate')
     p.add_argument('--source-flat-foot-lock',action='store_true',help='Pin sole marker heights only during source-confirmed flat support')
     p.add_argument('--collision-backtracking',action='store_true',help='Check actual collision distance before accepting each SQP step')
+    p.add_argument('--restoration-helper',type=Path,help='Explicit nonlinear support-restoration module; enables one restoration attempt per failed support-transition frame')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
     if a.out.exists() or a.frames<2 or a.start_frame<0 or not 0<=a.wrist_reference_limit_deg<=180 or not 0<a.penetration_target_m<.001:p.error('New output, valid source window/wrist task bound and a positive IK penetration target below 1mm required')
@@ -43,6 +44,13 @@ def main():
     from holosoma_retargeting.src.utils import extract_foot_sticking_sequence_velocity
     from holosoma_retargeting.src.utils import calculate_laplacian_coordinates
     from holosoma_retargeting.config_types.retargeter import FootLockConfig
+    restore_pose=None
+    if a.restoration_helper:
+        if not a.source_flat_foot_lock or not a.collision_backtracking:p.error('Restoration requires both contact locks and native constraint backtracking')
+        import importlib.util
+        module_spec=importlib.util.spec_from_file_location('omni_support_restore_snapshot',a.restoration_helper)
+        restoration_module=importlib.util.module_from_spec(module_spec);module_spec.loader.exec_module(restoration_module)
+        restore_pose=restoration_module.restore_pose
     class X2Retargeter(InteractionMeshRetargeter):
         def _update_jacobians_and_phis_from_q(self,q):
             jacobians,distances=super()._update_jacobians_and_phis_from_q(q)
@@ -125,13 +133,14 @@ def main():
 
         def iterate(self,**kwargs):
             if not a.collision_backtracking:return super().iterate(**kwargs)
-            q=kwargs.pop('q_n').copy();budget=kwargs.pop('n_iter')*3;last_cost=np.inf;backtracks=0;self._plane_cuts=[]
+            q=kwargs.pop('q_n').copy();budget=kwargs.pop('n_iter')*3;last_cost=np.inf;backtracks=0;self._plane_cuts=[];restoration_attempts=0
             last_actual=self._actual_tracking_cost(q,kwargs);stopping_reason='iteration_budget'
             allowed=5e-5
             new_support=any(start==kwargs['frame_idx'] for ranges in self._foot_lock_windows.values() for start,end in ranges)
             for iteration in range(budget):
                 before,_,_=self._constraint_merit(q,kwargs['frame_idx'])
                 accepted=None
+                restored=False
                 original_step=self.step_size
                 try:
                     for contraction in range(7):
@@ -143,7 +152,25 @@ def main():
                         try:proposed,cost=self.solve_single_iteration(q_a_n_last=q[self.q_a_indices],**solve_kwargs)
                         except RuntimeError as error:
                             np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q)
-                            (a.out/'solver-failure.json').write_text(json.dumps({'frame':kwargs['frame_idx'],'iteration':iteration,'constraint_merit_m':before,'trust_step':self.step_size,'source_support_transition':new_support,'initial_feasibility_fallback_enabled':solve_kwargs['init_t'],'error':str(error)},indent=2)+'\n')
+                            qp_record={'frame':kwargs['frame_idx'],'iteration':iteration,'constraint_merit_m':before,'trust_step':self.step_size,'source_support_transition':new_support,'initial_feasibility_fallback_enabled':solve_kwargs['init_t'],'error':str(error),'recovered':False}
+                            (a.out/'last-qp-infeasibility.json').write_text(json.dumps(qp_record,indent=2)+'\n')
+                            if restore_pose is not None and new_support and before>allowed and restoration_attempts==0:
+                                restoration_attempts+=1;flat_targets={};xy_targets={};previous=mujoco.MjData(self.robot_model)
+                                previous.qpos[:]=kwargs['q_t_last'];mujoco.mj_kinematics(self.robot_model,previous)
+                                for name,body_name in self.foot_links.items():
+                                    body=self.robot_model.body(body_name).id;target=self._is_foot_locked_in_window(name,kwargs['frame_idx'])
+                                    if target is not None:flat_targets[body]=target
+                                    side='l' if 'left' in name else 'r'
+                                    if any(key.lower().startswith(side) and bool(value) for key,value in kwargs['foot_sticking'].items()):xy_targets[body]=previous.xpos[body,:2].copy()
+                                recovered,info=restore_pose(self.robot_model,q,flat_targets,xy_targets,self.q_a_lb[7:38],self.q_a_ub[7:38],
+                                    penetration_tolerance=self.penetration_tolerance,height_tolerance=self.foot_lock.tolerance,xy_tolerance=self.foot_sticking_tolerance)
+                                info.update(frame=kwargs['frame_idx'],iteration=iteration)
+                                (a.out/f'restoration-{kwargs["frame_idx"]:05d}.json').write_text(json.dumps(info,indent=2)+'\n')
+                                np.savez_compressed(a.out/f'restoration-{kwargs["frame_idx"]:05d}.npz',qpos=recovered,original=q)
+                                if info['geometry_and_task_feasible']:
+                                    qp_record['recovered']=True
+                                    (a.out/'last-qp-infeasibility.json').write_text(json.dumps(qp_record,indent=2)+'\n')
+                                    q=recovered;self._plane_cuts=[];restored=True;break
                             raise
                         for reduction in range(15):
                             alpha=2.**(-reduction);trial=q+alpha*(proposed-q);mujoco.mj_normalizeQuat(self.robot_model,trial)
@@ -152,6 +179,7 @@ def main():
                                 accepted=trial;backtracks+=reduction;break
                         if accepted is not None:break
                 finally:self.step_size=original_step
+                if restored:continue
                 if accepted is None:
                     if self._add_horizontal_plane_witnesses(proposed):continue
                     np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q,proposed=proposed)
@@ -168,14 +196,15 @@ def main():
             if final_merit>allowed:
                 np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q)
                 raise RuntimeError(f'Contact SQP did not converge at frame {kwargs["frame_idx"]}: violation {final_merit}m after {budget} iterations')
+            actual=self._actual_tracking_cost(q,kwargs)
             if not hasattr(self,'backtracking_records'):self.backtracking_records=[]
             if not hasattr(self,'_accepted_poses'):self._accepted_poses=[]
             self._accepted_poses.append(q[:38].copy())
-            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'maximum_penetration_m':final,'maximum_locked_sole_height_error_m':final_foot_error,'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
+            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'restoration_attempts':restoration_attempts,'maximum_penetration_m':final,'maximum_locked_sole_height_error_m':final_foot_error,'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
             if kwargs['frame_idx']%30==0:
                 (a.out/'collision-backtracking-progress.json').write_text(json.dumps(self.backtracking_records,indent=2)+'\n')
                 np.savez_compressed(a.out/f'accepted-prefix-{kwargs["frame_idx"]:05d}.npz',qpos=np.asarray(self._accepted_poses),fps=30.,source_start_frame=a.start_frame,source_motion=a.motion)
-            return q,cost
+            return q,actual
 
         def _build_transform_qdot_to_qvel_fast(self, use_world_omega=True):
             # Retain the upstream default quaternion formula, checked below
@@ -188,6 +217,7 @@ def main():
                     transform[int(self.robot_model.jnt_dofadr[joint]),int(self.robot_model.jnt_qposadr[joint])]=1.
             return transform
     a.out.mkdir(parents=True);(a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
+    if a.restoration_helper:(a.out/'restoration-helper-as-run.py').write_bytes(a.restoration_helper.read_bytes())
     meta=json.loads((a.x2_model/'model.json').read_text())
     source=json.loads((a.source_audit/'screening.json').read_text())
     row=next(x for x in source['motions'] if x['motion']==a.motion)
@@ -342,6 +372,7 @@ def main():
         'source_foot_landmarks':'Heel/toe sole surface points from paired G1 spheres; upstream ankle marker is not a heel',
         'collision_backtracking':a.collision_backtracking,
         'wrist_reference_limit_deg':a.wrist_reference_limit_deg,'paired_hand_collision_centroids':bool(source_hand_centers),
+        'restoration_helper_sha256':hashlib.sha256(a.restoration_helper.read_bytes()).hexdigest() if a.restoration_helper else None,
         'source_model_sha256':meta['source_sha256'],'policy_evaluation':False,'training_approved':False,
         'scope':'Bounded OmniRetarget custom-data smoke only; not full climbing, inverse-dynamics feasibility or policy execution.'}
     (a.out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2),flush=True)
