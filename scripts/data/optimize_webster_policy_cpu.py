@@ -58,6 +58,7 @@ def main():
     p.add_argument("--warmstart",type=Path,help="Parameter vector, or an (N,D) grid for zero-iteration timing ablations")
     p.add_argument("--initial-command-margin",type=float,default=0.,help="Move the first position command inward for joints starting at a soft boundary; no state or actuator edits")
     p.add_argument("--initial-knot",action="store_true",help="Search the initial residual command as well as the three preparation knots")
+    p.add_argument("--independent-leg-axes",action="store_true",help="Append left/right hip yaw and independent right hip roll residuals; requires explicitly migrated parameter files")
     p.add_argument("--tail-of",type=Path,help="Freeze a takeoff solution and search aerial/landing residuals instead")
     p.add_argument("--joint-phases",action="store_true",help="Use tail-of only as initialization; jointly search preparation and aerial commands")
     p.add_argument("--device",default="cpu")
@@ -79,6 +80,7 @@ def main():
     p.add_argument("--residual-sigma",type=float,help="Initial search deviation in normalized motor-effort fractions")
     p.add_argument("--clock-sigma",type=float,help="Initial search deviation for the preparation duration or air scale")
     p.add_argument("--search-groups",help="Comma-separated first joint names of residual groups to optimize; retain all other warm-start coefficients")
+    p.add_argument("--search-parameter-indices",type=int,nargs='+',help="Restrict search to these exact coefficient indices; timing stays frozen unless explicitly included")
     p.add_argument("--floor-penalty-linear",type=float,default=0.,help="Penalize nonfoot clearance below 5 mm and foot compression beyond 5 mm")
     p.add_argument("--high-frequency-geometry",action="store_true",help="Audit post-integration foot/body geometry at every 5 ms physics step")
     p.add_argument("--preserve-feasible-core",action="store_true",help="Prefer body-clear, within-speed/effort candidates and keep elites in that set when available")
@@ -226,6 +228,8 @@ def main():
         [("left_elbow_joint",1),("right_elbow_joint",1)],
         [("left_hip_roll_joint",1),("right_hip_roll_joint",1)],
         [("left_ankle_roll_joint",1)],[("right_ankle_roll_joint",1)]]
+    if args.independent_leg_axes:
+        groups += [[(n,1)] for n in ['left_hip_yaw_joint','right_hip_yaw_joint','right_hip_roll_joint']]
     mapping=np.zeros((len(groups),len(names)))
     for k,group in enumerate(groups):
         for name,sign in group:
@@ -260,6 +264,12 @@ def main():
             group=labels.index(name)
             for start_column,knots in blocks:
                 for knot in range(knots):search_mask[start_column+knot*len(groups)+group]=True
+    if args.search_parameter_indices is not None:
+        selected=args.search_parameter_indices
+        if len(set(selected))!=len(selected) or any(i<0 or i>=dimension for i in selected):
+            p.error('Search indices must be unique and within the selected parameter layout')
+        if any(not search_mask[i] for i in selected):p.error('Search indices conflict with the group selection')
+        search_mask[:]=False;search_mask[selected]=True
     mean=np.zeros(dimension);mean[0]=1. if args.tail_of else reference_preparation
     if args.joint_phases:mean[:preparation_dimension]=fixed_preparation;mean[preparation_dimension]=1.
     parameter_grid=None
