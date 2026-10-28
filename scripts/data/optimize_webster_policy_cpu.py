@@ -87,6 +87,8 @@ def main():
     p.add_argument("--landing-switch-times",type=float,nargs='+',default=[1.2])
     p.add_argument("--landing-policy-blend",type=float,default=.12)
     p.add_argument("--landing-guide-delay",type=float,help="Override absolute switch times with an offset from retimed guide landing (at least -0.3 seconds)")
+    p.add_argument("--early-recovery-joints",help="Comma-separated joints receiving pure landing-policy feedback before global takeover")
+    p.add_argument("--early-recovery-offsets",type=float,nargs='+',help="Early takeover offsets from guide landing; a grid requires zero iterations")
     p.add_argument("--consistent-retiming",action="store_true",help="Resample future poses and velocities with one continuous physical-time clock")
     p.add_argument("--physics-command-projection",action="store_true",help="Experimental 5 ms acceleration-based motor-command projection")
     p.add_argument("--projection-frequency",type=float,default=35.)
@@ -98,6 +100,10 @@ def main():
     if args.joint_phases and (not args.tail_of or args.phase!='full' or args.baseline_air_scales):p.error('Joint phases require full phase, a preparation seed, and no air-scale-only grid')
     if args.preserve_feasible_core and (args.phase!='full' or not args.high_frequency_geometry):p.error('Core-preserving search requires a full rollout with physics-rate geometry')
     if args.landing_guide_delay is not None and (not args.landing_ckpt or not np.isfinite(args.landing_guide_delay) or args.landing_guide_delay<-.3 or len(args.landing_switch_times)!=1):p.error('Guide-relative landing needs one landing policy and a finite offset of at least -0.3 seconds')
+    if bool(args.early_recovery_joints)!=bool(args.early_recovery_offsets):p.error('Early recovery requires both joint names and offsets')
+    if args.early_recovery_offsets:
+        if not args.landing_ckpt or any(not np.isfinite(x) or x<-.3 for x in args.early_recovery_offsets):p.error('Early recovery requires a policy and finite offsets of at least -0.3 seconds')
+        if args.num_envs%len(args.early_recovery_offsets) or (len(args.early_recovery_offsets)>1 and args.iterations):p.error('Early offset grids need equal replicas and zero search iterations')
     assert args.population%args.num_envs==0
     if args.checkpoint_grid and (args.iterations or any(c.name=='ckpt_latest.pt' for c in args.checkpoint_grid)):
         p.error('Checkpoint comparison needs immutable files and zero search iterations')
@@ -191,6 +197,14 @@ def main():
     d=mujoco.MjData(m)
     root=int(m.jnt_bodyid[0])
     names=PROFILE["joint_names"]
+    early_indices=[]
+    if args.early_recovery_joints:
+        selected=args.early_recovery_joints.split(',')
+        if any(n not in names for n in selected):p.error('Unknown early-recovery joint')
+        early_indices=[names.index(n) for n in selected]
+        from supermimic.policy.recovery_blend import blend_joint_recovery
+    early_offsets=torch.as_tensor(np.resize(args.early_recovery_offsets,args.num_envs),dtype=torch.float32,device=device) if early_indices else None
+    early_times=torch.zeros_like(landing_times)
     assert [m.joint(int(j)).name.rsplit("/",1)[-1] for j in m.actuator_trnid[:,0]]==list(names)
     kp=np.array([PROFILE["stiffness"][n] for n in names])
     kd=np.array([PROFILE["damping"][n] for n in names])
@@ -350,6 +364,7 @@ def main():
         clock["preparation"]=torch.tensor(prep_parameters[:,0],dtype=torch.float32,device=device)
         clock["air_scale"]=torch.tensor(air_parameters[:,0] if air_parameters is not None else np.ones(args.num_envs),dtype=torch.float32,device=device)
         if args.landing_guide_delay is not None:landing_times.copy_(clock['preparation']+reference_flight*clock['air_scale']+args.landing_guide_delay)
+        if early_offsets is not None:early_times.copy_(clock['preparation']+reference_flight*clock['air_scale']+early_offsets)
         cmd.forced_frame[:]=0
         obs,_=env.reset()
         ids=torch.arange(args.num_envs,device=device)
@@ -426,8 +441,12 @@ def main():
             if landing_policy is not None:
                 fraction=(torch.clamp((step*.02-landing_times)/args.landing_policy_blend,0,1)
                     if args.landing_policy_blend else (step*.02>=landing_times).to(torch.float32))
-                landing_action=landing_policy(obs["policy"],obs["goal"])+residual
-                action=torch.lerp(action,landing_action,fraction[:,None])
+                recovery_action=landing_policy(obs["policy"],obs["goal"])
+                if early_indices:
+                    early_fraction=(torch.clamp((step*.02-early_times)/args.landing_policy_blend,0,1)
+                        if args.landing_policy_blend else (step*.02>=early_times).to(torch.float32))
+                    action=blend_joint_recovery(action,recovery_action,residual,fraction,early_fraction,early_indices)
+                else:action=torch.lerp(action,recovery_action+residual,fraction[:,None])
             if bounded_indices:
                 indices=torch.tensor(bounded_indices,device=device)
                 scale_t=torch.as_tensor(action_scale[bounded_indices],dtype=action.dtype,device=device)
@@ -567,6 +586,7 @@ def main():
                 "takeoff_candidate_passed":bool(takeoff_passed),"single_left_support_at_launch":bool(single_at_launch),
                 "physical_candidate_passed":bool(passed),"approved_for_training":False})
             if landing_policy is not None:reports[-1]["landing_switch_time_s"]=float(landing_times[e])
+            if early_offsets is not None:reports[-1].update(early_recovery_time_s=float(early_times[e]),early_recovery_offset_s=float(early_offsets[e]))
         physical_trace=tuple(np.stack([r[k] for r in physics_trace]) for k in range(3)) if physics_trace else None
         return reports,(np.array(states),np.array(velocities),np.array(actions),records,initial_state,physical_trace)
 
@@ -585,11 +605,12 @@ def main():
                 actuator_force=payload[5][2][:,0],fps=np.array([1/m.opt.timestep]),
                 initial_qpos=payload[4]["qpos"][0]-np.r_[origins[0],np.zeros(m.nq-3)],
                 initial_qvel=payload[4]["qvel"][0])
-        if parameter_grid is not None or air_grid is not None or (landing_policy is not None and len(args.landing_switch_times)>1):
+        if parameter_grid is not None or air_grid is not None or (landing_policy is not None and len(args.landing_switch_times)>1) or (args.early_recovery_offsets and len(args.early_recovery_offsets)>1):
             positions=payload[0].copy();positions[:,:,:3]-=origins[None,:,:]
             np.savez(args.out/"timing-grid-trajectories.npz",qpos=positions,qvel=payload[1],actions=payload[2],
                 air_scales=baseline_parameters[:,preparation_dimension] if args.joint_phases else baseline_parameters[:,0] if args.tail_of else np.ones(args.num_envs),
-                landing_switch_times=landing_times.cpu().numpy(),parameters=baseline_parameters,fps=np.array([50.]))
+                landing_switch_times=landing_times.cpu().numpy(),parameters=baseline_parameters,fps=np.array([50.]),
+                **({'early_recovery_times':early_times.cpu().numpy()} if early_offsets is not None else {}))
         print("BASELINE",json.dumps(baseline[0]),flush=True)
         repeat,repeat_payload=rollout(baseline_parameters)
         (args.out/"reset-repeat-all.json").write_text(json.dumps(repeat))
