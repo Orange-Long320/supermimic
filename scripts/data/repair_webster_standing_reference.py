@@ -82,10 +82,14 @@ def main():
     p.add_argument('--source', type=Path, required=True)
     p.add_argument('--standing', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
-    p.add_argument('--start-frame', type=int, default=73)
+    p.add_argument('--start-frame', type=int, default=83)
     p.add_argument('--seconds', type=float, default=1.2)
     p.add_argument('--wrist-strength', type=float, default=30.)
+    p.add_argument('--max-nfev', type=int, default=100)
+    p.add_argument('--resume',type=Path,help='Warm start from a saved optimization qpos sequence')
     args = p.parse_args()
+    if args.wrist_strength<0 or args.max_nfev<1 or args.seconds<=.2:
+        p.error('Nonnegative smoothing strength, positive evaluations and seconds > .2 required')
     args.out.mkdir(parents=True, exist_ok=False)
     (args.out / 'as-run.py').write_bytes(Path(__file__).read_bytes())
     (args.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'hostname':socket.gethostname(),
@@ -94,7 +98,6 @@ def main():
         'script_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()},indent=2))
     from supermimic.data.motion_convert import load_g1_model
     from supermimic.data.physics_motion import differentiate_qpos, export_qpos_motion
-    from supermimic.kinematics.support_reference import SupportPoseIK
     from supermimic.robots.dimensions import PROFILE
     m = load_g1_model()
     geo = Geometry(m)
@@ -142,7 +145,7 @@ def main():
         geo.update(source[i]); source[i,:3] += com_targets[i] - geo.data.subtree_com[geo.root]
         geo.update(source[i]); com_error.append(float(np.linalg.norm(com_targets[i]-geo.data.subtree_com[geo.root])))
     frame = args.start_frame
-    if not 2 <= frame < len(source) - 2 or args.seconds <= .2:
+    if not 2 <= frame < len(source) or args.seconds <= .2:
         raise ValueError('Invalid transition boundary or duration')
     initial = source[frame].copy()
     end = np.load(args.standing)['qpos'].copy()
@@ -190,18 +193,15 @@ def main():
          [support_com, np.zeros(3), np.zeros(3)], [final_com, np.zeros(3), np.zeros(3)]])
     rot0 = Rotation.from_quat(initial[[4, 5, 6, 3]])
     rot1 = Rotation.from_quat(end[[4, 5, 6, 3]])
-    ik = SupportPoseIK(m, initial, geo.feet['left'])
-    right_columns = np.array([m.jnt_qposadr[m.joint('right_' + s + '_joint').id]
-                             for s in ['hip_pitch', 'hip_roll', 'hip_yaw', 'knee', 'ankle_pitch', 'ankle_roll']])
-    columns = np.r_[ik.columns, right_columns]
+    columns = np.array([m.jnt_qposadr[m.joint(side+'_' + s + '_joint').id]
+        for side in ['left','right']
+        for s in ['hip_pitch', 'hip_roll', 'hip_yaw', 'knee', 'ankle_pitch', 'ankle_roll']])
     joint_ids = np.array([int(m.dof_jntid[c-1]) for c in columns])
     from supermimic.robots.assets import get_robot_cfg
     factor = get_robot_cfg().articulation.soft_joint_pos_limit_factor
     centre = m.jnt_range[joint_ids].mean(axis=1)
     half = np.diff(m.jnt_range[joint_ids],axis=1)[:,0]*factor/2
     lower, upper = centre-half+.01, centre+half-.01
-    previous = initial[columns].copy()
-    poses = [initial.copy()]
     fits = []; targets = []
     geo.update(initial)
     right_local = initial_feet['right'][1].inv().apply(geo.vertices('right')-initial_feet['right'][0])
@@ -263,9 +263,23 @@ def main():
         sparsity[i*30:(i+1)*30,i*width:(i+1)*width]=1
         for j in range(max(0,i-1),min(n,i+2)):
             sparsity[n*30+i*18:n*30+(i+1)*18,j*width:(j+1)*width]=1
-    solved=least_squares(residual_all,np.clip(nominal,low,high).ravel(),
+    progress={'iteration':0}
+    def checkpoint(x):
+        progress['iteration']+=1
+        if progress['iteration']%10==0:
+            np.savez(args.out/f'optimization-{progress["iteration"]:03d}.npz',qpos=unpack(x))
+            print(json.dumps({'iteration':progress['iteration']}),flush=True)
+    seed=nominal.copy()
+    if args.resume:
+        warm=np.load(args.resume)['qpos']
+        if warm.shape!=(count+1,m.nq):raise ValueError('Warm-start trajectory shape mismatch')
+        for i,q in enumerate(warm[1:-1]):
+            seed[i,:3]=q[:3];seed[i,3:6]=(targets[i][4].inv()*Rotation.from_quat(q[[4,5,6,3]])).as_rotvec()
+            seed[i,6:]=q[columns]
+    solved=least_squares(residual_all,np.clip(seed,low,high).ravel(),
         bounds=(low.ravel(),high.ravel()),jac_sparsity=sparsity.tocsr(),
-        max_nfev=100,ftol=1e-7,xtol=1e-7,gtol=1e-6,verbose=1)
+        tr_options={'maxiter':100},callback=checkpoint,
+        max_nfev=args.max_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-6,verbose=1)
     poses=unpack(solved.x)
     for i,q in enumerate(poses[1:]):
         geo.update(q);target=targets[i];right=geo.foot('right')
@@ -297,6 +311,7 @@ def main():
             'standing_sha256':hashlib.sha256(args.standing.read_bytes()).hexdigest(),
             'output_sha256':hashlib.sha256((args.out/'webster.npz').read_bytes()).hexdigest(),
             'frames':len(full),'fps':fps,'transition_frame':frame,'transition_seconds':duration,
+            'optimizer_success':bool(solved.success),'optimizer_nfev':int(solved.nfev),
             'wrist_before':jitter(original),'wrist_after':jitter(source),
             'maximum_arm_clearance_adjustment_rad':float(abs(arm_changes).max()),
             'prefix_com_preservation_max_error_m':max(com_error),
@@ -310,7 +325,7 @@ def main():
             'root_net_horizontal_displacement_m':(poses[-1,:2]-poses[0,:2]).tolist(),
             'root_horizontal_path_m':float(np.linalg.norm(np.diff(poses[:,:2],axis=0),axis=1).sum()),
             'endpoint_pose_difference_max':float(abs(poses[-1]-end).max()),
-            'fit_max_com_error_m':max(x['com_error_m'] for x in fits),
+            'maximum_capture_com_guide_deviation_m':max(x['com_error_m'] for x in fits),
             'fit_max_right_position_error_m':max(x['right_position_error_m'] for x in fits),
             'fit_max_right_rotation_error_rad':max(x['right_rotation_error_rad'] for x in fits),
             'ik':fits,'approved_for_training':False,'dynamic_tracking_verified':False,
