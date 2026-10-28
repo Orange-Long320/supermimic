@@ -23,6 +23,9 @@ def main():
     p.add_argument('--pose-seed-dir',type=Path,help='Optional independently checked static pose probes, used only as solver initialization')
     a=p.parse_args()
     if a.out.exists() or not 1<=a.max_nfev<=40:p.error('New output and at most40 evaluations required')
+    a.out.mkdir(parents=True)
+    (a.out/'pid').write_text(str(os.getpid()))
+    (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     import mujoco
     import numpy as np
     from scipy.optimize import least_squares,nnls
@@ -174,7 +177,7 @@ def main():
             delta=np.zeros(37);mujoco.mj_differentiatePos(m,delta,1.,nominal,pose);corrections.append(delta)
         values.extend((np.diff(corrections,n=2,axis=0)*np.r_[np.full(3,500.),np.full(3,50.),np.full(31,5.)]).ravel())
         return np.asarray(values)
-    a.out.mkdir(parents=True);sha=lambda f:hashlib.sha256(Path(f).read_bytes()).hexdigest()
+    sha=lambda f:hashlib.sha256(Path(f).read_bytes()).hexdigest()
     record=dict(pid=os.getpid(),reference_sha256=sha(a.reference),model_sha256=sha(a.model),scene_sha256=sha(a.scene),
         frames50hz=[start,end],fixed_boundary_frames=True,time_scale=1.,friction=.8,variables=len(initial),residuals=sparsity.shape[0],
         source_fps=source_fps,contact_subset='At most4 actual mesh directional extrema per physical face; conservative subset',
