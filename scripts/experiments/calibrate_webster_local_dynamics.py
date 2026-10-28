@@ -79,11 +79,14 @@ def main():
             last=min(start+args.batch,len(ii));a,b=loss_for(ii[start:last],jj[start:last]);values.append(torch.stack([a,b])*(last-start))
         value=torch.stack(values).sum(0)/len(ii)
         return {'state_error':float(value[0]),'action_difference_error':float(value[1])}
-    initial=evaluate(validation);history=[];best=None;best_score=float('inf');started=time.monotonic()
+    initial=evaluate(validation);initial_train=evaluate(train)
+    initial_by_state={int(z['indices'][i]):evaluate(torch.tensor([i],device=device)) for i in validation.tolist()}
+    history=[];best=None;best_score=float('inf');started=time.monotonic()
     metadata={'arguments':vars(args),'source_sha256':hashlib.sha256(args.ckpt.read_bytes()).hexdigest(),
         'dataset_sha256':report['dataset_sha256'],'gpu_occupants_at_start':owners,'free_gpu_mib_at_start':free,
         'torch_memory_fraction':.1,'policy_and_critic_unchanged':True,'native_physics_unchanged':True,
-        'initial_validation':initial,'approved_for_training':False,'physical_candidate_passed':False}
+        'initial_validation':initial,'initial_training':initial_train,
+        'initial_validation_by_state':initial_by_state,'approved_for_training':False,'physical_candidate_passed':False}
     (args.out/'metadata.json').write_text(json.dumps(metadata,indent=2,default=str))
     (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     for step in range(1,args.steps+1):
@@ -99,7 +102,13 @@ def main():
                 best_score=score;best=(cpu_copy(wm.state_dict()),cpu_copy(opt.state_dict()),record)
             (args.out/'history.json').write_text(json.dumps(history,indent=2))
         if time.monotonic()-started>args.max_seconds:break
+    final_validation=evaluate(validation);final_training=evaluate(train)
+    final_by_state={int(z['indices'][i]):evaluate(torch.tensor([i],device=device)) for i in validation.tolist()}
+    torch.save({'wm':cpu_copy(wm.state_dict()),'config':ck['config'],'model_evaluation_only':True,
+        'approved_for_training':False,'local_dynamics_calibration':metadata},args.out/'diagnostic_final_model.pt')
     result={'steps_completed':step,'elapsed_s':time.monotonic()-started,'initial_validation':initial,
+        'initial_training':initial_train,'final_training':final_training,'final_validation':final_validation,
+        'final_validation_by_state':final_by_state,
         'both_validation_errors_improved':best is not None,'physical_candidate_passed':False,'approved_for_training':False,
         'torch_peak_allocated_mib':torch.cuda.max_memory_allocated()/2**20,'torch_peak_reserved_mib':torch.cuda.max_memory_reserved()/2**20}
     if best is not None:
