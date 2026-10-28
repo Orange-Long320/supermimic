@@ -16,6 +16,7 @@ def main():
     p.add_argument('--model',type=Path,required=True)
     p.add_argument('--scan',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--diagnose-only',action='store_true')
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
     from supermimic.robots.paths import select_robot
@@ -76,20 +77,33 @@ def main():
     def constraints(amplitude):
         nonlocal calls
         if 'x' in cache and np.array_equal(amplitude,cache['x']):return cache['c']
-        c=[]
+        c=[];labels=[]
         for i,w,polygon in zip(frames,weights,polygons):
             d.qpos[:]=q[i];d.qpos[cols]+=w*amplitude;d.qvel[:]=0;d.qacc[:]=0;mujoco.mj_inverse(m,d)
             c.extend(-(polygon[:,:2]@d.subtree_com[root,:2]+polygon[:,2]+.003*w)/.05)
+            labels.extend([('support',int(i),k) for k in range(len(polygon))])
             gravity=d.qfrc_inverse[6:][upper]/caps
             c.extend(.95-gravity);c.extend(.95+gravity)
+            labels.extend([('gravity',int(i),all_names[j],sign) for sign in ('upper','lower') for j in upper])
             for g in arm_geoms:
-                for obstacle in obstacles:c.append((mujoco.mj_geomDistance(m,d,g,obstacle,.05,witness)-.003)/.05)
-        cache.update(x=amplitude.copy(),c=np.asarray(c));calls+=1
+                for obstacle in obstacles:
+                    c.append((mujoco.mj_geomDistance(m,d,g,obstacle,.05,witness)-.003)/.05)
+                    labels.append(('geometry',int(i),m.geom(g).name,m.geom(obstacle).name))
+        cache.update(x=amplitude.copy(),c=np.asarray(c),labels=labels);calls+=1
         if calls%10==0:print('eval',calls,'minimum_constraint',float(cache['c'].min()),flush=True)
         return cache['c']
-    result=minimize(lambda x:.5*x@x,np.clip(np.zeros(4),low,high),jac=lambda x:x,method='SLSQP',bounds=Bounds(low,high),constraints=[{'type':'ineq','fun':constraints}],options={'maxiter':100,'ftol':1e-10})
+    initial=np.clip(np.zeros(4),low,high);values=constraints(initial)
+    print('initial_worst',float(values.min()),cache['labels'][int(values.argmin())],flush=True)
+    if a.diagnose_only:
+        a.out.mkdir(parents=True,exist_ok=False)
+        worst=[{'value':float(values[k]),'label':cache['labels'][k]} for k in np.argsort(values)[:10]]
+        (a.out/'diagnostic.json').write_text(json.dumps(worst,indent=2)+'\n');print(json.dumps(worst));return
+    result=minimize(lambda x:.5*x@x,initial,jac=lambda x:x,method='SLSQP',bounds=Bounds(low,high),constraints=[{'type':'ineq','fun':constraints}],options={'maxiter':100,'ftol':1e-10})
     minimum=float(constraints(result.x).min())
-    if not result.success or minimum< -1e-6:raise RuntimeError(f'Counterbalance rejected: {result.message}; constraint={minimum}')
+    if not result.success or minimum< -1e-6:
+        a.out.mkdir(parents=True,exist_ok=False)
+        (a.out/'failure.json').write_text(json.dumps({'message':str(result.message),'amplitude_rad':result.x.tolist(),'minimum_constraint':minimum,'worst':cache['labels'][int(cache['c'].argmin())]},indent=2)+'\n')
+        raise RuntimeError(f'Counterbalance rejected: {result.message}; constraint={minimum}; worst={cache["labels"][int(cache["c"].argmin())]}')
     q[np.ix_(frames,cols)]+=weights[:,None]*result.x[None,:]
     unchanged=np.ones(m.nq,dtype=bool);unchanged[cols]=False
     np.testing.assert_array_equal(q[:,unchanged],original[:,unchanged])

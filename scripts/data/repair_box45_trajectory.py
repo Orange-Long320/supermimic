@@ -29,6 +29,8 @@ def main():
     p.add_argument('--static-balance',action='store_true',help='Constrain COM projection inside planned support polygon with 5mm margin')
     p.add_argument('--contact-consistent',action='store_true',help='Use 0.5mm compliant compression for planted feet')
     p.add_argument('--waist-effort',action='store_true',help='Reserve 20 percent waist motor effort above gravity demand')
+    p.add_argument('--free-shoulders',action='store_true',help='Allow shoulder pitch/roll counterbalance without changing contact order')
+    p.add_argument('--stance-constraints',action='store_true',help='Constrain planted foot pose, preventing contact area loss from foot tilt')
     p.add_argument('--constraint-tolerance',type=float,default=.0005)
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
@@ -66,6 +68,7 @@ def main():
     bodies=[m.body(s+'_ankle_roll_link').id for s in ('left','right')]
     leg_names=[s+'_'+j+'_joint' for s in ('left','right') for j in ('hip_pitch','hip_roll','hip_yaw','knee','ankle_pitch','ankle_roll')]
     if a.free_torso:leg_names += ['waist_'+j+'_joint' for j in ('yaw','roll','pitch')]
+    if a.free_shoulders:leg_names += [s+'_shoulder_'+j+'_joint' for s in ('left','right') for j in ('pitch','roll')]
     qcols=np.array([m.jnt_qposadr[m.joint(s).id] for s in leg_names],dtype=int)
     vcols=np.r_[np.arange(3),[m.jnt_dofadr[m.joint(s).id] for s in leg_names]].astype(int)
     nr=3 if a.free_torso else 0
@@ -196,6 +199,10 @@ def main():
             max_faces=max(max_faces,len(hull.equations))
         width+=max_faces
     elif a.contact_consistent:raise ValueError('Contact-consistent targets require static-balance support phases')
+    stance_count=24 if a.stance_constraints else 0
+    if stance_count:
+        if not a.static_balance:raise ValueError('Stance constraints require explicit support phases')
+        width+=stance_count
     waist_count=6 if a.waist_effort else 0
     if waist_count:
         gravity_model=spec.compile();gravity_model.opt.disableflags|=int(mujoco.mjtDisableBit.mjDSBL_CONTACT)|int(mujoco.mjtDisableBit.mjDSBL_LIMIT)
@@ -237,7 +244,7 @@ def main():
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (a.out/'launch.json').write_text(json.dumps({'argv':[sys.executable,*sys.argv],'pid':os.getpid(),'source_sha256':hashlib.sha256(a.source.read_bytes()).hexdigest()},indent=2)+'\n')
     cache={};calls=0
-    penalty=1500.**2;lagrange=np.zeros((n,2*len(geoms)+max_faces+waist_count));constraint_history=[]
+    penalty=1500.**2;lagrange=np.zeros((n,2*len(geoms)+max_faces+stance_count+waist_count));constraint_history=[]
 
     def evaluate(flat):
         nonlocal calls
@@ -258,9 +265,11 @@ def main():
             d.qpos[:]=q;mujoco.mj_kinematics(m,d);mujoco.mj_comPos(m,d)
             r[row:row+nv]=(x[i]-reference[i])*posture_scale
             jac[row:row+nv,cols]=np.diag(posture_scale);row+=nv
+            foot_errors=[];foot_jacs=[]
             for b,(target_p,target_r) in zip(bodies,targets[i]):
                 mujoco.mj_jacBody(m,d,jp,jr,b)
-                r[row:row+3]=(d.xpos[b]-target_p)*1000
+                position_error=d.xpos[b]-target_p
+                r[row:row+3]=position_error*1000
                 jac[row:row+3,cols]=jp@mapping*1000;row+=3
                 error=Rotation.from_matrix(target_r.T@d.xmat[b].reshape(3,3)).as_rotvec()
                 skew=np.array([[0,-error[2],error[1]],[error[2],0,-error[0]],[-error[1],error[0],0]])
@@ -268,7 +277,9 @@ def main():
                 coeff=1/12 if angle<1e-4 else 1/angle**2-(1+np.cos(angle))/(2*angle*np.sin(angle))
                 inverse=np.eye(3)-.5*skew+coeff*skew@skew
                 r[row:row+3]=error*100
-                jac[row:row+3,cols]=inverse@target_r.T@jr@mapping*100;row+=3
+                rotation_jac=inverse@target_r.T@jr@mapping
+                jac[row:row+3,cols]=rotation_jac*100;row+=3
+                foot_errors.append(np.r_[position_error,error]);foot_jacs.append(np.r_[jp@mapping,rotation_jac])
             mujoco.mj_jacSubtreeCom(m,d,jp,root)
             r[row:row+2]=(d.subtree_com[root,:2]-com[i,:2])*com_weight
             jac[row:row+2,cols]=jp[:2]@mapping*com_weight;row+=2
@@ -301,6 +312,17 @@ def main():
                         r[row]=shifted*np.sqrt(penalty);jac[row,cols]=normal@com_jac*np.sqrt(penalty)
                 else:violations[i,collision_column]=-1.
                 row+=1;collision_column+=1
+            if stance_count:
+                tolerance=np.r_[np.full(3,.0015),np.full(3,.005)]
+                units=np.r_[np.ones(3),np.full(3,.05)]
+                for j in range(2):
+                    active=contact_strength[i,j]>=1-1e-8
+                    for k in range(6):
+                        for sign in (1.,-1.):
+                            gap=(sign*foot_errors[j][k]-tolerance[k])*units[k] if active else -1.
+                            violations[i,collision_column]=gap;shifted=gap+lagrange[i,collision_column]/penalty
+                            if active and shifted>0:r[row]=shifted*np.sqrt(penalty);jac[row,cols]=sign*foot_jacs[j][k]*units[k]*np.sqrt(penalty)
+                            row+=1;collision_column+=1
             if waist_count:
                 gravity_data.qpos[:]=q;gravity_data.qvel[:]=0;gravity_data.qacc[:]=0
                 mujoco.mj_inverse(gravity_model,gravity_data)
@@ -350,7 +372,7 @@ def main():
     if a.check_jacobian:
         r,jac=evaluate(start);checks=[]
         for i in [0,round((n-1)*.6),round((n-1)*.7),n-1]:
-            for column in ((2,3,4,5,20) if nr else (0,2,3,7,14)):
+            for column in ((2,3,4,5,20,24) if a.free_shoulders and nr else (2,3,4,5,20) if nr else (0,2,3,7,14)):
                 c=i*nv+column;plus=start.copy();minus=start.copy();plus[c]+=1e-6;minus[c]-=1e-6
                 numeric=(evaluate(plus)[0]-evaluate(minus)[0])/2e-6
                 analytic=jac[:,c].toarray().ravel()
