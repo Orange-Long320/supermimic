@@ -53,7 +53,7 @@
       "keep each clip paired with its measured terrain and contact phases"
     ],
     "mixing_gate": "Independent geometry, physical force/torque and continuous-execution checks per clip before single-GPU smoke",
-    "status": "Six-family kinematic batch completed; none approved. Source-flat contacts, calibrated entry and complete hand-centroid reference diagnosed. Coupled support-force correction of moving segments remains necessary; no multi-motion training started.",
+    "status": "Two distinct families now have complete geometry-checked 50 Hz inputs and an authorized one-hour pilot is running. Complete ascent/terminal hold and final physical validation remain unproven; further distinct families are being prepared separately.",
     "height_selection_update": "Prioritize official ~46cm effective-rise hand climb before its failed ~69cm variant; retain other ~55cm/~60cm hand families and ~28cm/~39cm/~43cm step families. Variants are not counted as additional skills."
   },
   "multi_motion_review_queue": [
@@ -66,7 +66,7 @@
     {
       "motion": "robot-terrain/climb_06_z_scale_0.8.npz",
       "category": "step-up; measured effective source rise 0.284764m; X2 scale gives about 0.28045m",
-      "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
+      "status": "Complete corrected 200 Hz reference and geometry-checked 50 Hz pilot input ready; one of two families in current one-hour exploratory pilot. Full policy climb and final physics audit pending.",
       "prior_diagnostic_variant": "robot-terrain/climb_06_z_scale_1.2.npz",
       "wrist_reference_limit_deg": 15.0
     },
@@ -79,7 +79,7 @@
     {
       "motion": "robot-terrain/climb_20_z_scale_0.8.npz",
       "category": "hand-supported source; measured effective source rise 0.468674m; X2 scale gives about 0.46157m",
-      "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
+      "status": "Complete corrected 200 Hz reference and geometry-checked 50 Hz pilot input ready; one of two families in current one-hour exploratory pilot. Raw exact force audit failed; final policy validation remains pending.",
       "prior_diagnostic_variant": "robot-terrain/climb_20_z_scale_1.2.npz",
       "wrist_reference_limit_deg": 0.0
     },
@@ -104,7 +104,12 @@
     "reset_compatible_static_equilibrium": "omni_native_entry_calibration_20261029_r3/result/result.json",
     "moving_execution_failure": "omni_native_reconditioned_20261029_r1/independent-replay/report.json",
     "complete_hand_candidate_failure": "omni_x2_hand_full_20261029_r1/audit/report.json",
-    "training_approved": false
+    "training_approved": false,
+    "dense_step_reference": "omni_step28_dense_geometry_full_20261029_r1/policy-input/resampling-geometry.json",
+    "dense_hand_reference": "omni_hand46_dense_geometry_full_20261029_r3/policy-input/resampling-geometry.json",
+    "exploratory_pilot": "omni_two_motion_pilot_20261029_r2",
+    "post_training_evaluation": "omni_two_motion_pilot_20261029_r2/posttrain_804cc13",
+    "final_validation_approved": false
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
