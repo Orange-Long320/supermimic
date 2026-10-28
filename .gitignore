@@ -22,6 +22,8 @@ __pycache__/
 *.tar*
 *.zip
 *.mp4
+*.MOV
+*.mov
 .env
 .env.*
 *.pem

@@ -97,7 +97,10 @@ def main():
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--soma-assets", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--name", default="webster", help="Output BVH stem")
     args = parser.parse_args()
+    if not args.name or Path(args.name).name != args.name or args.name in (".", ".."):
+        parser.error("name must be a single file stem")
     from gem.common.soma import SomaFixedGs1BodyAdapter, SomaRuntimeConfig
     from gem.inference.timing import prediction_fps
 
@@ -126,7 +129,7 @@ def main():
         raise ValueError("GEM and pinned retargeter have different named skeleton hierarchies")
     args.out.mkdir(parents=True, exist_ok=False)
     fps = prediction_fps(result)
-    error = write_bvh(args.out / "webster.bvh", names, parents, world, fps)
+    error = write_bvh(args.out / f"{args.name}.bvh", names, parents, world, fps)
     np.savez_compressed(args.out / "expected_fk.npz", world=world, names=names, parents=parents, fps=fps)
     hips = world[:, names.index("Hips"), :3, 3]
     chest = world[:, names.index("Chest"), :3, 3]

@@ -12,8 +12,11 @@ from soma_retargeter.io.bvh import load_bvh
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--name", default="webster")
     args = parser.parse_args()
-    skeleton, animation = load_bvh(str(args.directory / "webster.bvh"))
+    if not args.name or Path(args.name).name != args.name or args.name in (".", ".."):
+        parser.error("name must be a single file stem")
+    skeleton, animation = load_bvh(str(args.directory / f"{args.name}.bvh"))
     expected = np.load(args.directory / "expected_fk.npz")
     order = [expected["names"].tolist().index(name) for name in skeleton.joint_names]
     if animation.num_frames != len(expected["world"]) or not np.isclose(animation.sample_rate, expected["fps"]):

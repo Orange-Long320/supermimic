@@ -1,0 +1,28 @@
+{
+  "task": "x2_ultra_box45_step_up",
+  "source": {
+    "filename": "IMG_4868.MOV",
+    "sha256": "5222e9b0b07471f96fa559c2054a28f17bf978a211c3b16b7979130ff0d82c6e",
+    "start_seconds": 0.0,
+    "duration_seconds": 4.4,
+    "observation": "One person steps up without hand support, then stands; descent excluded. Camera moves."
+  },
+  "box": {
+    "height_m": 0.45,
+    "front_width_m": 0.75,
+    "depth_m": 0.66,
+    "frame": "+x is approach direction, +y is lateral, +z is up",
+    "dimensions_xyz_m": [0.66, 0.75, 0.45],
+    "placement": "pending alignment with recovered robot motion",
+    "fixed": true,
+    "friction": {"value": 1.0, "status": "initial simulation parameter, not measured"}
+  },
+  "acceptance": {
+    "terminal_standing_seconds": 3.0,
+    "target_success_fraction": 0.9,
+    "evaluation_trials": 100,
+    "status": "planned; not executed"
+  },
+  "training_approved": false,
+  "next_gate": "Review recovered motion, box-relative contacts and robot physical feasibility before training"
+}
