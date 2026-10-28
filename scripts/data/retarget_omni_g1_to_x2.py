@@ -108,14 +108,23 @@ def main():
             smooth=self.smooth_weight*float(np.square(q[self.q_a_indices]-kwargs['q_t_last'][self.q_a_indices]).sum())
             return tracking+smooth+float(np.sum(self.Q_diag*np.square(q[self.q_a_indices])))
 
+        def _constraint_merit(self,q,frame):
+            penetration=self._maximum_environment_penetration(q);foot_error=0.
+            if self.foot_lock.enable:
+                for name,body in self.foot_links.items():
+                    target=self._is_foot_locked_in_window(name,frame)
+                    if target is not None:foot_error=max(foot_error,abs(float(self.robot_data.xpos[self.robot_model.body(body).id,2])-target))
+            violation=max(0.,penetration-self.penetration_tolerance,foot_error-self.foot_lock.tolerance)
+            return violation,penetration,foot_error
+
         def iterate(self,**kwargs):
             if not a.collision_backtracking:return super().iterate(**kwargs)
-            if a.source_flat_foot_lock:raise ValueError('Backtracking with new foot-lock equalities requires a separate constraint merit; do not silently combine')
             q=kwargs.pop('q_n').copy();budget=kwargs.pop('n_iter')*3;last_cost=np.inf;backtracks=0;self._plane_cuts=[]
             last_actual=self._actual_tracking_cost(q,kwargs);stopping_reason='iteration_budget'
-            allowed=self.penetration_tolerance+5e-5
+            allowed=5e-5
+            new_support=any(start==kwargs['frame_idx'] for ranges in self._foot_lock_windows.values() for start,end in ranges)
             for iteration in range(budget):
-                before=self._maximum_environment_penetration(q)
+                before,_,_=self._constraint_merit(q,kwargs['frame_idx'])
                 accepted=None
                 original_step=self.step_size
                 try:
@@ -124,33 +133,33 @@ def main():
                         solve_kwargs=dict(kwargs)
                         # The initial feasibility fallback may drop the trust
                         # region only for the first initialization step.
-                        solve_kwargs['init_t']=kwargs.get('init_t',False) and iteration==0
+                        solve_kwargs['init_t']=(kwargs.get('init_t',False) or new_support) and iteration==0
                         proposed,cost=self.solve_single_iteration(q_a_n_last=q[self.q_a_indices],**solve_kwargs)
                         for reduction in range(15):
                             alpha=2.**(-reduction);trial=q+alpha*(proposed-q);mujoco.mj_normalizeQuat(self.robot_model,trial)
-                            penetration=self._maximum_environment_penetration(trial)
-                            if penetration<=allowed or penetration<before-1e-8:
+                            merit,penetration,foot_error=self._constraint_merit(trial,kwargs['frame_idx'])
+                            if merit<=allowed or merit<before-1e-8:
                                 accepted=trial;backtracks+=reduction;break
                         if accepted is not None:break
                 finally:self.step_size=original_step
                 if accepted is None:
                     if self._add_horizontal_plane_witnesses(proposed):continue
                     np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q,proposed=proposed)
-                    raise RuntimeError(f'No collision-merit descent at frame {kwargs["frame_idx"]}; penetration={before}')
+                    raise RuntimeError(f'No contact-merit descent at frame {kwargs["frame_idx"]}; violation={before}')
                 accepted_step=float(np.linalg.norm(accepted-q));q=accepted
                 actual=self._actual_tracking_cost(q,kwargs)
-                if iteration>=2 and accepted_step<1e-4 and abs(actual-last_actual)<1e-5*max(1.,abs(actual)) and penetration<=allowed:
+                if iteration>=2 and accepted_step<1e-4 and abs(actual-last_actual)<1e-5*max(1.,abs(actual)) and merit<=allowed:
                     stopping_reason='small_accepted_step_and_actual_objective_change';break
-                if reduction==0 and np.isclose(cost,last_cost) and penetration<=allowed:
+                if reduction==0 and np.isclose(cost,last_cost) and merit<=allowed:
                     stopping_reason='full_step_cost_converged';break
                 last_cost=cost
                 last_actual=actual
-            final=self._maximum_environment_penetration(q)
-            if final>allowed:
+            final_merit,final,final_foot_error=self._constraint_merit(q,kwargs['frame_idx'])
+            if final_merit>allowed:
                 np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q)
-                raise RuntimeError(f'Collision SQP did not converge at frame {kwargs["frame_idx"]}: {final}m after {budget} iterations')
+                raise RuntimeError(f'Contact SQP did not converge at frame {kwargs["frame_idx"]}: violation {final_merit}m after {budget} iterations')
             if not hasattr(self,'backtracking_records'):self.backtracking_records=[]
-            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'maximum_penetration_m':final,'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
+            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'maximum_penetration_m':final,'maximum_locked_sole_height_error_m':final_foot_error,'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
             if kwargs['frame_idx']%30==0:(a.out/'collision-backtracking-progress.json').write_text(json.dumps(self.backtracking_records,indent=2)+'\n')
             return q,cost
 
