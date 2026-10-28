@@ -33,8 +33,14 @@ def main():
                    depth=cfg["depth_m"], width=cfg["front_width_m"],
                    height=cfg["height_m"], friction=cfg["friction"]["value"])
     scene = Scene(SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"),
-                          entities={"robot": get_robot_cfg()}, spec_fn=box.add_to_spec), device="cpu")
+                          entities={"robot": get_robot_cfg()}), device="cpu")
+    scene.spec.option.timestep = 0.005
+    baseline = scene.compile()
+    box.add_to_spec(scene.spec)
     model = scene.compile()
+    assert (model.nq, model.nv, model.nu, model.nbody) == (baseline.nq, baseline.nv, baseline.nu, baseline.nbody)
+    for name in ("body_mass", "body_inertia", "jnt_range", "actuator_ctrlrange", "actuator_forcerange", "actuator_gainprm", "actuator_biasprm"):
+        np.testing.assert_array_equal(getattr(model, name), getattr(baseline, name))
     geom = model.geom("box45_collision")
     np.testing.assert_allclose(geom.size, box.half_size, atol=1e-12)
     np.testing.assert_allclose(geom.pos, box.center, atol=1e-12)
@@ -63,6 +69,7 @@ def main():
     args.out.mkdir(parents=True, exist_ok=False)
     scene.write(args.out / "scene")
     report = {"box": asdict(box), "nq": model.nq, "nv": model.nv, "nu": model.nu,
+              "timestep_s": model.opt.timestep, "robot_inertia_limits_actuators_unchanged": True,
               "contact_probes": probes, "task_sha256": hashlib.sha256(task_path.read_bytes()).hexdigest(),
               "placement_status": "explicit diagnostic placement; not yet aligned to recovered motion",
               "status": "compiled geometry and contact probes only; not robot dynamics or task success"}
