@@ -115,7 +115,7 @@ def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0):
                     pixels = Image.fromarray(renderer.render())
                     draw = ImageDraw.Draw(pixels)
                     draw.rounded_rectangle((18, 16, 900, 173), radius=12, fill=(18, 26, 31))
-                    draw.text((35, 27), f"X2 Ultra | checkpoint {int(ckpt.stem.rsplit('_', 1)[-1])} | {elapsed + env.step_dt:05.2f}s | {phase}", font=font, fill=(235, 241, 245))
+                    draw.text((35, 27), f"X2 Ultra | checkpoint {ckpt.stem.removeprefix('ckpt_')} | {elapsed + env.step_dt:05.2f}s | {phase}", font=font, fill=(235, 241, 245))
                     sent = used[0].cpu().tolist()
                     draw.text((35, 69), f"COMMAND  vx {sent[0]:+.2f} m/s    yaw {sent[2]:+.2f} rad/s", font=font, fill=(113, 222, 177))
                     draw.text((35, 108), f"ACTUAL      vx {measured[0]:+.2f} m/s    yaw {measured[2]:+.2f} rad/s", font=font, fill=(255, 208, 132))
