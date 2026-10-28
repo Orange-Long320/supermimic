@@ -30,13 +30,14 @@ def main():
     p.add_argument('--frames',type=int,default=5)
     p.add_argument('--start-frame',type=int,default=0,help='Source window start; nonzero entries are diagnostic segments, not complete climbs')
     p.add_argument('--wrist-reference-limit-deg',type=float,default=15.,help='Optional task bound around neutral wrists; 0 uses unchanged mechanical limits and a weak neutral prior')
+    p.add_argument('--joint-limit-factor',type=float,default=1.,help='Optimizer range as a fraction of mechanical ranges; 0.9 matches the project reset soft limits')
     p.add_argument('--penetration-target-m',type=float,default=.0008,help='IK target tighter than the independent 1mm collision gate')
     p.add_argument('--source-flat-foot-lock',action='store_true',help='Pin sole marker heights only during source-confirmed flat support')
     p.add_argument('--collision-backtracking',action='store_true',help='Check actual collision distance before accepting each SQP step')
     p.add_argument('--restoration-helper',type=Path,help='Explicit nonlinear support-restoration module; enables one restoration attempt per failed support-transition frame')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
-    if a.out.exists() or a.frames<2 or a.start_frame<0 or not 0<=a.wrist_reference_limit_deg<=180 or not 0<a.penetration_target_m<.001:p.error('New output, valid source window/wrist task bound and a positive IK penetration target below 1mm required')
+    if a.out.exists() or a.frames<2 or a.start_frame<0 or not 0<a.joint_limit_factor<=1 or not 0<=a.wrist_reference_limit_deg<=180 or not 0<a.penetration_target_m<.001:p.error('New output, valid source window/task bounds and a positive IK penetration target below 1mm required')
     import mujoco
     import numpy as np
     from scipy.spatial.transform import Rotation
@@ -292,7 +293,8 @@ def main():
     if model.nq!=45 or model.nv!=43 or model.jnt_qposadr[model.joint('omni_auxiliary_terrain_pose').id]!=38:raise ValueError('Unexpected robot/auxiliary-pose layout')
     lower=np.r_[np.full(3,-1e6),np.full(4,-1.),np.zeros(31)];upper=np.r_[np.full(3,1e6),np.ones(4),np.zeros(31)]
     for name in meta['joint_names']:
-        joint=model.joint(name).id;address=int(model.jnt_qposadr[joint]);lower[address],upper[address]=model.jnt_range[joint]
+        joint=model.joint(name).id;address=int(model.jnt_qposadr[joint]);lo,hi=model.jnt_range[joint]
+        center=(lo+hi)/2;half=(hi-lo)*a.joint_limit_factor/2;lower[address],upper[address]=center-half,center+half
     seed=np.load(a.equilibrium,allow_pickle=False)['qpos'].copy()
     if seed.shape!=(38,):raise ValueError('X2 seed dimensions differ')
     seed[:2]=poses[0,4:6]*scale;seed[3:7]=poses[0,:4]
@@ -365,8 +367,10 @@ def main():
         for g in robot_geoms:
             for obstacle in obstacles:penetration=max(penetration,-float(mujoco.mj_geomDistance(model,data,g,obstacle,.02,witness)))
     np.savez_compressed(a.out/'x2-reference.npz',qpos=result[:,:38],fps=fps)
+    task_violation=float(np.maximum(np.maximum(lower[7:38]-result[:,7:38],result[:,7:38]-upper[7:38]),0).max())
     report={'source_motion':a.motion,'source_start_frame':a.start_frame,'frames':len(result),'fps':fps,'uniform_source_scene_scale':scale,'scene_boxes':target_boxes,
-        'hard_joint_violation_rad':hard,'max_environment_penetration_m':penetration,'bounds_match_x2_model':True,
+        'hard_joint_violation_rad':hard,'max_environment_penetration_m':penetration,'optimizer_bounds_verified':True,
+        'joint_limit_factor':a.joint_limit_factor,'optimizer_joint_violation_rad':task_violation,'mechanical_joint_bounds_unchanged':True,
         'maximum_root_quaternion_norm_error':quaternion_error,'ik_penetration_target_m':a.penetration_target_m,
         'jacobian_max_absolute_error':derivative_error,'max_actuated_joint_range_rad':float(np.ptp(result[:,7:38],axis=0).max()),
         'source_foot_landmarks':'Heel/toe sole surface points from paired G1 spheres; upstream ankle marker is not a heel',
