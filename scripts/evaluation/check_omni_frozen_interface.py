@@ -47,7 +47,7 @@ def main():
             goal=torch.cat([goal,rel],dim=-1)
         with torch.no_grad():ours=policy(native_obs,goal);theirs=policy(obs['policy'],obs['goal'])
         env.action_manager.process_action(theirs)
-        actual_target=env.action_manager.get_term('joint_pos').processed_actions
+        actual_target=env.action_manager.get_term('joint_pos')._processed_actions
         scale=torch.tensor([PROFILE['action_scale'][n] for n in PROFILE['joint_names']],dtype=torch.float32)
         target=defaults+theirs[0]*scale
         report={'initial_state_max_abs_error':float(abs(state-expected).max()),'actual_initial_reference_frame':int(cmd.frame[0]),
