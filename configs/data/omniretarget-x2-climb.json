@@ -53,8 +53,13 @@
       "keep each clip paired with its measured terrain and contact phases"
     ],
     "mixing_gate": "Final usable-reference acceptance still requires physical/continuous checks. Explicit user-authorized exploratory training may proceed after finite data, original joint/speed, scene geometry and single-GPU capacity checks; it does not waive final acceptance.",
-    "status": "Three distinct families passed fresh dense geometry/speed export and combined-scene checks (1518 frames). Fourth hand55 geometry candidate is excluded due an IK knee jump and dense speed ratio1.0449. Two-family20-minute curriculum is running; no final full-climb acceptance.",
-    "height_selection_update": "Prioritize official ~46cm effective-rise hand climb before its failed ~69cm variant; retain other ~55cm/~60cm hand families and ~28cm/~39cm/~43cm step families. Variants are not counted as additional skills."
+    "status": "User confirmed box-top standing and vault/landing tasks. A3-family1784-frame goal batch passed parent/model binding, dense geometry/speed and terminal reference support checks; actual policy acceptance remains pending. The2-family prefix course finished with improved but failed full-start results.",
+    "height_selection_update": "Prioritize official ~46cm effective-rise hand climb before its failed ~69cm variant; retain other ~55cm/~60cm hand families and ~28cm/~39cm/~43cm step families. Variants are not counted as additional skills.",
+    "confirmed_task_scope": [
+      "box-top standing",
+      "hand-supported vault and stable landing",
+      "existing two-step up/down return and stable landing"
+    ]
   },
   "multi_motion_review_queue": [
     {
@@ -122,7 +127,12 @@
     "dense_velocity_gate_regression": "omni_speed_gate_exports_20261029_r1/progress.json",
     "three_family_interface_comparison": "omni_speed_gate_exports_20261029_r1/interface-comparison.json",
     "three_family_weight_compatibility": "omni_speed_gate_exports_20261029_r1/weights-transfer-check.json",
-    "four_family_dataset_rejected": "omni_four_motion_dataset_20261029_r1"
+    "four_family_dataset_rejected": "omni_four_motion_dataset_20261029_r1",
+    "task_aligned_dataset": "omni_task_goals_20261029_r1/dataset",
+    "task_aligned_terrain_sha256": "e9314bba6da933f5ab2e065ceebb62705a105b40b667721c18c3c1111fcd828f",
+    "actual_contact_readout_preflight": "omni_contact_record_preflight_20261029_r1/capture/result.json",
+    "zero_anchor_fk_pair": "omni_zero_anchor_fk_20261029_r1/paired/progress.json",
+    "prefix_course_evaluation": "omni_prefix_curriculum_20261029_r1/progress.json"
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
