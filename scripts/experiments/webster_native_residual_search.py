@@ -205,26 +205,33 @@ def main():
                 left = (support_window[:,0]<.01)&(support_window[:,1]>.04)
                 support = len(left)>=4 and left.sum()>=4 and (support_window[:,1]>.04).all()
                 stable = bool((tail[:,4]>.85).all() and (tail[:,5]>.55).all() and (tail[:,6]<.5).all() and (tail[:,7]<1).all())
-                core = bool(not failed[i] and support and total>5.5 and air.any() and s[air,4].min()<-.7 and stable)
+                core_checks = {'uninterrupted':not bool(failed[i]), 'single_left_support':bool(support),
+                    'total_rotation':total>5.5, 'inverted':bool(air.any() and s[air,4].min()<-.7),
+                    'terminal_stability':stable}
+                core = all(core_checks.values())
                 loss = (4000*max(hard-.0001,0)+2000*max(foot-.005,0)+2000*max(.005-body,0)
                     +50*max(3.5-rotation,0)+1000*max(float(r[:,9].max())-1,0)
                     +1000*(not core)+.1*float(parameters[i].square().sum()))
                 early_hard = float(r[:140,8].max())
                 early_foot = float(max(-r[:140,:2].min(),0))
                 base_preserved = None
+                base_checks = {}
                 if args.phase == 'preparation':
-                    base_preserved = bool(core and hard <= base_gates['maximum_hard_violation_rad']+.001
-                        and foot <= base_gates['maximum_foot_compression_m']+.001
-                        and body >= base_gates['minimum_nonfoot_height_m']-.001
-                        and rotation >= base_gates['canonical_first_air_rotation_rad']-.01
-                        and float(r[:,9].max()) <= 1)
+                    base_checks = {'core':core, 'hard_joint_peak':hard <= base_gates['maximum_hard_violation_rad']+.001,
+                        'foot_peak':foot <= base_gates['maximum_foot_compression_m']+.001,
+                        'body_clearance':body >= base_gates['minimum_nonfoot_height_m']-.001,
+                        'first_air_rotation':rotation >= base_gates['canonical_first_air_rotation_rad']-.01,
+                        'joint_speed':float(r[:,9].max()) <= 1}
+                    base_preserved = all(base_checks.values())
                     loss = (1000*(not base_preserved)+10000*max(early_hard-.0001,0)
                         +2000*max(early_foot-.0048,0)+.1*float(parameters[i].square().sum()))
                 summaries.append(dict(score=float(loss), core_preserved=core, original_failure=bool(failed[i]),
                     hard_rad=hard, foot_m=foot, nonfoot_min_m=body, first_air_rotation_rad=rotation,
                     total_rotation_rad=total, terminal_window_stable=stable, single_left_support=bool(support),
                     preparation_hard_rad=early_hard, preparation_foot_compression_m=early_foot,
-                    fixed_base_preserved=base_preserved))
+                    fixed_base_preserved=base_preserved,
+                    failed_core_checks=[k for k,v in core_checks.items() if not v],
+                    failed_base_checks=[k for k,v in base_checks.items() if not v]))
             return summaries
         dim = (len(knots)-2, len(joints))
         mean = torch.zeros(dim, device=device)
@@ -253,6 +260,12 @@ def main():
                 population[-1].zero_()  # Retain a real zero-additional-correction control.
             rows, failed = rollout(population)
             summaries = score(rows, failed, population)
+            # Keep executed proposal coefficients and every measured outcome,
+            # so a rejected population can be diagnosed without guessing from
+            # the winning candidate or rerunning a random sample.
+            np.savez(args.out/f'population-{iteration:04d}.npz', parameters=population.cpu().numpy(),
+                knot_times=knots, selected_joint_names=np.array([names[j] for j in joints]))
+            (args.out/f'population-{iteration:04d}.json').write_text(json.dumps(summaries,indent=2))
             order = sorted(range(args.envs), key=lambda i:summaries[i]['score'])
             winner = order[0]
             if best_summary is None or summaries[winner]['score'] < best_summary['score']:
