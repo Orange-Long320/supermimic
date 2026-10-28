@@ -16,13 +16,15 @@ def main():
     p.add_argument('--native-balance',action='store_true',help='Jointly polish contact loads while retaining near-level soles')
     p.add_argument('--symmetric-feet',action='store_true',help='Parallel feet with aligned toes and symmetric lateral placement')
     p.add_argument('--soft-limits',action='store_true',help='Use the same 0.9 posture limits as training resets')
+    p.add_argument('--retain-foot-attitude',action='store_true',help='Keep an already screened near-level foot attitude instead of refitting an ideal plane')
+    p.add_argument('--require-contact-patch',action='store_true',help='Require a nondegenerate native loaded contact patch for each foot')
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));d=mujoco.MjData(m)
     with np.load(args.initial) as z:q0=z['qpos'].copy()
     d.qpos[:]=q0;mujoco.mj_forward(m,d);root=int(m.jnt_bodyid[0]);weight=float(m.body_mass.sum()*9.81)
     feet={s:m.body('robot/'+s+'_ankle_roll_link').id for s in ['left','right']}
-    targets={};sole_centers=[];tilts={}
+    targets={};sole_centers=[];tilts={};sole_normals={}
     for side,body in feet.items():
         candidates=[]
         for g in range(m.ngeom):
@@ -34,7 +36,8 @@ def main():
             area=np.bincount(index,weights=areas);normals=planes[:,:3]@d.geom_xmat[g].reshape(3,3).T
             for j in np.flatnonzero(normals[:,2]<-.5):candidates.append((area[j],g,vertices,normals[j]))
         _,g,vertices,normal=max(candidates,key=lambda x:x[0]);normal=normal/np.linalg.norm(normal)
-        correction=Rotation.align_vectors(np.array([[0.,0.,-1.]]),normal[None])[0]
+        sole_normals[side]=Rotation.from_matrix(d.xmat[body].reshape(3,3)).inv().apply(normal)
+        correction=Rotation.identity() if args.retain_foot_attitude else Rotation.align_vectors(np.array([[0.,0.,-1.]]),normal[None])[0]
         position=d.xpos[body].copy();rotation=correction*Rotation.from_matrix(d.xmat[body].reshape(3,3))
         world=vertices@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
         flattened=correction.apply(world-position)+position
@@ -115,7 +118,7 @@ def main():
           'root_force_residual':force[:6].tolist(),'root_force_residual_normalized':float(abs(force[:6]/np.r_[np.full(3,weight),np.full(3,weight*.7)]).max()),
           'geometry_fit_max_residual':float(abs(geometry_residual).max()),'foot_fit_max_residual':float(abs(geometry_residual[:12]).max()),
           'initial_sole_tilt_rad':tilts,'native_balance':args.native_balance,'balance_history':balance_history,
-          'soft_limits':args.soft_limits,
+          'soft_limits':args.soft_limits,'retain_foot_attitude':args.retain_foot_attitude,
           'static_force_feasible':False,'strict_geometry_static_feasible':False,
           'heights':{},'approved_for_training':False}
     for side in ['left','right','nonfoot']:
@@ -127,18 +130,27 @@ def main():
             k=m.geom_dataid[g];a,n=m.mesh_vertadr[k],m.mesh_vertnum[k]
             height.append(float((m.mesh_vert[a:a+n]@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])[:,2].min()))
         item['heights'][side]=min(height)
-    normal={s:0. for s in feet}
+    normal={s:0. for s in feet};loaded_points={s:[] for s in feet}
     for i,c in enumerate(d.contact[:d.ncon]):
         bodies=[int(m.geom_bodyid[int(g)]) for g in c.geom];reaction=np.zeros(6);mujoco.mj_contactForce(m,d,i,reaction)
         for side,body in feet.items():
-            if body in bodies and any(int(m.body_rootid[b])!=root for b in bodies):normal[side]+=float(max(0.,reaction[0]))
+            if body in bodies and any(int(m.body_rootid[b])!=root for b in bodies):
+                normal[side]+=float(max(0.,reaction[0]))
+                if reaction[0]>1.:loaded_points[side].append(c.pos[:2].copy())
     item['normal_force_n']=normal
     item['root_up_z']=float(d.xmat[root].reshape(3,3)[2,2])
-    item['final_sole_tilt_rad']={s:float(np.arccos(np.clip(-(Rotation.from_matrix(d.xmat[b].reshape(3,3))*targets[s][1].inv()).apply([0.,0.,-1.])[2],-1,1))) for s,b in feet.items()}
+    item['final_sole_tilt_rad']={s:float(np.arccos(np.clip(-Rotation.from_matrix(d.xmat[b].reshape(3,3)).apply(sole_normals[s])[2],-1,1))) for s,b in feet.items()}
+    item['loaded_contact_count']={s:len(points) for s,points in loaded_points.items()}
+    item['loaded_contact_area_m2']={}
+    for s,points in loaded_points.items():
+        try:area=float(ConvexHull(np.asarray(points)).volume) if len(points)>=3 else 0.
+        except Exception:area=0.
+        item['loaded_contact_area_m2'][s]=area
     static_pass=bool(item['root_force_residual_normalized']<1e-5 and item['maximum_motor_ratio']<=1
                      and item['hard_violation_rad']<1e-9 and min(normal.values())>10 and item['root_up_z']>.85
                      and min(item['heights'][s] for s in feet)>-.005 and max(item['heights'][s] for s in feet)<.005
-                     and item['heights']['nonfoot']>.005 and max(item['final_sole_tilt_rad'].values())<.005)
+                     and item['heights']['nonfoot']>.005 and max(item['final_sole_tilt_rad'].values())<.005
+                     and (not args.require_contact_patch or min(item['loaded_contact_area_m2'].values())>1e-4))
     item['static_force_feasible']=static_pass;item['strict_geometry_static_feasible']=static_pass
     for name in ['candidate-000.npz','equilibrium.npz']:
         np.savez(args.out/name,qpos=q,qvel=np.zeros(m.nv),required_motor_torque=force[6:],joint_names=np.array(PROFILE['joint_names']))

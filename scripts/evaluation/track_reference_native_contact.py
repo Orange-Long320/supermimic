@@ -8,6 +8,7 @@ import hashlib
 import os
 from pathlib import Path
 import sys
+import importlib.util
 
 import mujoco
 import numpy as np
@@ -24,11 +25,20 @@ def main():
     p.add_argument('--out',type=Path,required=True)
     p.add_argument('--recover-planned-contacts',action='store_true',
                    help='Keep planned planted-foot tasks during contact loss and add soft normal feedback')
+    p.add_argument('--native-controller-source',type=Path,
+                   help='Explicit controller source snapshot; avoids replacing shared server modules')
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
     (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (args.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'command':[sys.executable,*sys.argv],
         'mujoco':mujoco.__version__,'cuda_visible_devices':os.environ.get('CUDA_VISIBLE_DEVICES')},indent=2))
     from supermimic.policy.native_inverse import NativeContactController
+    controller_source=None
+    if args.native_controller_source:
+        spec=importlib.util.spec_from_file_location('reference_native_inverse_snapshot',args.native_controller_source)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        NativeContactController=module.NativeContactController
+        controller_source=args.native_controller_source.read_bytes()
+        (args.out/'native_inverse-as-run.py').write_bytes(controller_source)
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));actual=mujoco.MjData(m);desired=mujoco.MjData(m)
     z=np.load(args.reference);q=z['qpos'].copy();v=z['qvel'].copy()
@@ -130,6 +140,7 @@ def main():
     result={'configuration':{k:str(x) if isinstance(x,Path) else x for k,x in vars(args).items()},
         'model_sha256':hashlib.sha256(args.model.read_bytes()).hexdigest(),
         'reference_sha256':hashlib.sha256(args.reference.read_bytes()).hexdigest(),
+        'controller_source_sha256':hashlib.sha256(controller_source).hexdigest() if controller_source else None,
         'status':status,'seconds_executed':len(rows)*m.opt.timestep,'failure':failure,
         'maximum_hard_violation_rad':max((x['hard_violation_rad'] for x in rows),default=0),
         'maximum_motor_ratio':max((x['motor_ratio'] for x in rows),default=0),

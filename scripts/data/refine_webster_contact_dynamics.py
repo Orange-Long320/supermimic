@@ -176,7 +176,7 @@ def main():
             np.savez(args.out/f'optimization-{iteration["value"]:03d}.npz',qpos=unpack(x),variables=x)
             print(json.dumps({'iteration':iteration['value'],'cost':float(r@r/2)}),flush=True)
     solved=least_squares(residual,np.clip(initial,low,high),bounds=(low,high),
-        jac_sparsity=sparsity.tocsr(),tr_options={'maxiter':100},max_nfev=args.max_nfev,
+        jac_sparsity=sparsity.tocsr(),x_scale='jac',tr_options={'maxiter':100},max_nfev=args.max_nfev,
         callback=checkpoint,ftol=1e-6,xtol=1e-7,gtol=1e-6,verbose=1)
     qs=unpack(solved.x);v=differentiate_qpos(m,qs,fps)
     np.savez(args.out/'qpos.npz',qpos=qs,qvel=v,fps=np.array([fps]),joint_names=np.array(names),variables=solved.x)
