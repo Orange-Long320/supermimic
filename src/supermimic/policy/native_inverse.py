@@ -107,6 +107,15 @@ class NativeContactController(SingleSupportController):
                 task=np.r_[task,support_jac[rows]*acc*foot_weight]
                 target_task=np.r_[target_task,desired[rows]*foot_weight]
         self.grounded=grounded
+        # Optional projection of an existing controller's acceleration. The
+        # same unactuated-base, motor and predictive joint constraints apply.
+        full_reference=getattr(self,'full_acceleration_reference',None)
+        if full_reference is not None:
+            reference=np.asarray(full_reference,dtype=float)
+            weights=np.broadcast_to(getattr(self,'full_acceleration_weight',1.),(m.nv,))
+            if reference.shape!=(m.nv,) or not np.isfinite(reference).all() or not np.isfinite(weights).all() or np.any(weights<=0):
+                raise ValueError('Invalid full acceleration projection task')
+            task=np.diag(weights)*acc;target_task=reference*weights
         hessian=task.T@task+np.eye(m.nv)*1e-6;linear=task.T@target_task
         objective_scale=max(1.,float(np.linalg.norm(hessian,ord=np.inf)))
         hessian=hessian/objective_scale;linear=linear/objective_scale
@@ -160,8 +169,8 @@ class NativeContactController(SingleSupportController):
             bound,_=position_acceleration_bounds(height,point_jac@qvel,self.foot_geometry_floor,np.inf,
                                                 getattr(self,'foot_prediction_horizon',.02))
             geometry_matrix=point_jac*acc;geometry_lower=bound-point_drift
-            constraints.append({'type':'ineq','fun':lambda x:geometry_matrix@x-geometry_lower,
-                                'jac':lambda x:geometry_matrix})
+        if geometry_matrix is not None:
+            constraints.append({'type':'ineq','fun':lambda x:geometry_matrix@x-geometry_lower,'jac':lambda x:geometry_matrix})
         velocity_rows=[];velocity_lower=[]
         if grounded:
             dt=float(m.opt.timestep)
@@ -213,6 +222,7 @@ class NativeContactController(SingleSupportController):
             'com_acceleration_error':float(np.linalg.norm(com@(result.x*acc)-desired_com)),
             'hard_com_acceleration_active':hard_com,
             'actual_primary_foot_contact':grounded,
+            'full_acceleration_projection':full_reference is not None,
             'reference_foot_tracking_without_contact':bool(reference_feet and not grounded),
             'desired_com_acceleration':(desired_com+drift[1]).tolist(),
             'achieved_com_acceleration':(com@(result.x*acc)+drift[1]).tolist(),

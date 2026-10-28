@@ -22,10 +22,12 @@ def main():
     p.add_argument('--joint-barrier-margin',type=float,help='Optional conservative position-command barrier inside unchanged mechanical ranges')
     p.add_argument('--joint-barrier-frequency',type=float,default=35.)
     p.add_argument('--joint-projection-source',type=Path,help='Explicit private project_joint_commands module for the optional servo guard')
+    p.add_argument('--coupled-projection-dir',type=Path,help='Private coupled projection, native inverse and prediction snapshots; alternative to approximate guard')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
     if a.out.exists() or a.seconds<=0:p.error('New output and positive duration required')
     if a.start_frame<0:p.error('Source entry must be nonnegative')
+    if a.coupled_projection_dir and a.joint_barrier_margin is not None:p.error('Select only one command projection')
     if a.joint_barrier_margin is not None and (a.joint_barrier_margin<=0 or a.joint_barrier_frequency<=0 or not a.joint_projection_source):p.error('Barrier requires positive bounds and an explicit private projection source')
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
@@ -77,6 +79,17 @@ def main():
         tensor=lambda x:torch.as_tensor(np.asarray(x).copy(),dtype=torch.float64)
         kp,kd,cap,lo,hi=[tensor(x) for x in [m.actuator_gainprm[:,0],-m.actuator_biasprm[:,2],effort,m.jnt_range[1:,0],m.jnt_range[1:,1]]]
         mass=np.zeros((m.nv,m.nv))
+    coupled=None;coupled_rows=[];coupled_sources={}
+    if a.coupled_projection_dir:
+        import importlib.util
+        private_path=a.coupled_projection_dir/'omni_coupled_projection.py'
+        spec=importlib.util.spec_from_file_location('omni_private_coupled_projection',private_path)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        speed=np.array([PROFILE['velocity_limit'][n] for n in names])
+        coupled=module.CoupledProjection(m,d,effort,speed,a.coupled_projection_dir)
+        for filename in ['omni_coupled_projection.py','native_inverse.py','joint_prediction.py']:
+            source=(a.coupled_projection_dir/filename).read_bytes()
+            (a.out/filename).write_bytes(source);coupled_sources[filename]=hashlib.sha256(source).hexdigest()
     previous=torch.zeros((1,31));xi=torch.zeros((1,XI_DIM));history=[];obs_trace=[];goal_trace=[]
     def observe():
         return analytic_observation(torch.tensor(np.r_[d.qpos,d.qvel][None],dtype=torch.float32),previous,xi,defaults)
@@ -97,6 +110,14 @@ def main():
             actions.append(action[0].numpy().copy())
             for substep in range(4):
                 mujoco.mj_forward(m,d);executed=target
+                if coupled is not None:
+                    try:
+                        executed,projection_report=coupled.project(d,target)
+                        coupled_rows.append({'time_s':len(controls)*.005,**projection_report})
+                    except (RuntimeError,ValueError) as error:
+                        status='controller_rejected';failure={'time_s':len(controls)*.005,'reason':str(error),
+                            'inverse':getattr(coupled.controller,'failure',None)}
+                        break
                 if projector is not None:
                     mujoco.mj_fullM(m,d,mass);effective=1/np.diag(np.linalg.inv(mass))[6:]
                     projected,changed,infeasible=projector(tensor(target),tensor(d.qpos[7:]),tensor(d.qvel[6:]),tensor(d.qacc[6:]),
@@ -113,17 +134,19 @@ def main():
                 if hard>.001 or up<.3 or height_error>.25:
                     status='safety_stop';failure=rows[-1];break
             previous=action;history=history[1:]+[observe()]
-            if tick%50==0:print(json.dumps(rows[-1]),flush=True)
+            if tick%50==0:print(json.dumps(rows[-1] if rows else failure),flush=True)
             if failure:break
-    np.savez_compressed(a.out/'trajectory.npz',state=np.array(states),controls=np.array(controls),dt=np.array(.005))
+    np.savez_compressed(a.out/'trajectory.npz',state=np.array(states),controls=np.asarray(controls).reshape(-1,31),dt=np.array(.005))
     np.savez_compressed(a.out/'policy-interface.npz',observation=np.array(obs_trace),goal=np.array(goal_trace),actions=np.array(actions),fps=np.array([50.]))
     report={'status':status,'failure':failure,'seconds_executed':len(controls)*.005,'state_resets_after_entry':0,
         'configuration':{k:str(v) if isinstance(v,Path) else v for k,v in vars(a).items()},
         'model_sha256':hashlib.sha256(a.model.read_bytes()).hexdigest(),'checkpoint_sha256':checkpoint_sha,
-        'reference_sha256':hashlib.sha256(a.motion.read_bytes()).hexdigest(),'maximum_hard_violation_rad':max(x['hard_violation_rad'] for x in rows),
-        'maximum_motor_ratio':max(x['motor_ratio'] for x in rows),'last':rows[-1],'policy_evaluation':True,'policy_weight_updates':0,
+        'reference_sha256':hashlib.sha256(a.motion.read_bytes()).hexdigest(),'maximum_hard_violation_rad':max((x['hard_violation_rad'] for x in rows),default=0.),
+        'maximum_motor_ratio':max((x['motor_ratio'] for x in rows),default=0.),'last':rows[-1] if rows else None,'policy_evaluation':True,'policy_weight_updates':0,
         'terrain_observation':'Existing motion/anchor interface only; no new box features added to the frozen policy',
-        'policy_alone':projector is None,'joint_projection':{'margin':a.joint_barrier_margin,'frequency':a.joint_barrier_frequency,
+        'policy_alone':projector is None and coupled is None,'coupled_projection':{'sources':coupled_sources,'rows':coupled_rows,
+            'scope':'Coupled native inverse command projection with predictive joint bounds; independent actual geometry still required.'},
+        'joint_projection':{'margin':a.joint_barrier_margin,'frequency':a.joint_barrier_frequency,
             'interventions_per_joint':projection_counts.tolist(),'infeasible_predictions_per_joint':infeasible_counts.tolist(),
             'source_sha256':hashlib.sha256(a.joint_projection_source.read_bytes()).hexdigest() if projector else None,
             'scope':'Approximate acceleration barrier; only position commands change. Actual trajectory audit remains authoritative.'},
