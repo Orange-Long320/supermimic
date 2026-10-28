@@ -21,6 +21,8 @@ def apply_sole_box_profile(spec, path=None):
         raise ValueError('Invalid X2 sole-box configuration')
     if len({item['geom'] for item in config['sole_boxes']})!=2 or {item['side'] for item in config['sole_boxes']}!={'left','right'}:
         raise ValueError('Expected distinct left and right foot overrides')
+    mode=config.get('mode','replace')
+    if mode not in ('replace','augment'):raise ValueError('Unknown sole profile mode')
     original=spec.compile()
     plans=[]
     for item in config['sole_boxes']:
@@ -45,10 +47,22 @@ def apply_sole_box_profile(spec, path=None):
         corners=Rotation.from_quat(quat[[1,2,3,0]]).apply(corners)+position
         if np.max(corners@hull.equations[:,:3].T+hull.equations[:,3])>2e-8:
             raise ValueError('Sole box extends outside the original foot convex hull')
-        plans.append((geom,size,position,quat))
-    for geom,size,position,quat in plans:
-        geom.type=mujoco.mjtGeom.mjGEOM_BOX;geom.meshname=''
-        geom.size[:]=size;geom.pos[:]=position;geom.quat[:]=quat
+        proxy_name=name.removesuffix('_collision')+'_sole_collision'
+        if mode=='augment' and mujoco.mj_name2id(original,mujoco.mjtObj.mjOBJ_GEOM,proxy_name)>=0:
+            raise ValueError('Sole contact augmentation already exists')
+        plans.append((geom,size,position,quat,item['side'],proxy_name))
+    for geom,size,position,quat,side,proxy_name in plans:
+        if mode=='augment':
+            parent=spec.body(side+'_ankle_roll_link')
+            proxy=parent.add_geom(name=proxy_name,type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=size,pos=position,quat=quat,mass=0.)
+            for field in ['contype','conaffinity','condim','friction','solref','solimp','priority','margin','gap']:
+                value=getattr(geom,field)
+                try:getattr(proxy,field)[:]=value
+                except TypeError:setattr(proxy,field,value)
+        else:
+            geom.type=mujoco.mjtGeom.mjGEOM_BOX;geom.meshname=''
+            geom.size[:]=size;geom.pos[:]=position;geom.quat[:]=quat
     updated=spec.compile()
     for field in ['body_mass','body_inertia','body_ipos','body_iquat','jnt_range']:
         np.testing.assert_allclose(getattr(updated,field),getattr(original,field),rtol=0,atol=1e-12,

@@ -1,6 +1,7 @@
 """Batched physical-state metrics for motion design; no changes to physics."""
 import numpy as np
 import torch
+import mujoco
 from scipy.spatial import ConvexHull
 
 from supermimic.kinematics.rotations import quat_apply, quat_apply_inverse, quat_mul
@@ -22,10 +23,13 @@ class BatchedDesignMetrics:
         for g in range(model.ngeom):
             if model.body_rootid[int(model.geom_bodyid[g])]!=self.root or not (model.geom_contype[g] or model.geom_conaffinity[g]):continue
             k=model.geom_dataid[g]
-            assert k>=0
-            a,n=model.mesh_vertadr[k],model.mesh_vertnum[k]
-            points=model.mesh_vert[a:a+n].astype(float)
-            points=points[ConvexHull(points).vertices]
+            if int(model.geom_type[g])==int(mujoco.mjtGeom.mjGEOM_BOX):
+                points=np.array([[x,y,z] for x in [-1.,1.] for y in [-1.,1.] for z in [-1.,1.]])*model.geom_size[g]
+            else:
+                if k<0:raise ValueError('Unsupported collision geometry in design metrics')
+                a,n=model.mesh_vertadr[k],model.mesh_vertnum[k]
+                points=model.mesh_vert[a:a+n].astype(float)
+                points=points[ConvexHull(points).vertices]
             side=0
             if "foot_" in model.geom(g).name:
                 side=1 if "left" in model.body(int(model.geom_bodyid[g])).name else 2

@@ -131,6 +131,10 @@ class NativeContactController(SingleSupportController):
         constraints=[{'type':'eq','fun':lambda x:inverse(x)[:6],'jac':lambda x:inverse(x,True)[:6]},
             {'type':'ineq','fun':lambda x:np.r_[motor_budget-inverse(x)[6:],motor_budget+inverse(x)[6:]],
              'jac':lambda x:np.r_[-inverse(x,True)[6:],inverse(x,True)[6:]]}]
+        hard_com=bool(grounded and getattr(self,'com_acceleration_hard',False))
+        if hard_com:
+            com_matrix=com*acc
+            constraints.append({'type':'eq','fun':lambda x:com_matrix@x-desired_com,'jac':lambda x:com_matrix})
         if getattr(self,'root_acceleration_hard',False):
             root_target=np.asarray(self.root_acceleration_ref)/acc
             root_matrix=np.eye(m.nv)[3:6]
@@ -181,7 +185,8 @@ class NativeContactController(SingleSupportController):
             root_acc_error=float(abs(result.x[3:6]*acc-self.root_acceleration_ref).max()) if getattr(self,'root_acceleration_hard',False) else 0.
             geometry_error=float(np.maximum(geometry_lower-geometry_matrix@result.x,0).max()) if geometry_matrix is not None else 0.
             velocity_error=float(np.maximum(velocity_rhs-velocity_matrix@result.x,0).max()) if len(velocity_rows) else 0.
-            feasible=(velocity_error<=1e-5 and root_acc_error<=1e-5 and geometry_error<=1e-5 and np.isfinite(forces).all() and np.isfinite(result.x).all() and eq_error<=1e-5 and motor<=1.00001 and bound_error<=1e-7)
+            com_error=float(abs(com_matrix@result.x-desired_com).max()) if hard_com else 0.
+            feasible=(com_error<=1e-5 and velocity_error<=1e-5 and root_acc_error<=1e-5 and geometry_error<=1e-5 and np.isfinite(forces).all() and np.isfinite(result.x).all() and eq_error<=1e-5 and motor<=1.00001 and bound_error<=1e-7)
             return forces,eq_error,motor,bound_error,root_acc_error,geometry_error,feasible
         first_result=result;forward_retry=False
         forces,eq_error,motor,bound_error,root_acc_error,geometry_error,feasible=assess(result)
@@ -205,6 +210,7 @@ class NativeContactController(SingleSupportController):
             'geometry_acceleration_residual':geometry_error,
             'support_velocity_residual':float(np.maximum(velocity_rhs-velocity_matrix@result.x,0).max()) if len(velocity_rows) else 0.,
             'com_acceleration_error':float(np.linalg.norm(com@(result.x*acc)-desired_com)),
+            'hard_com_acceleration_active':hard_com,
             'desired_com_acceleration':(desired_com+drift[1]).tolist(),
             'achieved_com_acceleration':(com@(result.x*acc)+drift[1]).tolist(),
             'desired_momentum_rate':(desired_momentum+drift[2]).tolist(),

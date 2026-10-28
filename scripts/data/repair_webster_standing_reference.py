@@ -89,6 +89,7 @@ def main():
     p.add_argument('--wrist-strength', type=float, default=30.)
     p.add_argument('--max-nfev', type=int, default=100)
     p.add_argument('--resume',type=Path,help='Warm start from a saved optimization qpos sequence')
+    p.add_argument('--match-entry-velocity',action='store_true',help='Match incoming joint and foot twists and include the incoming samples in smoothing')
     args = p.parse_args()
     if args.wrist_strength<0 or args.max_nfev<1 or args.seconds<=.2:
         p.error('Nonnegative smoothing strength, positive evaluations and seconds > .2 required')
@@ -187,6 +188,7 @@ def main():
     geo.update(end)
     final_feet = {s: geo.foot(s) for s in geo.feet}
     final_com = geo.data.subtree_com[geo.root].copy()
+    right_floor_height=float(geo.vertices('right')[:,2].min())
     final_pivot = final_feet['left'][0] + final_feet['left'][1].apply(local_pivot)
     count = round(args.seconds * fps)
     duration = count / fps
@@ -209,7 +211,26 @@ def main():
     lower, upper = centre-half+.01, centre+half-.01
     fits = []; targets = []
     geo.update(initial)
+    left_local = initial_feet['left'][1].inv().apply(geo.vertices('left')-initial_feet['left'][0])
     right_local = initial_feet['right'][1].inv().apply(geo.vertices('right')-initial_feet['right'][0])
+    jp,jr=np.zeros((3,m.nv)),np.zeros((3,m.nv))
+    mujoco.mj_jac(m,geo.data,jp,jr,pivot,geo.feet['left']);pivot_velocity=jp@velocity
+    left_omega=lr.inv().apply(jr@velocity)
+    mujoco.mj_jacBody(m,geo.data,jp,jr,geo.feet['right'])
+    right_velocity=jp@velocity;right_omega=initial_feet['right'][1].inv().apply(jr@velocity)
+    def boundary_curve(first,last,seconds,rate):
+        return BPoly.from_derivatives([0,seconds],[[first,rate,np.zeros_like(first)],[last,np.zeros_like(first),np.zeros_like(first)]])
+    if args.match_entry_velocity:
+        joint_curve=boundary_curve(initial[7:],end[7:],duration,velocity[6:])
+        root_angle_curve=boundary_curve(np.zeros(3),(rot0.inv()*rot1).as_rotvec(),duration,velocity[3:6])
+        flat_time=min(.25,duration*.4)
+        left_angle_curve=boundary_curve(np.zeros(3),(lr.inv()*final_feet['left'][1]).as_rotvec(),flat_time,left_omega)
+        rp,rr=initial_feet['right'];ep,er=final_feet['right']
+        right_pos_curve=boundary_curve(rp,ep,duration*.45,right_velocity)
+        right_angle_curve=boundary_curve(np.zeros(3),(rr.inv()*er).as_rotvec(),duration*.45,right_omega)
+        plant_time=min(.12,duration*.2);plant_end=pivot.copy();plant_end[:2]+=.5*plant_time*pivot_velocity[:2]
+        plant_end[2]=final_pivot[2]
+        pivot_curve=boundary_curve(pivot,plant_end,plant_time,pivot_velocity)
     for i in range(1, count + 1):
         t = i / fps; u = t / duration; a = float(smoothstep(u))
         flat = float(smoothstep(t / min(.25, duration * .4)))
@@ -224,9 +245,20 @@ def main():
         rp, rr = initial_feet['right']; ep, er = final_feet['right']
         right_pos = (1-swing)*rp + swing*ep
         right_rot = rr * Rotation.from_rotvec((rr.inv()*er).as_rotvec()*swing)
-        right_pos[2] = max(right_pos[2], -.001584-right_rot.apply(right_local)[:,2].min())
+        right_pos[2] = max(right_pos[2], right_floor_height-right_rot.apply(right_local)[:,2].min())
         root_rot = rot0 * Rotation.from_rotvec((rot0.inv()*rot1).as_rotvec()*a)
         posture = initial.copy(); posture[7:] = (1-a)*initial[7:] + a*end[7:]
+        if args.match_entry_velocity:
+            foot_rot=lr*Rotation.from_rotvec(left_angle_curve(min(t,flat_time)))
+            planted=pivot_curve(min(t,plant_time))
+            contact=(1-step)*planted+step*final_pivot
+            contact[2]+=.025*np.sin(np.pi*step)**2
+            foot_pos=contact-foot_rot.apply(local_pivot)
+            foot_pos[2]=max(foot_pos[2],right_floor_height-foot_rot.apply(left_local)[:,2].min())
+            right_pos=right_pos_curve(min(t,duration*.45))
+            right_rot=rr*Rotation.from_rotvec(right_angle_curve(min(t,duration*.45)))
+            right_pos[2]=max(right_pos[2],right_floor_height-right_rot.apply(right_local)[:,2].min())
+            root_rot=rot0*Rotation.from_rotvec(root_angle_curve(t));posture[7:]=joint_curve(t)
 
         targets.append((foot_pos,foot_rot,right_pos,right_rot,root_rot,posture))
     # Optimize the complete transition together. Independent frame IK admits
@@ -261,13 +293,20 @@ def main():
         rotation=Rotation.from_quat(qs[:,[4,5,6,3]])
         angles=(rot0.inv()*rotation).as_rotvec()
         coordinates=np.c_[qs[:,:3],angles,qs[:,columns]]
+        if args.match_entry_velocity:
+            section=np.concatenate([source[frame-2:frame],qs,np.repeat(end[None],2,axis=0)])
+            angles=(rot0.inv()*Rotation.from_quat(section[:,[4,5,6,3]])).as_rotvec()
+            coordinates=np.c_[section[:,:3],angles,section[:,columns]]
         r.extend((np.diff(coordinates,n=2,axis=0)*np.r_[np.full(3,1000),np.full(3,100),np.full(12,20)]).ravel())
         return np.asarray(r)
-    sparsity=lil_matrix((n*30+n*18,n*width),dtype=int)
+    temporal=n+4 if args.match_entry_velocity else n
+    sparsity=lil_matrix((n*30+temporal*18,n*width),dtype=int)
     for i in range(n):
         sparsity[i*30:(i+1)*30,i*width:(i+1)*width]=1
-        for j in range(max(0,i-1),min(n,i+2)):
-            sparsity[n*30+i*18:n*30+(i+1)*18,j*width:(j+1)*width]=1
+    for i in range(temporal):
+        center=i-1 if args.match_entry_velocity else i+1
+        for t in range(max(1,center-1),min(count-1,center+1)+1):
+            j=t-1;sparsity[n*30+i*18:n*30+(i+1)*18,j*width:(j+1)*width]=1
     progress={'iteration':0}
     def checkpoint(x):
         progress['iteration']+=1
@@ -324,6 +363,7 @@ def main():
             'soft_violation_rad':float(np.maximum(abs(full[:,7:]-centre)-half,0).max()),
             'maximum_joint_speed_ratio':float((abs(v[:,6:])/limits).max()),
             'maximum_adjacent_joint_speed_ratio':float((abs(np.diff(full[:,7:],axis=0))*fps/limits).max()),
+            'entry_generalized_velocity_difference_max':float(abs(v[frame]-velocity).max()),
             'minimum_heights_m':heights.min(0).tolist(),
             'transition_minimum_heights_m':heights[frame:].min(0).tolist(),
             'transition_maximum_lower_foot_height_m':float(heights[frame:,:2].min(axis=1).max()),

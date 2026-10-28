@@ -50,9 +50,14 @@ def main():
     for g in range(model.ngeom):
         if not model.geom(g).name.startswith("foot_"):
             continue
-        mesh = model.geom_dataid[g]
-        start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
-        feet.append((g, model.mesh_vert[start:start + count]))
+        if int(model.geom_type[g])==int(mujoco.mjtGeom.mjGEOM_BOX):
+            vertices=np.array([[x,y,z] for x in [-1.,1.] for y in [-1.,1.] for z in [-1.,1.]])*model.geom_size[g]
+        else:
+            mesh = model.geom_dataid[g]
+            if mesh<0:raise ValueError('Unsupported foot collision geometry')
+            start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+            vertices=model.mesh_vert[start:start + count]
+        feet.append((g,vertices))
     # Standalone XML has no mjlab-generated position actuators. Read the exact
     # effort limits and armatures used by get_robot_cfg(), rather than treating
     # absent XML limits as unlimited motors.
@@ -78,7 +83,8 @@ def main():
         exact_wrench = None
         for g, local in feet:
             world = local @ data.geom_xmat[g].reshape(3, 3).T + data.geom_xpos[g]
-            foot_heights[model.body(int(model.geom_bodyid[g])).name] = float(world[:, 2].min())
+            body_name=model.body(int(model.geom_bodyid[g])).name
+            foot_heights[body_name]=min(foot_heights.get(body_name,float('inf')),float(world[:,2].min()))
             near = world[world[:, 2] < .012]
             if len(near) > 12:
                 near = near[np.linspace(0, len(near) - 1, 12).astype(int)]

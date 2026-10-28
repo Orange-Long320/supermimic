@@ -27,6 +27,9 @@ def main():
                    help='Keep planned planted-foot tasks during contact loss and add soft normal feedback')
     p.add_argument('--native-controller-source',type=Path,
                    help='Explicit controller source snapshot; avoids replacing shared server modules')
+    p.add_argument('--entry-root-velocity',type=float,nargs=6,default=[0.]*6,
+                   help='Initial-only free-root velocity perturbation: world xyz then local angular xyz')
+    p.add_argument('--hard-grounded-com',action='store_true',help='Require the primary COM task when ground contact exists; reject physically infeasible requests')
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
     (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (args.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'command':[sys.executable,*sys.argv],
@@ -51,10 +54,12 @@ def main():
     controller=NativeContactController(m,eq,effort,speed,feet['left'])
     controller.integration_aware=True;controller.foot_task_weight=.1
     controller.stabilize_support_normal=args.recover_planned_contacts
+    controller.com_acceleration_hard=args.hard_grounded_com
     controller.root_acceleration_weight=10.
     kp=m.actuator_gainprm[:,0].copy();kd=-m.actuator_biasprm[:,2].copy()
     cols=m.jnt_qposadr[m.actuator_trnid[:,0]];vcols=m.jnt_dofadr[m.actuator_trnid[:,0]]
     actual.qpos[:]=q[args.start_frame];actual.qvel[:]=v[args.start_frame]
+    actual.qvel[:6]+=np.asarray(args.entry_root_velocity)
     actual.ctrl[:]=actual.qpos[cols]+kd*actual.qvel[vcols]/kp
     mujoco.mj_forward(m,actual)
     com=[];momentum=[];jac=np.zeros((3,m.nv));angular=np.zeros_like(jac)
@@ -97,8 +102,13 @@ def main():
             for x in feet.values():
                 for g in range(m.ngeom):
                     if m.geom_bodyid[g]!=x or not(m.geom_contype[g] or m.geom_conaffinity[g]):continue
-                    k=m.geom_dataid[g];adr,nv=m.mesh_vertadr[k],m.mesh_vertnum[k]
-                    world=m.mesh_vert[adr:adr+nv]@desired.geom_xmat[g].reshape(3,3).T+desired.geom_xpos[g]
+                    k=m.geom_dataid[g]
+                    if int(m.geom_type[g])==int(mujoco.mjtGeom.mjGEOM_BOX):
+                        vertices=np.array([[x,y,z] for x in [-1.,1.] for y in [-1.,1.] for z in [-1.,1.]])*m.geom_size[g]
+                    elif k>=0:
+                        adr,nv=m.mesh_vertadr[k],m.mesh_vertnum[k];vertices=m.mesh_vert[adr:adr+nv]
+                    else:raise ValueError('Unsupported planned foot geometry')
+                    world=vertices@desired.geom_xmat[g].reshape(3,3).T+desired.geom_xpos[g]
                     if world[:,2].min()<.003:planned.add(x)
         else:planned=contact_bodies
         controller.additional_support_feet=[(x,desired.xpos[x].copy(),Rotation.from_matrix(desired.xmat[x].reshape(3,3)))
@@ -111,7 +121,7 @@ def main():
             tau,report=controller.solve(actual.qpos.copy(),actual.qvel.copy(),com_target=sample(com),
                 com_velocity=sample(cv),com_acceleration=sample(ca),momentum_target=sample(momentum),
                 momentum_rate=sample(mr),qref=target,joint_velocity=sample(v)[6:],joint_acceleration=sample(joint_acc)[6:])
-        except RuntimeError as e:
+        except (RuntimeError,ValueError) as e:
             status='controller_rejected';failure={'message':str(e),'details':getattr(controller,'failure',None),'time_s':t}
             if hasattr(controller,'failure_arrays'):np.savez(args.out/'failure-state.npz',**controller.failure_arrays)
             break
