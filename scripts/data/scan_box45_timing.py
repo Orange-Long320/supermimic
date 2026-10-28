@@ -16,6 +16,7 @@ def main():
     p.add_argument('--out',type=Path,required=True)
     p.add_argument('--scales',type=float,nargs='+',default=[1,2,3,4,8])
     p.add_argument('--write-scale',type=float)
+    p.add_argument('--write-best',action='store_true',help='Export the smallest tested factor passing every sampled wrench/motor check')
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
     if any(s<1 for s in a.scales):p.error('Timing factors must be at least one')
@@ -75,6 +76,9 @@ def main():
     (a.out/'scan.json').write_text(json.dumps({'source_sha256':hashlib.sha256(a.source.read_bytes()).hexdigest(),'model_sha256':hashlib.sha256(a.model.read_bytes()).hexdigest(),'summary':summary,'rows':rows,'limitations':'Pose-sampled unilateral friction-pyramid support within12mm; not executed robot dynamics.'},indent=2)+'\n')
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     print(json.dumps(summary,indent=2))
+    if a.write_best:
+        passing=[s for s in factors if s is not None and summary[str(s)]['passed']]
+        a.write_scale=min(passing) if passing else None
     if a.write_scale is not None:
         s=a.write_scale
         if str(s) not in summary or not summary[str(s)]['passed']:raise ValueError('Requested factor did not pass the pose-sampled inverse audit')
