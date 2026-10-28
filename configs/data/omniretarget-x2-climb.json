@@ -19,7 +19,7 @@
     "revision": "b739a6cb7b1f8b9918669f8f776edb1855bfda1a",
     "package": "src/holosoma_retargeting",
     "raw_climbing_demo_count": 5,
-    "x2_support": "Independent source FK verified. Adapter hinge-Jacobian correction passed 38-column/15-body central differences and 5-frame articulation smoke; full-reference physics pending."
+    "x2_support": "Independent G1 FK and complete X2 Jacobians verified. Full foot/hand candidates pass geometry but fail force diagnostics; native entry balance and two-second stance demonstrated, moving ascent remains unverified."
   },
   "server": {
     "raw": "/home/2025-Long.xh/HHD/data/supermimic/data/external/omniretarget_20261028_r1/raw",
@@ -53,38 +53,46 @@
       "keep each clip paired with its measured terrain and contact phases"
     ],
     "mixing_gate": "Independent geometry, physical force/torque and continuous-execution checks per clip before single-GPU smoke",
-    "status": "Source screening and X2 adaptation in progress; multi-motion training has not started"
+    "status": "Six-family kinematic batch completed; none approved. Source-flat contacts, calibrated entry and complete hand-centroid reference diagnosed. Coupled support-force correction of moving segments remains necessary; no multi-motion training started."
   },
   "multi_motion_review_queue": [
     {
       "motion": "robot-terrain/climb_15_z_scale_1.1.npz",
       "category": "step-up; coarse effective rise 0.440m",
-      "status": "Provisional source review only; no physical support or X2 success certified"
+      "status": "Latest full 186-frame 0.9-bound candidate: geometry passed, dynamic force motor gate only 63/182 frames; not usable. Reconditioned native motion failed at 1.05 seconds before ascent."
     },
     {
       "motion": "robot-terrain/climb_06_z_scale_1.2.npz",
       "category": "step-up; coarse effective rise 0.427m",
-      "status": "Provisional source review only; no physical support or X2 success certified"
+      "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved."
     },
     {
       "motion": "robot-terrain/climb_14_z_scale_1.0.npz",
       "category": "step-up; X2 kinematic candidate, effective source rise about 0.400m",
-      "status": "Provisional source review only; no physical support or X2 success certified"
+      "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved."
     },
     {
       "motion": "robot-terrain/climb_20_z_scale_1.2.npz",
       "category": "possible hand-supported climb; full-clip proximity",
-      "status": "Provisional source review only; no physical support or X2 success certified"
+      "status": "Complete 363-frame hand-centroid adaptation with mechanical wrist range, 0.9 reset bounds and flat-source locks: geometry passed, dynamic motor gate only 40/359 frames; not usable."
     },
     {
       "motion": "robot-terrain/climb_11_z_scale_1.2.npz",
       "category": "possible hand-supported climb; full-clip proximity",
-      "status": "Provisional source review only; no physical support or X2 success certified"
+      "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved."
     },
     {
       "motion": "robot-terrain/climb_25_z_scale_1.2.npz",
       "category": "possible hand-supported climb; full-clip proximity",
-      "status": "Provisional source review only; no physical support or X2 success certified"
+      "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved."
     }
-  ]
+  ],
+  "latest_evidence": {
+    "native_stance": "omni_native_stance_probe_20261029_r2/independent-replay/report.json",
+    "stance_scope": "Two-second low-platform stance only; not a climbing reference. Calibration was later corrected to 0.9 reset bounds.",
+    "reset_compatible_static_equilibrium": "omni_native_entry_calibration_20261029_r3/result/result.json",
+    "moving_execution_failure": "omni_native_reconditioned_20261029_r1/independent-replay/report.json",
+    "complete_hand_candidate_failure": "omni_x2_hand_full_20261029_r1/audit/report.json",
+    "training_approved": false
+  }
 }
