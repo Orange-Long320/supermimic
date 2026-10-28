@@ -14,6 +14,7 @@ def main():
     p.add_argument('--model',type=Path,required=True);p.add_argument('--initial',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True)
     p.add_argument('--native-balance',action='store_true',help='Jointly polish contact loads while retaining near-level soles')
+    p.add_argument('--symmetric-feet',action='store_true',help='Parallel feet with aligned toes and symmetric lateral placement')
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));d=mujoco.MjData(m)
@@ -42,6 +43,29 @@ def main():
     com_target=d.subtree_com[root].copy();com_target[:2]=np.mean(sole_centers,axis=0)[:2]
     rotation0=Rotation.from_quat(q0[[4,5,6,3]]);heading=rotation0.as_euler('xyz')[2]
     root_target=Rotation.from_euler('z',heading)
+    if args.symmetric_feet:
+        basis=root_target.as_matrix()
+        centre=np.mean(sole_centers,axis=0)
+        for side,body in feet.items():
+            position,rotation=targets[side]
+            # Retain the level sole plane, replacing only its heading.
+            yaw=rotation.as_euler('xyz')[2]
+            rotation=Rotation.from_euler('z',heading-yaw)*rotation
+            vertices=[]
+            for g in range(m.ngeom):
+                if int(m.geom_bodyid[g])!=body or not(m.geom_contype[g] or m.geom_conaffinity[g]):continue
+                k=int(m.geom_dataid[g]);a,n=m.mesh_vertadr[k],m.mesh_vertnum[k]
+                world=m.mesh_vert[a:a+n]@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
+                local=Rotation.from_matrix(d.xmat[body].reshape(3,3)).inv().apply(world-d.xpos[body])
+                vertices.append(rotation.apply(local))
+            offsets=np.concatenate(vertices)@basis
+            desired=centre@basis
+            current=position@basis
+            current[0]=desired[0]+.12-offsets[:,0].max()
+            current[1]=desired[1]+(.12 if side=='left' else -.12)-(offsets[:,1].min()+offsets[:,1].max())/2
+            current[2]=-.0005-offsets[:,2].min()
+            targets[side]=(basis@current,rotation)
+        com_target[:2]=centre[:2]
     joints=[m.joint('robot/'+s+'_'+j+'_joint').id for s in feet for j in ['hip_pitch','hip_roll','hip_yaw','knee','ankle_pitch','ankle_roll']]
     columns=m.jnt_qposadr[joints];lo=m.jnt_range[joints,0]+.025;hi=m.jnt_range[joints,1]-.025
     lower=np.r_[q0[:2]-.3,.35,np.full(3,-.6),lo];upper=np.r_[q0[:2]+.3,.9,np.full(3,.6),hi]
