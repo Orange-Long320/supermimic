@@ -81,7 +81,7 @@ def main():
         assert [model.joint(i).name.rsplit('/',1)[-1] for i in range(1,model.njnt)]==list(PROFILE['joint_names'])
         effort=np.array([PROFILE['effort_limit'][n] for n in PROFILE['joint_names']])
         speed=np.array([PROFILE['velocity_limit'][n] for n in PROFILE['joint_names']])
-        physics=[];positions=[];velocities=[];actions=[];forces=[]
+        physics=[];positions=[];velocities=[];actions=[];forces=[];constraint_forces=[];external_force_max=[0.]
         origin=env.scene.env_origins[0].cpu().numpy()
         initial_q=env.sim.data.qpos[0].cpu().numpy().copy();initial_q[:3]-=origin
         initial_v=env.sim.data.qvel[0].cpu().numpy().copy()
@@ -121,6 +121,9 @@ def main():
             q=env.sim.data.qpos[0].cpu().numpy().copy();q[:3]-=origin
             v=env.sim.data.qvel[0].cpu().numpy().copy()
             f=env.sim.data.actuator_force[0].cpu().numpy().copy()
+            constraint_forces.append(env.sim.data.qfrc_constraint[0].cpu().numpy().copy())
+            external_force_max[0]=max(external_force_max[0],float(env.sim.data.qfrc_applied[0].abs().max()),
+                float(env.sim.data.xfrc_applied[0].abs().max()))
             positions.append(q);velocities.append(v);forces.append(f)
             # Use a separate native data object: Warp geometry caches precede
             # integration, and measurement must not refresh the executing sim.
@@ -163,6 +166,7 @@ def main():
             action_dt=np.array([env.step_dt]),state=np.c_[positions,velocities],
             servo_target=np.repeat(defaults+np.array(actions)*scale,ratio,axis=0),fps=np.array([1/model.opt.timestep]))
         np.savez(args.out/'baseline-physics.npz',qpos=positions,qvel=velocities,actuator_force=forces,
+            constraint_generalized_force=constraint_forces,
             initial_qpos=initial_q,initial_qvel=initial_v,fps=np.array([1/model.opt.timestep]))
         np.savez(args.out/'baseline-trajectory.npz',qpos=np.array(positions)[ratio-1::ratio],
             qvel=np.array(velocities)[ratio-1::ratio],actions=actions,fps=np.array([1/env.step_dt]))
@@ -179,6 +183,7 @@ def main():
             'prefix_reproduction_maximum_qpos_error':max(prefix_errors) if prefix_errors else None,
             'maximum_foot_compression_m':float(max(-a[:,7:9].min(),0)),
             'metric_state_alignment':'Independent native mj_forward of each post-integration recorded state; execution sim untouched',
+            'external_applied_force_max':external_force_max[0],'state_resets_after_entry':0,
             'metric_columns':['com_z','com_vz','H_x','H_y','H_z','com_speed','root_angular_speed',
                 'left_foot_min','right_foot_min','nonfoot_min','root_pitch','root_up_z',
                 'soft_violation','speed_ratio','effort_ratio','hard_violation'],
