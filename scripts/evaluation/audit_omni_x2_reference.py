@@ -115,8 +115,16 @@ def main():
         fits={}
         for label,required in [('static',static),('dynamic',dynamic)]:
             if columns:
-                fit=solve_contact_effort(np.concatenate(columns,axis=1),required,limits)
+                basis=np.concatenate(columns,axis=1)
+                fit=solve_contact_effort(basis,required,limits)
                 fits[label]={'feasible_base_wrench':bool(fit.success),'minimum_motor_ratio':float(fit.x[-1]) if fit.success else None,'solver_status':int(fit.status)}
+                if fit.success:
+                    torque=required[6:]-basis[6:]@fit.x[:-1];fraction=abs(torque)/limits
+                    dual=np.asarray(fit.ineqlin.marginals)
+                    fits[label]['largest_motor_demands_in_one_optimal_solution']=[
+                        {'joint':names[j],'required_torque_nm':float(torque[j]),'physical_limit_nm':float(limits[j]),
+                         'motor_ratio':float(fraction[j]),'upper_inequality_dual':float(dual[j]),'lower_inequality_dual':float(dual[j+len(names)])}
+                        for j in np.argsort(-fraction)[:5]]
             else:fits[label]={'feasible_base_wrench':False,'minimum_motor_ratio':None,'solver_status':None}
         rows.append({'frame':i,'patches':patches,**fits})
         if i%100==0:print(f'audited {i}/{len(q)}',flush=True)

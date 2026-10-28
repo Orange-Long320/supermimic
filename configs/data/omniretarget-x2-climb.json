@@ -53,7 +53,8 @@
       "keep each clip paired with its measured terrain and contact phases"
     ],
     "mixing_gate": "Independent geometry, physical force/torque and continuous-execution checks per clip before single-GPU smoke",
-    "status": "Six-family kinematic batch completed; none approved. Source-flat contacts, calibrated entry and complete hand-centroid reference diagnosed. Coupled support-force correction of moving segments remains necessary; no multi-motion training started."
+    "status": "Six-family kinematic batch completed; none approved. Source-flat contacts, calibrated entry and complete hand-centroid reference diagnosed. Coupled support-force correction of moving segments remains necessary; no multi-motion training started.",
+    "height_selection_update": "Prioritize official ~46cm effective-rise hand climb before its failed ~69cm variant; retain other ~55cm/~60cm hand families and ~28cm/~39cm/~43cm step families. Variants are not counted as additional skills."
   },
   "multi_motion_review_queue": [
     {
@@ -62,9 +63,10 @@
       "status": "Latest full 186-frame 0.9-bound candidate: geometry passed, dynamic force motor gate only 63/182 frames; not usable. Reconditioned native motion failed at 1.05 seconds before ascent."
     },
     {
-      "motion": "robot-terrain/climb_06_z_scale_1.2.npz",
-      "category": "step-up; coarse effective rise 0.427m",
-      "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved."
+      "motion": "robot-terrain/climb_06_z_scale_0.8.npz",
+      "category": "step-up; measured effective source rise 0.284764m; X2 scale gives about 0.28045m",
+      "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
+      "prior_diagnostic_variant": "robot-terrain/climb_06_z_scale_1.2.npz"
     },
     {
       "motion": "robot-terrain/climb_14_z_scale_1.0.npz",
@@ -72,19 +74,22 @@
       "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved."
     },
     {
-      "motion": "robot-terrain/climb_20_z_scale_1.2.npz",
-      "category": "possible hand-supported climb; full-clip proximity",
-      "status": "Complete 363-frame hand-centroid adaptation with mechanical wrist range, 0.9 reset bounds and flat-source locks: geometry passed, dynamic motor gate only 40/359 frames; not usable."
+      "motion": "robot-terrain/climb_20_z_scale_0.8.npz",
+      "category": "hand-supported source; measured effective source rise 0.468674m; X2 scale gives about 0.46157m",
+      "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
+      "prior_diagnostic_variant": "robot-terrain/climb_20_z_scale_1.2.npz"
     },
     {
-      "motion": "robot-terrain/climb_11_z_scale_1.2.npz",
-      "category": "possible hand-supported climb; full-clip proximity",
-      "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved."
+      "motion": "robot-terrain/climb_11_z_scale_0.8.npz",
+      "category": "higher hand-support candidate; source top/rise 0.563596m; X2 about 0.55506m",
+      "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
+      "prior_diagnostic_variant": "robot-terrain/climb_11_z_scale_1.2.npz"
     },
     {
-      "motion": "robot-terrain/climb_25_z_scale_1.2.npz",
-      "category": "possible hand-supported climb; full-clip proximity",
-      "status": "Earlier full family diagnostic completed but failed necessary physics checks; source remains queued for corrected adaptation, not approved."
+      "motion": "robot-terrain/climb_25_z_scale_0.8.npz",
+      "category": "higher hand-support candidate; source effective rise 0.611056m; X2 about 0.60180m",
+      "status": "Official lower-height variant prioritized within the same distinct source family; not physically validated or training-approved. Prior higher variant retained as failed diagnostic.",
+      "prior_diagnostic_variant": "robot-terrain/climb_25_z_scale_1.2.npz"
     }
   ],
   "latest_evidence": {
