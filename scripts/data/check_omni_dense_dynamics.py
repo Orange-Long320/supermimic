@@ -33,7 +33,7 @@ def main():
     np.testing.assert_allclose(m.actuator_forcerange,np.c_[-effort,effort],rtol=0,atol=1e-9)
     np.testing.assert_array_equal(m.jnt_dofadr[m.actuator_trnid[:,0]],np.arange(6,37))
     np.testing.assert_allclose(m.opt.gravity,[0,0,-9.81],rtol=0,atol=1e-12)
-    with np.load(a.reference) as z:q=z['qpos'].copy();fps=float(z['fps'][0])
+    with np.load(a.reference) as z:q=z['qpos'].copy();fps=float(np.asarray(z['fps']).reshape(-1)[0])
     if fps not in [50.,200.] or q.shape[1]!=38:raise ValueError('Explicit50Hz or200Hz source required')
     factor=int(200/fps);times=np.arange(len(q))/fps;clock=np.arange((len(q)-1)*factor+1)/200.
     columns=np.r_[np.arange(3),np.arange(7,38)];dense=np.empty((len(clock),38))
