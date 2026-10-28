@@ -61,6 +61,7 @@ def main():
     p.add_argument('--minibatches',type=int,default=4);p.add_argument('--snapshot-every',type=int,default=4)
     p.add_argument('--hard-joint-weight',type=float,default=0.)
     p.add_argument('--termination-penalty',type=float,default=0.)
+    p.add_argument('--freeze-motion-encoder',action='store_true',help='Retain the goal representation learned before decoder imitation')
     args=p.parse_args()
     if args.out.exists() or args.ckpt.name=='ckpt_latest.pt':p.error('Use a fresh output and immutable source')
     if not 1<=args.envs<=1024 or not 16<=args.horizon<=128 or not 1<=args.updates<=256 or not 0<args.actor_lr<=1e-5:
@@ -87,6 +88,7 @@ def main():
     torch.cuda.set_device(0);torch.cuda.set_per_process_memory_fraction(.15);device='cuda:0'
     policy,config=load_policy_from_checkpoint(args.ckpt,device)
     if config['robot']!='x2_ultra':raise ValueError('This experiment is for X2 Ultra')
+    if args.freeze_motion_encoder:policy.encoders.requires_grad_(False)
     initial_weights={k:v.detach().cpu().clone() for k,v in policy.state_dict().items()}
     env=make_env(SuperMimicEnvCfgArgs(npz_files=[str(args.source)],num_envs=args.envs,
         future_frames=config['env']['future_frames'],action_noise_std=0.,obs_noise=False,reset_noise=False,
@@ -130,6 +132,7 @@ def main():
             'joint_weight':float(env.reward_manager.get_term_cfg('joint_limit').weight),
             'physical_reward':vars(physical_cfg),'arguments':vars(args),
             'original_physical_termination_penalty':args.termination_penalty,
+            'motion_encoder_frozen':args.freeze_motion_encoder,
             'physical_candidate_passed':False,'approved_for_training':False}
         (args.out/'metadata.json').write_text(json.dumps(metadata,indent=2,default=str))
         (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
@@ -181,11 +184,14 @@ def main():
             if measured_kl>.2:stopped_for_kl=True;break
             if time.monotonic()-started>args.max_seconds:break
         snapshot('policy_evaluation.pt',update)
+        encoder_unchanged=all(torch.equal(v.cpu(),initial_weights['encoders.'+k]) for k,v in policy.encoders.state_dict().items())
+        if args.freeze_motion_encoder and not encoder_unchanged:raise ValueError('Frozen motion encoder changed')
         torch.save({'actor':actor.state_dict(),'critic':critic.state_dict(),'optimizer':algo.optimizer.state_dict(),
             'metadata':metadata,'ppo_updates':update},args.out/'ppo_state.pt')
         result={'updates_completed':update,'local_environment_steps':update*args.horizon,'elapsed_s':time.monotonic()-started,
             'completed_episodes':completed_episodes,'physical_terminations':physical_terminations,'clip_completions':clip_completions,
             'stopped_for_kl':stopped_for_kl,'parameters_finite':True,
+            'motion_encoder_unchanged':encoder_unchanged,
             'torch_peak_allocated_mib':torch.cuda.max_memory_allocated()/2**20,'torch_peak_reserved_mib':torch.cuda.max_memory_reserved()/2**20,
             'evaluation_checkpoint_sha256':hashlib.sha256((args.out/'policy_evaluation.pt').read_bytes()).hexdigest(),
             'physical_evaluation_pending':True,'physical_candidate_passed':False,'approved_for_training':False}
