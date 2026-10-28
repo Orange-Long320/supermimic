@@ -58,6 +58,7 @@ def main():
     p.add_argument("--warmstart",type=Path,help="Parameter vector, or an (N,D) grid for zero-iteration timing ablations")
     p.add_argument("--initial-command-margin",type=float,default=0.,help="Move the first position command inward for joints starting at a soft boundary; no state or actuator edits")
     p.add_argument("--initial-knot",action="store_true",help="Search the initial residual command as well as the three preparation knots")
+    p.add_argument("--contact-pulses",action="store_true",help="Append two short early-contact command groups; requires explicitly expanded preparation parameters")
     p.add_argument("--independent-leg-axes",action="store_true",help="Append left/right hip yaw and independent right hip roll residuals; requires explicitly migrated parameter files")
     p.add_argument("--tail-of",type=Path,help="Freeze a takeoff solution and search aerial/landing residuals instead")
     p.add_argument("--joint-phases",action="store_true",help="Use tail-of only as initialization; jointly search preparation and aerial commands")
@@ -102,6 +103,8 @@ def main():
     p.add_argument("--projection-frequency",type=float,default=35.)
     p.add_argument("--projection-margin",type=float,default=.04)
     args=p.parse_args()
+    if args.contact_pulses and not (args.initial_knot or args.tail_of):
+        p.error('Contact pulses require preparation initial-knot parameters')
     if not np.isfinite(args.residual_sigma_floor) or args.residual_sigma_floor<0:
         p.error('Residual covariance floor must be finite and nonnegative')
     if not np.isfinite(args.apex_height_weight) or args.apex_height_weight<0 or not np.isfinite(args.target_apex_height) or args.target_apex_height<=0:
@@ -252,12 +255,15 @@ def main():
     base_dimension=1+3*len(groups)
     fixed_preparation=np.load(args.tail_of)["parameters"].copy() if args.tail_of else None
     if args.tail_of:
-        assert args.phase=="full" and fixed_preparation.shape in [(base_dimension,),(base_dimension+len(groups),)]
+        allowed=[(base_dimension+3*len(groups),)] if args.contact_pulses else [(base_dimension,),(base_dimension+len(groups),)]
+        assert args.phase=="full" and fixed_preparation.shape in allowed
     preparation_dimension=len(fixed_preparation) if args.tail_of else base_dimension+(len(groups) if args.initial_knot else 0)
+    if args.contact_pulses and not args.tail_of:preparation_dimension+=2*len(groups)
     dimension=preparation_dimension+base_dimension if args.joint_phases else base_dimension if args.tail_of else preparation_dimension
     clock_indices=[0,preparation_dimension] if args.joint_phases else [0]
     blocks=[(1,3)]
     if (not args.tail_of or args.joint_phases) and preparation_dimension>base_dimension:blocks.append((base_dimension,1))
+    if args.contact_pulses and (not args.tail_of or args.joint_phases):blocks.append((base_dimension+len(groups),2))
     if args.joint_phases:blocks.append((preparation_dimension+1,3))
     search_mask=np.ones(dimension,dtype=bool)
     if args.search_groups:
@@ -279,6 +285,8 @@ def main():
     parameter_grid=None
     if args.warmstart:
         initial=np.load(args.warmstart)["parameters"]
+        if args.contact_pulses and not args.tail_of and initial.shape[-1]!=dimension:
+            p.error('Explicitly append zero pulse coefficients to the initial-knot preparation before enabling contact pulses')
         if args.joint_phases and initial.shape[-1]==base_dimension:
             prefix=np.broadcast_to(fixed_preparation,(*initial.shape[:-1],preparation_dimension))
             initial=np.concatenate([prefix,initial],axis=-1)
@@ -365,6 +373,7 @@ def main():
         "optimization_variables":"preparation, aerial timing and all residual phases" if args.joint_phases else "aerial guide time scale and air/landing residuals" if args.tail_of else "preparation duration and support/swing residuals",
         "preparation_frozen":bool(args.tail_of and not args.joint_phases),
         "preparation_parameter_dimension":preparation_dimension,"clock_parameter_indices":clock_indices,
+        "contact_pulse_layout":({"start_column":base_dimension+len(groups),"centers_s":[0.,.08],"half_widths_s":[.04,.08]} if args.contact_pulses else None),
         "initial_knot_searched":bool((not args.tail_of or args.joint_phases) and preparation_dimension>base_dimension),
         "fixed_preparation_has_initial_knot":bool(fixed_preparation is not None and len(fixed_preparation)>base_dimension),
         "searched_parameter_indices":np.flatnonzero(search_mask).tolist(),
@@ -433,7 +442,12 @@ def main():
             corrected=np.where(near_upper,np.minimum(corrected,upper-args.initial_command_margin),corrected)
             initial_delta=torch.tensor((corrected-nominal)/action_scale,dtype=torch.float32,device=device)
         if prep_parameters.shape[1]>base_dimension:
-            initial_delta+=torch.as_tensor(prep_parameters[:,base_dimension:],dtype=torch.float32,device=device)@mapping
+            initial_delta+=torch.as_tensor(prep_parameters[:,base_dimension:base_dimension+len(groups)],dtype=torch.float32,device=device)@mapping
+        pulse_commands=None
+        if args.contact_pulses:
+            from supermimic.data.command_basis import early_contact_command_basis
+            coefficients=prep_parameters[:,base_dimension+len(groups):].reshape(args.num_envs,2,len(groups))
+            pulse_commands=torch.as_tensor(coefficients,dtype=torch.float32,device=device)@mapping
         states=[];velocities=[];actions=[];observation_trace=[]
         records=[[] for _ in range(args.num_envs)]
         maxima=[{"soft":0.,"hard":0.,"speed":0.,"effort":0.,"nonfoot_penetration":0.,
@@ -452,6 +466,9 @@ def main():
             ids=torch.arange(args.num_envs,device=device)
             residual=knots[ids,index]*(1-fraction[:,None])+knots[ids,index+1]*fraction[:,None]
             residual*=torch.clamp(1-(step*.02-clock["preparation"])/.12,0,1)[:,None]
+            if pulse_commands is not None:
+                weights=early_contact_command_basis(torch.tensor(step*.02,device=device))
+                residual+=(pulse_commands*weights[None,:,None]).sum(1)
             if args.tail_of:
                 after=torch.clamp(step*.02-clock["preparation"],min=0)
                 air_duration=reference_flight*clock["air_scale"]
