@@ -9,7 +9,11 @@ SM_POLICY_BATCH=${3:?policy batch required}
 SM_HOURS=${4:?time budget required}
 SM_TARGET=${5:-320000}
 SM_INITIAL=${6:-logs/webster_transfer_short_20261027_r1_train/ckpt_latest.pt}
+SM_NPZ=${7:-$SM_DATA/data/video/webster_BV1Xy4y1g7xA_20261027/npz_repaired_ease_r1}
+SM_GPU=${8:-0}
+SM_RENDER_SECONDS=${9:-3}
 [[ "$SM_TAG" =~ ^[a-zA-Z0-9_-]+$ ]]
+[[ "$SM_GPU" =~ ^[0-9]+$ ]]
 cd "$SM_ROOT"
 SM_RUN="$SM_DATA/logs/$SM_TAG"
 test ! -e "logs/${SM_TAG}_train"
@@ -18,15 +22,16 @@ exec > >(tee "$SM_RUN/controller.log") 2>&1
 trap 'echo "$?" > "$SM_RUN/controller.exit"' EXIT
 echo "$$" > "$SM_RUN/controller.pid"
 date -Is > "$SM_RUN/started.txt"
-export CUDA_VISIBLE_DEVICES=0 MUJOCO_EGL_DEVICE_ID=0
+export CUDA_VISIBLE_DEVICES="$SM_GPU" MUJOCO_EGL_DEVICE_ID="$SM_GPU"
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONUNBUFFERED=1
 export XDG_CACHE_HOME="$SM_DATA/cache" WARP_CACHE_PATH="$SM_DATA/cache/warp" TORCH_HOME="$SM_DATA/cache/torch"
 unset PYTHONPATH PYTHONHOME
-test -z "$(nvidia-smi -i 0 --query-compute-apps=pid --format=csv,noheader,nounits)"
-nvidia-smi -i 0 > "$SM_RUN/gpu-before.txt"
-SM_NPZ="$SM_DATA/data/video/webster_BV1Xy4y1g7xA_20261027/npz_repaired_ease_r1"
+test -z "$(nvidia-smi -i "$SM_GPU" --query-compute-apps=pid --format=csv,noheader,nounits)"
+nvidia-smi -i "$SM_GPU" > "$SM_RUN/gpu-before.txt"
 cp "${BASH_SOURCE[0]}" "$SM_RUN/launch.sh"
-cp "$SM_NPZ/reference-qc.json" "$SM_NPZ/repair-validation.json" "$SM_RUN/"
+for SM_METADATA in reference-qc.json repair-validation.json provenance.json; do
+  if [[ -f "$SM_NPZ/$SM_METADATA" ]]; then cp "$SM_NPZ/$SM_METADATA" "$SM_RUN/"; fi
+done
 cp UPSTREAM.md "$SM_RUN/"
 sha256sum "$SM_INITIAL" "$SM_NPZ/webster.npz" "$SM_NPZ/manifest_filtered.csv" > "$SM_RUN/inputs.sha256"
 .venv/bin/python - "$SM_INITIAL" "$SM_RUN/environment-and-input.json" <<'PY'
@@ -39,7 +44,7 @@ record={'python':sys.version,'executable':str(Path(sys.executable).resolve()),
         'packages':{p:m.version(p) for p in ('torch','mujoco','mujoco-warp','warp-lang')},
         'cuda':torch.version.cuda,'gpu':torch.cuda.get_device_name(0),
         'initial_checkpoint':str(Path(sys.argv[1]).resolve()),'iteration':c['iteration'],'updates':c['num_updates'],
-        'limitation':'Reference takeoff motor feasibility remains unproven. User requested exploratory long training; success requires full-clip evaluation.'}
+        'limitation':'Exploratory training; input provenance and physical limitations are retained separately. Success requires independent full-motion evaluation.'}
 Path(sys.argv[2]).write_text(json.dumps(record,indent=2)+'\n')
 print(json.dumps(record))
 PY
@@ -55,7 +60,7 @@ SM_ARGS=(--robot x2_ultra --run-name "${SM_TAG}_train" --resume "$SM_INITIAL"
   --data.npz-dir "$SM_NPZ" --data.manifest "$SM_NPZ/manifest_filtered.csv")
 bash scripts/run_local.sh scripts/training/train.py --print-config "${SM_ARGS[@]}" > "$SM_RUN/config-preview.json"
 sha256sum -c "$SM_RUN/inputs.sha256"
-SM_CMD=(bash scripts/run_local.sh scripts/training/profile_train.py --profile-gpu 0 --profile-output "$SM_RUN/profile.json" "${SM_ARGS[@]}")
+SM_CMD=(bash scripts/run_local.sh scripts/training/profile_train.py --profile-gpu "$SM_GPU" --profile-output "$SM_RUN/profile.json" "${SM_ARGS[@]}")
 printf '%q ' "${SM_CMD[@]}" > "$SM_RUN/command.sh"; printf '\n' >> "$SM_RUN/command.sh"
 "${SM_CMD[@]}" > "$SM_RUN/train.log" 2>&1 &
 SM_PID=$!; echo "$SM_PID" > "$SM_RUN/train.pid"; wait "$SM_PID"
@@ -73,6 +78,6 @@ if [[ "$SM_TARGET" -ge 320000 ]]; then
     --ckpt "logs/${SM_TAG}_train/ckpt_latest.pt" --npz-dir "$SM_NPZ" --manifest "$SM_NPZ/manifest_filtered.csv" \
     --num-envs 1 --out "$SM_RUN/evaluation.json" > "$SM_RUN/evaluation.log" 2>&1
   bash scripts/run_local.sh scripts/evaluation/render_policy.py --robot x2_ultra \
-    --ckpt "logs/${SM_TAG}_train/ckpt_latest.pt" --npz-dir "$SM_NPZ" --clip webster --seconds 3 \
+    --ckpt "logs/${SM_TAG}_train/ckpt_latest.pt" --npz-dir "$SM_NPZ" --clip webster --seconds "$SM_RENDER_SECONDS" \
     --continue-after-failure --out "$SM_RUN/policy.mp4" > "$SM_RUN/render.log" 2>&1
 fi
