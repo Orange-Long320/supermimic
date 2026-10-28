@@ -19,6 +19,7 @@ def main():
     p.add_argument('--support-height-m',type=float,default=0.,help='World height of the horizontal standing surface; no terrain or physics modification')
     p.add_argument('--max-trials',type=int,default=7,help='Bound the number of independent calibration seeds')
     p.add_argument('--max-nfev',type=int,default=250,help='Evaluation budget per calibration seed')
+    p.add_argument('--polish-fixed-pressure',action='store_true',help='Polish native root-force balance with the fitted left-foot pressure attitude fixed')
     args=p.parse_args()
     if not np.isfinite(args.support_height_m) or min(args.max_trials,args.max_nfev)<1:p.error('Finite support height and positive solver budgets required')
     args.out.mkdir(parents=True,exist_ok=False)
@@ -86,6 +87,27 @@ def main():
         seed=np.clip(seed,lower,upper)
         fit=least_squares(residual,seed,jac=jacobian,bounds=(lower,upper),max_nfev=args.max_nfev,
                           ftol=1e-12,xtol=1e-12,gtol=1e-12)
+        polish_evaluations=0
+        if args.polish_fixed_pressure:
+            if not args.anchor_left_foot:p.error('Fixed pressure polishing requires an explicit left-foot anchor')
+            fixed=fit.x.copy();indices=np.r_[0,np.arange(3,len(fixed))]
+            def balance(y):
+                x=fixed.copy();x[indices]=y
+                _,force,h,n,_=evaluate(x)
+                return np.r_[force[:6]/scale,
+                    np.maximum(abs(force[6:])/effort-1.,0),
+                    [max(-.0045-h[s],0)*100 for s in feet],max(.005-h['nonfoot'],0)*100,
+                    [max(10.-n[s],0)/weight for s in feet]]
+            def balance_jac(y):
+                columns=[]
+                for j,step in enumerate(np.r_[1e-7,np.full(len(y)-1,1e-6)]):
+                    delta=np.zeros(len(y));delta[j]=step
+                    columns.append((balance(y+delta)-balance(y-delta))/(2*step))
+                return np.stack(columns,axis=1)
+            polished=least_squares(balance,fixed[indices],jac=balance_jac,
+                bounds=(lower[indices],upper[indices]),max_nfev=args.max_nfev,
+                ftol=1e-13,xtol=1e-13,gtol=1e-13)
+            fixed[indices]=polished.x;fit.x=fixed;polish_evaluations=int(polished.nfev)
         q,force,h,n,contacts=evaluate(fit.x);ratio=float((abs(force[6:])/effort).max())
         root_error=float(abs(force[:6]/scale).max());up=float(d.xmat[root].reshape(3,3)[2,2])
         hard=float(np.maximum(np.maximum(m.jnt_range[1:,0]-q[7:],q[7:]-m.jnt_range[1:,1]),0).max())
@@ -95,6 +117,7 @@ def main():
               'maximum_motor_ratio':ratio,'root_force_residual':force[:6].tolist(),'heights':h,'normal_force_n':n,'contact_bodies':contacts,
               'root_up_z':up,'hard_violation_rad':hard,'static_force_feasible':passed,
               'strict_geometry_static_feasible':passed,'evaluations':int(fit.nfev),
+              'fixed_pressure_polish_evaluations':polish_evaluations,
               'adjusted_joint_names':[m.joint(j).name for j in joints]}
         trials.append((item,q,force))
         print(json.dumps({'trial':len(trials),'root_residual':root_error,'maximum_motor_ratio':ratio,'static_feasible':passed}),flush=True)
