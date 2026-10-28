@@ -13,8 +13,11 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--width",type=int,default=960)
     parser.add_argument("--height",type=int,default=720)
+    parser.add_argument("--camera-distance",type=float,default=4.)
+    parser.add_argument("--follow-root",action='store_true')
     args = parser.parse_args()
     if args.width<=0 or args.height<=0:parser.error('Positive render dimensions required')
+    if args.camera_distance<=0:parser.error('Positive camera distance required')
     if args.out.exists():
         parser.error("output already exists")
     from supermimic.robots.paths import select_robot
@@ -36,7 +39,7 @@ def main():
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
     camera.lookat[:] = positions.mean(axis=0)
     camera.lookat[2] = 0.65
-    camera.distance = 4.0
+    camera.distance = args.camera_distance
     camera.azimuth = 120
     camera.elevation = -12
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +51,7 @@ def main():
     process = subprocess.Popen(command, stdin=subprocess.PIPE)
     try:
         for frame in range(len(positions)):
+            if args.follow_root:camera.lookat[:2]=positions[frame,:2]
             data.qpos[:3] = positions[frame]
             data.qpos[3:7] = rotations[frame]
             data.qpos[7:] = reference["joint_pos"][frame]
