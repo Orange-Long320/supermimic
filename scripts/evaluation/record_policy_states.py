@@ -27,6 +27,7 @@ def main():
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--hold-last-reference',action='store_true',help='Ignore clip-end timeout and hold its last reference state; original physical failures still stop capture')
     p.add_argument('--record-observations',action='store_true')
+    p.add_argument('--residual-commands',type=Path,help='Explicit 50 Hz additive action proposal; marks capture as hybrid control')
     p.add_argument('--prefix-trace',type=Path,help='Directory containing recorded 50 Hz actions and initial native state')
     p.add_argument('--prefix-until',type=float,default=0.,help='Keep recorded commands until this time, then blend back to the live policy')
     p.add_argument('--prefix-blend',type=float,default=.08)
@@ -35,7 +36,9 @@ def main():
     if args.seconds<=0 or args.start_frame<0:p.error('Invalid duration or start frame')
     if args.prefix_trace and (args.prefix_until<=0 or args.prefix_blend<0):p.error('Prefix needs positive duration and nonnegative blending')
     if not args.prefix_trace and (args.prefix_until or args.prefix_joints):p.error('Prefix options require a recorded trace')
+    if args.residual_commands and (args.prefix_trace or args.start_frame):p.error('Residual proposals require frame zero and no recorded prefix')
     args.out.mkdir(parents=True,exist_ok=False)
+    as_run_source=Path(__file__).read_bytes()
     torch.set_num_threads(1)
     from supermimic.envs import SuperMimicEnvCfgArgs,make_env
     from supermimic.eval.benchmark import load_policy_from_checkpoint
@@ -81,6 +84,18 @@ def main():
         initial_v=env.sim.data.qvel[0].cpu().numpy().copy()
         np.savez(args.out/'initial-state.npz',state=np.r_[initial_q,initial_v][None],qpos=initial_q,qvel=initial_v)
         prefix_actions=None;prefix_details=None;prefix_errors=[];observation_trace=[]
+        residual_actions=None;residual_details=None
+        if args.residual_commands:
+            with np.load(args.residual_commands) as proposal:
+                if str(proposal['source_checkpoint_sha256'])!=checkpoint_sha or str(proposal['reference_sha256'])!=hashlib.sha256(args.source.read_bytes()).hexdigest():
+                    raise ValueError('Residual proposal uses a different policy/reference')
+                residual_actions=proposal['actions'].copy()
+                if list(proposal['joint_names'])!=list(PROFILE['joint_names']) or abs(float(proposal['fps'][0])-50)>1e-6:
+                    raise ValueError('Residual joint order or control clock differs')
+                if residual_actions.shape!=(round(args.seconds/env.step_dt),len(PROFILE['joint_names'])) or not np.isfinite(residual_actions).all():
+                    raise ValueError('Residual must cover the complete capture with finite actions')
+            residual_details={'path':str(args.residual_commands),'sha256':hashlib.sha256(args.residual_commands.read_bytes()).hexdigest(),
+                'kind':'ordinary additive position action with live frozen-policy feedback; no state rewrite'}
         if args.prefix_trace:
             prefix_path=args.prefix_trace/'baseline-trajectory.npz'
             prefix=np.load(prefix_path);prefix_physics=np.load(args.prefix_trace/'baseline-physics.npz')
@@ -120,6 +135,8 @@ def main():
                 if args.record_observations:
                     observation_trace.append((obs['policy'][0].cpu().numpy().copy(),obs['goal'][0].cpu().numpy().copy(),int(cmd.frame[0])))
                 action=policy(obs['policy'],obs['goal'])
+                if residual_actions is not None:
+                    action=action+torch.as_tensor(residual_actions[step],dtype=action.dtype,device=action.device)[None]
                 t=step*env.step_dt
                 if prefix_actions is not None and t<args.prefix_until+args.prefix_blend:
                     fraction=min(max((t-args.prefix_until)/args.prefix_blend,0),1) if args.prefix_blend else 0.
@@ -154,7 +171,8 @@ def main():
             'maximum_soft_violation':float(a[:,12].max()),'maximum_speed_ratio':float(a[:,13].max()),
             'maximum_effort_ratio':float(a[:,14].max()),'approved_for_training':False,
             'maximum_hard_violation':float(a[:,15].max()),'hard_joint_ranges_rad':model.jnt_range[1:].tolist(),
-            'policy_alone':prefix_details is None,'recorded_prefix':prefix_details,
+            'policy_alone':prefix_details is None and residual_details is None,'recorded_prefix':prefix_details,
+            'recorded_residual':residual_details,
             'prefix_reproduction_maximum_qpos_error':max(prefix_errors) if prefix_errors else None,
             'maximum_foot_compression_m':float(max(-a[:,7:9].min(),0)),
             'metric_state_alignment':'Independent native mj_forward of each post-integration recorded state; execution sim untouched',
@@ -163,7 +181,7 @@ def main():
                 'soft_violation','speed_ratio','effort_ratio','hard_violation'],
             'arguments':{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}}
         (args.out/'result.json').write_text(json.dumps(report,indent=2))
-        (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
+        (args.out/'as-run.py').write_bytes(as_run_source)
         print(json.dumps(report),flush=True)
     finally:env.close()
 
