@@ -29,6 +29,7 @@ def main():
     p.add_argument('--motion',required=True)
     p.add_argument('--frames',type=int,default=5)
     p.add_argument('--penetration-target-m',type=float,default=.0008,help='IK target tighter than the independent 1mm collision gate')
+    p.add_argument('--source-flat-foot-lock',action='store_true',help='Pin sole marker heights only during source-confirmed flat support')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
     if a.out.exists() or a.frames<2 or not 0<a.penetration_target_m<.001:p.error('New output, at least two frames, and a positive IK penetration target below 1mm required')
@@ -37,6 +38,7 @@ def main():
     from scipy.spatial.transform import Rotation
     from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
     from holosoma_retargeting.src.utils import extract_foot_sticking_sequence_velocity
+    from holosoma_retargeting.config_types.retargeter import FootLockConfig
     class X2Retargeter(InteractionMeshRetargeter):
         def _build_transform_qdot_to_qvel_fast(self, use_world_omega=True):
             # Retain the upstream default quaternion formula, checked below
@@ -61,10 +63,21 @@ def main():
     if fps!=30:raise ValueError('The upstream core currently writes 30Hz; explicit resampling is needed for other sources')
     g1=mujoco.MjModel.from_binary_path(str(a.source_audit/'source-g1.mjb'));gd=mujoco.MjData(g1)
     source_columns=[int(g1.jnt_qposadr[g1.joint(n).id]) for n in source_names]
-    ids=[g1.body(source_mapping[n]).id for n in demo_names];landmarks=[]
+    ids=[g1.body(source_mapping[n]).id for n in demo_names];landmarks=[];source_soles=[]
+    sole_bodies=[[g1.body(f'{side}_ankle_roll_sphere_{k}_link').id for k in range(1,5)] for side in ('left','right')]
+    sole_radii=[]
+    for bodies in sole_bodies:
+        radii=[]
+        for body in bodies:
+            geoms=[g for g in range(g1.ngeom) if int(g1.geom_bodyid[g])==body and g1.geom_contype[g]]
+            if not geoms or any(int(g1.geom_type[g])!=int(mujoco.mjtGeom.mjGEOM_SPHERE) for g in geoms):raise ValueError('Expected source sole spheres')
+            radii.append(float(g1.geom_size[geoms[0],0]))
+        sole_radii.append(radii)
     for pose in poses:
         gd.qpos[:3]=pose[4:7];gd.qpos[3:7]=pose[:4];gd.qpos[source_columns]=pose[7:];mujoco.mj_kinematics(g1,gd)
         landmarks.append(gd.xpos[ids].copy()*scale)
+        bottoms=gd.xpos[np.array(sole_bodies)].copy();bottoms[:,:,2]-=np.asarray(sole_radii)
+        source_soles.append(bottoms)
     landmarks=np.asarray(landmarks)
     spec=mujoco.MjSpec.from_file(str(a.x2_model/'x2_omni_markers.xml'))
     spec.worldbody.add_geom(name='ground',type=mujoco.mjtGeom.mjGEOM_PLANE,size=(0,0,.05),contype=1,conaffinity=1)
@@ -98,7 +111,24 @@ def main():
     constants=SimpleNamespace(ROBOT_URDF_FILE=str(a.x2_model/'x2.urdf'),OBJECT_NAME='multi_boxes',SCENE_XML_FILE=str(scene),ROBOT_DOF=31,
         FOOT_STICKING_LINKS=meta['foot_sticking_links'],DEMO_JOINTS=demo_names,JOINTS_MAPPING=mapping,
         MANUAL_LB={str(i):float(v) for i,v in enumerate(lower)},MANUAL_UB={str(i):float(v) for i,v in enumerate(upper)},MANUAL_COST={},NOMINAL_TRACKING_INDICES=np.array([],dtype=int))
-    retargeter=X2Retargeter(constants,object_urdf_path=None,visualize=False,debug=False,penetration_tolerance=a.penetration_target_m)
+    windows={'left':[],'right':[]}
+    if a.source_flat_foot_lock:
+        for side in range(2):
+            heights=[]
+            for soles in source_soles:
+                points=soles[side];surfaces=[0.] if abs(points[:,2]).max()<=.003 else []
+                for box in row['boxes']:
+                    relative=(points-np.asarray(box['center']))@np.asarray(box['rotation_world']);half=np.asarray(box['half_size'])
+                    if (abs(relative[:,:2])<=half[:2]).all() and abs(relative[:,2]-half[2]).max()<=.003:surfaces.append(float(box['high'][2]))
+                heights.append(max(surfaces)*scale+.0005 if surfaces else None)
+            start=0
+            for end in range(1,len(heights)+1):
+                if end==len(heights) or heights[end]!=heights[start]:
+                    if heights[start] is not None:windows[('left','right')[side]].append((start,end-1,heights[start]))
+                    start=end
+    (a.out/'source-flat-support.json').write_text(json.dumps({'enabled':a.source_flat_foot_lock,'windows':windows,'source_sphere_bottom_tolerance_m':.003,'x2_marker_height_offset_m':.0005},indent=2)+'\n')
+    retargeter=X2Retargeter(constants,object_urdf_path=None,visualize=False,debug=False,penetration_tolerance=a.penetration_target_m,
+        foot_lock=FootLockConfig(enable=a.source_flat_foot_lock,windows=windows,tolerance=.001))
     # Complete qpos-address bounds avoid the upstream named-free-joint indexing
     # assumption; every actuated range is checked against the actual X2 model.
     np.testing.assert_array_equal(retargeter.q_a_lb,lower);np.testing.assert_array_equal(retargeter.q_a_ub,upper)
