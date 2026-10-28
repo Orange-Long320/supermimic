@@ -191,7 +191,7 @@ def main(early: Path, late: Path, out: Path, seconds: float = 12., device: str =
                             "predicted_reward_rate": float(predicted_return.reshape(len(origins), n)[:, ids].mean() / horizon),
                             "native_reward_rate": float(native_return[:, ids].mean() / horizon)})
         table = cmd.reference_velocity
-        projected, reference_valid = bounded_reference(table, torch.arange(len(table), device=device), vc)
+        _, reference_valid = bounded_reference(table, torch.arange(len(table), device=device), vc)
         coverage = []
         for clip in cmd.library.clips:
             indices = slice(clip.start, clip.end)
