@@ -34,9 +34,10 @@ def main():
     p.add_argument('--stance-constraints',action='store_true',help='Constrain planted foot pose, preventing contact area loss from foot tilt')
     p.add_argument('--stance-ankle-effort',action='store_true',help='Keep single-support ankle upstream gravity moment below 90 percent motor cap')
     p.add_argument('--constraint-tolerance',type=float,default=.0005)
+    p.add_argument('--initial-constraint-weight',type=float,default=1500.,help='Initial square-root augmented constraint penalty; use recorded final weight for a warm restart')
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
-    if a.constraint_rounds<1 or a.constraint_tolerance<=0:p.error('Positive constraint rounds/tolerance required')
+    if a.constraint_rounds<1 or a.constraint_tolerance<=0 or a.initial_constraint_weight<=0:p.error('Positive constraint rounds/tolerance/weight required')
     if a.shoulder_reference_limit_deg is not None and (not a.free_shoulders or a.shoulder_reference_limit_deg<=0):p.error('A positive shoulder reference limit requires free shoulders')
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
@@ -263,7 +264,7 @@ def main():
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (a.out/'launch.json').write_text(json.dumps({'argv':[sys.executable,*sys.argv],'pid':os.getpid(),'source_sha256':hashlib.sha256(a.source.read_bytes()).hexdigest()},indent=2)+'\n')
     cache={};calls=0
-    penalty=1500.**2;lagrange=np.zeros((n,2*len(geoms)+max_faces+stance_count+ankle_count+waist_count));constraint_history=[]
+    penalty=a.initial_constraint_weight**2;lagrange=np.zeros((n,2*len(geoms)+max_faces+stance_count+ankle_count+waist_count));constraint_history=[]
 
     def evaluate(flat):
         nonlocal calls
