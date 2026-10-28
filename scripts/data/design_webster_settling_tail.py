@@ -76,6 +76,8 @@ def main():
                 heights.append([min(float((vertices@data.geom_xmat[g].reshape(3,3).T+data.geom_xpos[g])[:,2].min())
                                     for g,vertices,kind in meshes if kind==group) for group in ['left','right','nonfoot']])
             poses=np.asarray(poses);velocities=np.asarray(velocities);heights=np.asarray(heights)
+            endpoint_delta=np.zeros(model.nv)
+            mujoco.mj_differentiatePos(model,endpoint_delta,1.,poses[-1],end)
             export_qpos_motion(model,poses,folder/'tail-fk.npz',fps,qvel=velocities,source=args.source)
             with np.load(folder/'tail-fk.npz') as z:tail={k:z[k].copy() for k in z.files}
             for key in ['body_names','joint_names']:np.testing.assert_array_equal(tail[key],source[key])
@@ -91,7 +93,7 @@ def main():
                   'joint_speed_ratio':speed_ratio,'minimum_foot_height_m':float(heights[:,:2].min()),
                   'minimum_nonfoot_height_m':float(heights[:,2].min()),
                   'maximum_lower_sole_height_m':float(heights[:,:2].min(axis=1).max()),
-                  'endpoint_pose_error':float(abs(poses[-1]-end).max()),'prefix_unchanged':True,
+                  'endpoint_pose_error':float(abs(endpoint_delta).max()),'prefix_unchanged':True,
                   'approved_for_training':False}
             item['kinematic_screen_passed']=bool(hard<1e-9 and speed_ratio<=1 and heights[:,:2].min()>-.004
                                                 and heights[:,2].min()>.005 and heights[:,:2].min(axis=1).max()<.02)
