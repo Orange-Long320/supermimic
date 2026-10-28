@@ -31,6 +31,7 @@ def main():
     p.add_argument('--waist-effort',action='store_true',help='Reserve 20 percent waist motor effort above gravity demand')
     p.add_argument('--free-shoulders',action='store_true',help='Allow shoulder pitch/roll counterbalance without changing contact order')
     p.add_argument('--stance-constraints',action='store_true',help='Constrain planted foot pose, preventing contact area loss from foot tilt')
+    p.add_argument('--stance-ankle-effort',action='store_true',help='Keep single-support ankle upstream gravity moment below 90 percent motor cap')
     p.add_argument('--constraint-tolerance',type=float,default=.0005)
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
@@ -203,6 +204,15 @@ def main():
     if stance_count:
         if not a.static_balance:raise ValueError('Stance constraints require explicit support phases')
         width+=stance_count
+    ankle_count=8 if a.stance_ankle_effort else 0
+    ankle_info=[]
+    if ankle_count:
+        if not a.static_balance:raise ValueError('Ankle moment constraints require explicit support phases')
+        for side in ('left','right'):
+            for axis in ('pitch','roll'):
+                name=side+'_ankle_'+axis+'_joint';jid=m.joint(name).id
+                ankle_info.append((jid,int(m.jnt_bodyid[jid]),PROFILE['effort_limit'][name]))
+        width+=ankle_count
     waist_count=6 if a.waist_effort else 0
     if waist_count:
         gravity_model=spec.compile();gravity_model.opt.disableflags|=int(mujoco.mjtDisableBit.mjDSBL_CONTACT)|int(mujoco.mjtDisableBit.mjDSBL_LIMIT)
@@ -244,7 +254,7 @@ def main():
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (a.out/'launch.json').write_text(json.dumps({'argv':[sys.executable,*sys.argv],'pid':os.getpid(),'source_sha256':hashlib.sha256(a.source.read_bytes()).hexdigest()},indent=2)+'\n')
     cache={};calls=0
-    penalty=1500.**2;lagrange=np.zeros((n,2*len(geoms)+max_faces+stance_count+waist_count));constraint_history=[]
+    penalty=1500.**2;lagrange=np.zeros((n,2*len(geoms)+max_faces+stance_count+ankle_count+waist_count));constraint_history=[]
 
     def evaluate(flat):
         nonlocal calls
@@ -281,6 +291,7 @@ def main():
                 jac[row:row+3,cols]=rotation_jac*100;row+=3
                 foot_errors.append(np.r_[position_error,error]);foot_jacs.append(np.r_[jp@mapping,rotation_jac])
             mujoco.mj_jacSubtreeCom(m,d,jp,root)
+            root_com_jac=jp.copy()
             r[row:row+2]=(d.subtree_com[root,:2]-com[i,:2])*com_weight
             jac[row:row+2,cols]=jp[:2]@mapping*com_weight;row+=2
             com_jac=jp[:2]@mapping
@@ -323,6 +334,26 @@ def main():
                             violations[i,collision_column]=gap;shifted=gap+lagrange[i,collision_column]/penalty
                             if active and shifted>0:r[row]=shifted*np.sqrt(penalty);jac[row,cols]=sign*foot_jacs[j][k]*units[k]*np.sqrt(penalty)
                             row+=1;collision_column+=1
+            if ankle_count:
+                mass=float(m.body_subtreemass[root]);gravity=m.opt.gravity
+                def skew_of(vector):
+                    x,y,z=vector;return np.array([[0,-z,y],[z,0,-x],[-y,x,0]])
+                for k,(jid,body,cap) in enumerate(ankle_info):
+                    side=k//2
+                    active=contact_strength[i,side]>=1-1e-8 and contact_strength[i,1-side]<1-1e-8
+                    if active:
+                        subtree_mass=float(m.body_subtreemass[body]);upstream_mass=mass-subtree_mass
+                        lever=mass*d.subtree_com[root]-subtree_mass*d.subtree_com[body]-upstream_mass*d.xanchor[jid]
+                        mujoco.mj_jacSubtreeCom(m,d,jp,body);lever_jac=mass*root_com_jac-subtree_mass*jp
+                        mujoco.mj_jac(m,d,jp,jr,d.xanchor[jid],body);lever_jac-=upstream_mass*jp
+                        axis=d.xaxis[jid];moment=np.cross(lever,gravity)
+                        fraction=-float(axis@moment)/cap
+                        derivative=-(moment@(-skew_of(axis)@jr)+axis@(-skew_of(gravity)@lever_jac))@mapping/cap
+                    for sign in (1.,-1.):
+                        gap=(sign*fraction-.9)*.05 if active else -1.
+                        violations[i,collision_column]=gap;shifted=gap+lagrange[i,collision_column]/penalty
+                        if active and shifted>0:r[row]=shifted*np.sqrt(penalty);jac[row,cols]=sign*derivative*.05*np.sqrt(penalty)
+                        row+=1;collision_column+=1
             if waist_count:
                 gravity_data.qpos[:]=q;gravity_data.qvel[:]=0;gravity_data.qacc[:]=0
                 mujoco.mj_inverse(gravity_model,gravity_data)
