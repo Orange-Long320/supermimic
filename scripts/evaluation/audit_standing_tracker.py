@@ -63,7 +63,7 @@ def main():
             'hard_violation':float(np.maximum(np.maximum(lo-d.qpos[7:],d.qpos[7:]-hi),0).max()),
             'joint_speed_ratio':float((abs(d.qvel[6:])/speed).max()),
             'motor_ratio':float((abs(d.actuator_force)/effort).max()),'heights':heights,'foot_loads_n':loads,
-            'loaded_contact_area_m2':areas,'sole_tilt_rad':{s:max(v,default=0.) for s,v in sole_tilt.items()}})
+            'loaded_contact_area_m2':areas,'sole_tilt_rad':{s:max(v) if v else None for s,v in sole_tilt.items()}})
     tail=rows[-round(1/dt):]
     physical={'maximum_hard_violation_rad':max((x['hard_violation'] for x in rows),default=0),
         'maximum_joint_speed_ratio':max((x['joint_speed_ratio'] for x in rows),default=0),
@@ -76,13 +76,14 @@ def main():
         'min_com_height_m':min((x['com_z'] for x in tail),default=0),
         'minimum_bilateral_load_n':min((min(x['foot_loads_n'].values()) for x in tail),default=0),
         'minimum_loaded_contact_area_m2':min((min(x['loaded_contact_area_m2'].values()) for x in tail),default=0),
-        'maximum_sole_tilt_rad':max((max(x['sole_tilt_rad'].values()) for x in tail),default=float('inf'))}
+        'maximum_sole_tilt_rad':max((max(x['sole_tilt_rad'].values()) for x in tail),default=None)
+            if tail and all(all(v is not None for v in x['sole_tilt_rad'].values()) for x in tail) else None}
     passed_physical=bool(physical['maximum_hard_violation_rad']<1e-4 and physical['maximum_joint_speed_ratio']<=1
         and physical['maximum_motor_ratio']<=1.00001 and physical['minimum_foot_height_m']>-.005 and physical['minimum_nonfoot_height_m']>.005)
     passed_steady=bool(len(tail)==round(1/dt) and steady['max_com_speed_m_s']<.02 and
         steady['max_root_angular_speed_rad_s']<.05 and steady['min_root_up_z']>.98 and steady['min_com_height_m']>.55
         and steady['minimum_bilateral_load_n']>10 and steady['minimum_loaded_contact_area_m2']>1e-4
-        and steady['maximum_sole_tilt_rad']<np.radians(2))
+        and steady['maximum_sole_tilt_rad'] is not None and steady['maximum_sole_tilt_rad']<np.radians(2))
     result={'trace':str(args.trace),'model_sha256':hashlib.sha256(model_path.read_bytes()).hexdigest(),
         'trajectory_sha256':hashlib.sha256((args.trace/'trajectory.npz').read_bytes()).hexdigest(),
         'seconds':len(rows)*dt,'controller_status':trace_report['status'],'physical':physical,'steady_last_second':steady,
