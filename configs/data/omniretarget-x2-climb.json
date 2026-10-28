@@ -1,0 +1,42 @@
+{
+  "task": "x2_ultra_omniretarget_climbing",
+  "robot": "x2_ultra",
+  "target_height_m": 0.45,
+  "height_is_hard_constraint": false,
+  "height_preference_source": "User: any height is acceptable, prioritize 45 cm",
+  "scope": "Simulation; source screening, X2 adaptation and validation before policy training",
+  "dataset": {
+    "repository": "omniretarget/OmniRetarget_Dataset",
+    "revision": "135259130158f1cb1799e4ab9b6566c938285fc9",
+    "subset": "robot-terrain.zip",
+    "archive_sha256": "f30bdc915287547dbb2225bdb4efe323dbfcc2237e2a4e82c7482dd05402aea6",
+    "motion_count": 145,
+    "license_from_card": "MIT",
+    "source_layout": "qw qx qy qz x y z followed by 29 G1 joints; not X2 qpos"
+  },
+  "retargeting_source": {
+    "repository": "amazon-far/holosoma",
+    "revision": "b739a6cb7b1f8b9918669f8f776edb1855bfda1a",
+    "package": "src/holosoma_retargeting",
+    "raw_climbing_demo_count": 5,
+    "x2_support": "Requires custom robot configuration and mapping; not yet verified"
+  },
+  "server": {
+    "raw": "/home/2025-Long.xh/HHD/data/supermimic/data/external/omniretarget_20261028_r1/raw",
+    "screening": "/home/2025-Long.xh/HHD/data/supermimic/logs/omni_terrain_screen_20261028_r2/audit",
+    "environment": "/home/2025-Long.xh/HHD/venvs/supermimic-omniretarget"
+  },
+  "candidate_motions": [
+    {
+      "motion": "robot-terrain/climb_14_z_scale_1.0.npz",
+      "approximate_platform_top_m": 0.475,
+      "status": "Preferred height candidate; approach and hand support need visual review"
+    },
+    {
+      "motion": "robot-terrain/climb_06_z_scale_0.9.npz",
+      "approximate_platform_top_m": 0.314,
+      "status": "Ground-entry baseline candidate; no hand proximity detected by coarse FK screening"
+    }
+  ],
+  "training_approved": false
+}
