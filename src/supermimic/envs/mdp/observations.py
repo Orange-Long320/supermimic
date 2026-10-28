@@ -14,3 +14,10 @@ def goal_future_frames(env: ManagerBasedRlEnv, command_name: str) -> torch.Tenso
     """(N, K*68) future reference-frame features (plan D5)."""
     command = cast(MultiClipMotionCommand, env.command_manager.get_term(command_name))
     return command.goal
+
+
+def fixed_box_goal(env: ManagerBasedRlEnv, box) -> torch.Tensor:
+    from supermimic.envs.box_scene import box_features
+
+    qpos = env.sim.data.qpos[:]
+    return box_features(qpos[:, :3] - env.scene.env_origins, qpos[:, 3:7], box)

@@ -16,6 +16,7 @@ from __future__ import annotations
 from supermimic.robots.dimensions import NJ, NQ, NV, STATE_DIM, FEAT_DIM, DELTA_DIM, XI_DIM, OBS_DIM, GOAL_FEAT_DIM, PROFILE, ROBOT
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
@@ -39,6 +40,7 @@ from supermimic.envs.mdp import observations as sm_obs
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
 from supermimic.robots.assets import get_robot_cfg
+from supermimic.envs.box_scene import FixedBox
 
 class QuietSimulationCfg(SimulationCfg):
     """SimulationCfg that disables MuJoCo Warp's per-step overflow printf (a kernel build-time constant,
@@ -102,6 +104,8 @@ class SuperMimicEnvCfgArgs:
     compact_library: bool = False
     anchor_obs: bool = False  # add BeyondMimic anchor-relative pose (9) to the goal group (plan D5 alt.)
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/evaluation/play.py)
+    box: FixedBox | None = None
+    sole_profile: Path | None = None
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
@@ -139,6 +143,9 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             enable_corruption=a.obs_noise,
         ),
     }
+    if a.box is not None:
+        observations["goal"].terms["box"] = ObservationTermCfg(
+            func=sm_obs.fixed_box_goal, params={"box": a.box})
 
     # ---------------------------------------------------------------- actions
     actions = {
@@ -240,7 +247,12 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": FOOT_GEOM_REGEX, "com_body_name": ANCHOR_BODY})
 
     cfg = ManagerBasedRlEnvCfg(
-        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": get_robot_cfg()}),
+        # Warp worlds are independent. A shared zero origin places the one box
+        # and robot at the same relative coordinates in every world.
+        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"),
+                       env_spacing=0.0 if a.box else 2.0,
+                       spec_fn=a.box.add_to_spec if a.box else None,
+                       num_envs=a.num_envs, entities={"robot": get_robot_cfg(a.sole_profile)}),
         observations=observations,
         actions=actions,
         commands=commands,
@@ -261,4 +273,8 @@ def make_env(a: SuperMimicEnvCfgArgs, device: str = "cuda:0") -> ManagerBasedRlE
     from mjlab.utils.torch import configure_torch_backends
 
     configure_torch_backends()
-    return ManagerBasedRlEnv(make_env_cfg(a), device=device)
+    env = ManagerBasedRlEnv(make_env_cfg(a), device=device)
+    if a.box is not None and bool((env.scene.env_origins != 0).any()):
+        env.close()
+        raise ValueError("Fixed-box worlds require zero environment origins")
+    return env

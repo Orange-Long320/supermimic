@@ -1,8 +1,4 @@
-"""Explicit fixed box geometry for scene/reference diagnostics.
-
-This does not install a trainable terrain-aware task. Placement must be supplied
-after reference alignment; dimensions use the user's approach-facing convention.
-"""
+"""Fixed box geometry and shared simulator/imagination scene features."""
 from dataclasses import dataclass
 import math
 
@@ -52,3 +48,24 @@ class FixedBox:
             self.front_x + margin <= x <= self.front_x + self.depth - margin
             and abs(y - self.center_y) <= self.width / 2 - margin
         )
+
+
+BOX_FEATURE_DIM = 9
+
+
+def box_features(root_pos, root_quat, box: FixedBox):
+    """Centre offset, box +x axis in root heading frame, and half sizes (metres).
+
+    Positions are relative to the environment origin. Sharing this function with
+    imagination prevents the policy and dynamics from losing box-relative xy/yaw.
+    """
+    import torch
+    from supermimic.kinematics.rotations import heading_quat, quat_apply_inverse
+
+    center = root_pos.new_tensor(box.center)
+    axis = torch.zeros_like(root_pos)
+    axis[..., 0] = 1
+    heading = heading_quat(root_quat)
+    return torch.cat((quat_apply_inverse(heading, center - root_pos),
+                      quat_apply_inverse(heading, axis),
+                      root_pos.new_tensor(box.half_size).expand_as(root_pos)), dim=-1)

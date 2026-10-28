@@ -60,12 +60,15 @@ def imagine(
 
     def make_goal(frame_t, ref_t, anchor_pose):
         g = lib.goal_window(frame_t, future_frames)
-        if not anchor_obs:
-            return g
-        rel = anchor_relative_obs(anchor_pose[..., 0:3], anchor_pose[..., 3:7], ref_t.body_pos_w[..., ai, :], ref_t.body_quat_w[..., ai, :])
-        if obs_noise:
-            rel = rel + (torch.rand_like(rel) * 2 - 1) * anchor_noise_half
-        return torch.cat([g, rel], dim=-1)
+        if anchor_obs:
+            rel = anchor_relative_obs(anchor_pose[..., 0:3], anchor_pose[..., 3:7], ref_t.body_pos_w[..., ai, :], ref_t.body_quat_w[..., ai, :])
+            if obs_noise:
+                rel = rel + (torch.rand_like(rel) * 2 - 1) * anchor_noise_half
+            g = torch.cat([g, rel], dim=-1)
+        if wm.spec.cfg.box is not None:
+            from supermimic.envs.box_scene import box_features
+            g = torch.cat([g, box_features(s[..., :3], s[..., 3:7], wm.spec.cfg.box)], dim=-1)
+        return g
 
     # Initial observation history from the logged states/actions (noise re-sampled per frame).
     hist = [add_noise(analytic_observation(start.hist_states[i], start.hist_actions[i], start.xi, q0)) for i in range(start.hist_states.shape[0])]

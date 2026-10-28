@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from supermimic.imagination.policy_trainer import PolicyTrainerCfg
+from supermimic.envs.box_scene import FixedBox
 from supermimic.policy.nets import CriticCfg, PolicyCfg
 from supermimic.robots.paths import lafan_npz_dir, robot_name
 from supermimic.world_model.wm_trainer import WMTrainerCfg
@@ -38,6 +39,8 @@ class EnvCfg:
     future_frames: int = 10
     compact_library: bool = False
     anchor_obs: bool = False
+    box: FixedBox | None = None
+    sole_profile: Path | None = None
 
 
 @dataclass

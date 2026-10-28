@@ -17,6 +17,7 @@ from supermimic.eval.benchmark import (
     summarize,
 )
 from supermimic.robots.paths import lafan_npz_dir
+from supermimic.envs.box_scene import FixedBox
 
 
 def main(
@@ -41,6 +42,8 @@ def main(
         num_envs=num_envs,
         future_frames=cfg["env"]["future_frames"],
         anchor_obs=cfg["env"].get("anchor_obs", False),
+        box=FixedBox(**cfg["env"]["box"]) if cfg["env"].get("box") else None,
+        sole_profile=Path(cfg["env"]["sole_profile"]) if cfg["env"].get("sole_profile") else None,
     )
     s = summarize(results)
     print(

@@ -30,7 +30,11 @@ from supermimic.world_model.world_model import WorldModel
 class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
-        cfg.policy.goal_dim = cfg.env.future_frames * GOAL_FEAT_DIM + (9 if cfg.env.anchor_obs else 0)
+        from supermimic.envs.box_scene import BOX_FEATURE_DIM
+        if cfg.world_model.state_spec.box not in (None, cfg.env.box):
+            raise ValueError("Environment and world model boxes differ")
+        cfg.world_model.state_spec.box = cfg.env.box
+        cfg.policy.goal_dim = cfg.env.future_frames * GOAL_FEAT_DIM + (9 if cfg.env.anchor_obs else 0) + (BOX_FEATURE_DIM if cfg.env.box else 0)
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
         self.rank, local_rank, self.world = init_distributed()
         self.is_main = self.rank == 0
@@ -71,6 +75,8 @@ class Trainer:
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,
+                box=cfg.env.box,
+                sole_profile=cfg.env.sole_profile,
                 seed=cfg.seed + 1000 * self.rank,
             ),
             device=self.device,
@@ -86,7 +92,7 @@ class Trainer:
         heads = AnalyticHeads(fk, TRACKED_BODIES, ANCHOR_BODY, ROOT_BODY, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         self.wm = WorldModel(cfg.world_model, heads, self.device)
         self.policy = Policy(cfg.policy).to(self.device)
-        self.critic = Critic(cfg.critic, pcfg=cfg.policy).to(self.device)
+        self.critic = Critic(cfg.critic, feat_dim=self.wm.spec.feature_dim, pcfg=cfg.policy).to(self.device)
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)
@@ -141,6 +147,12 @@ class Trainer:
 
     def load(self, path: Path) -> None:
         ck = torch.load(path, map_location=self.device, weights_only=False)
+        if ck["config"]["env"].get("box") != asdict(self.cfg.env).get("box"):
+            raise ValueError("Full resume requires the same box geometry and placement")
+        old_sole = ck["config"]["env"].get("sole_profile")
+        new_sole = self.cfg.env.sole_profile
+        if bool(old_sole) != bool(new_sole) or (old_sole and Path(old_sole).read_bytes() != Path(new_sole).read_bytes()):
+            raise ValueError("Full resume requires the same sole collision profile")
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])

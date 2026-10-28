@@ -44,6 +44,7 @@ def main():
 
     from supermimic.envs import SuperMimicEnvCfgArgs, make_env
     from supermimic.eval.benchmark import load_policy_from_checkpoint
+    from supermimic.envs.box_scene import FixedBox
 
     checkpoint_stat = args.ckpt.stat()
     with args.ckpt.open("rb") as checkpoint_file:
@@ -68,6 +69,9 @@ def main():
             record_transitions=False,
             episode_length_s=1e5,
             anchor_obs=cfg["env"].get("anchor_obs", False),
+            future_frames=cfg["env"]["future_frames"],
+            box=FixedBox(**cfg["env"]["box"]) if cfg["env"].get("box") else None,
+            sole_profile=Path(cfg["env"]["sole_profile"]) if cfg["env"].get("sole_profile") else None,
         ),
         "cuda:0",
     )

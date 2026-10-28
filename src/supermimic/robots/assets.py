@@ -1,6 +1,7 @@
 """mjlab entity configurations that load geometry from local robot assets."""
 
 import mujoco
+from functools import partial
 from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.spec_config import CollisionCfg
@@ -8,19 +9,19 @@ from mjlab.utils.spec_config import CollisionCfg
 from supermimic.robots.dimensions import PROFILE, ROBOT, robot_xml_path
 
 
-def get_spec():
+def get_spec(sole_profile=None):
     from supermimic.robots.sole_collision import apply_sole_box_profile
-    return apply_sole_box_profile(mujoco.MjSpec.from_file(str(robot_xml_path())))
+    return apply_sole_box_profile(mujoco.MjSpec.from_file(str(robot_xml_path())), sole_profile)
 
 
-def get_robot_cfg():
+def get_robot_cfg(sole_profile=None):
     if ROBOT == "g1":
         from mjlab.asset_zoo.robots import get_g1_robot_cfg
 
         # Preserve the pinned G1 actuator, initial-state and collision settings.
         # Only the geometry source changes to our independently managed copy.
         cfg = get_g1_robot_cfg()
-        cfg.spec_fn = get_spec
+        cfg.spec_fn = partial(get_spec, sole_profile)
         return cfg
     actuators = tuple(
         BuiltinPositionActuatorCfg(
@@ -33,7 +34,7 @@ def get_robot_cfg():
         for n in PROFILE["joint_names"]
     )
     return EntityCfg(
-        spec_fn=get_spec,
+        spec_fn=partial(get_spec, sole_profile),
         init_state=EntityCfg.InitialStateCfg(
             pos=(0, 0, PROFILE["standing_height"]),
             joint_pos=PROFILE["default_joint_pos"],
