@@ -2,12 +2,16 @@
 
 Stops at the first original termination; never includes an automatic reset.
 No reference retiming, residual actions, or physics changes are applied.
+Optional final-reference holding ignores only clip-end timeout, retaining all
+physical failure checks. Geometry is measured in a separate native data object.
 """
 import argparse
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import mujoco
 import numpy as np
 import torch
 
@@ -20,6 +24,7 @@ def main():
     p.add_argument('--start-frame',type=int,default=0)
     p.add_argument('--seconds',type=float,default=4.)
     p.add_argument('--device',default='cuda:0')
+    p.add_argument('--hold-last-reference',action='store_true',help='Ignore clip-end timeout and hold its last reference state; original physical failures still stop capture')
     args=p.parse_args()
     if args.seconds<=0 or args.start_frame<0:p.error('Invalid duration or start frame')
     args.out.mkdir(parents=True,exist_ok=False)
@@ -46,11 +51,14 @@ def main():
         original_compute=env.termination_manager.compute
         failures=[]
         def stop_without_reset():
+            if args.hold_last_reference:cmd.clip_end.zero_()
             done=original_compute()
             if bool(done.any()):failures.append(len(physics))
             return torch.zeros_like(done)
         env.termination_manager.compute=stop_without_reset
         model=env.sim.mj_model
+        mujoco.mj_saveModel(model,str(args.out/'native-model.mjb'))
+        measured_data=mujoco.MjData(model)
         metrics=BatchedDesignMetrics(model,torch.device(args.device))
         centre=model.jnt_range[1:].mean(axis=1)
         half=.45*np.diff(model.jnt_range[1:],axis=1).ravel()
@@ -59,16 +67,24 @@ def main():
         assert [model.joint(i).name.rsplit('/',1)[-1] for i in range(1,model.njnt)]==list(PROFILE['joint_names'])
         effort=np.array([PROFILE['effort_limit'][n] for n in PROFILE['joint_names']])
         speed=np.array([PROFILE['velocity_limit'][n] for n in PROFILE['joint_names']])
-        physics=[];positions=[];velocities=[];actions=[]
+        physics=[];positions=[];velocities=[];actions=[];forces=[]
         origin=env.scene.env_origins[0].cpu().numpy()
+        initial_q=env.sim.data.qpos[0].cpu().numpy().copy();initial_q[:3]-=origin
+        initial_v=env.sim.data.qvel[0].cpu().numpy().copy()
+        np.savez(args.out/'initial-state.npz',state=np.r_[initial_q,initial_v][None],qpos=initial_q,qvel=initial_v)
         original_step=env.sim.step
         def capture(*a,**kw):
             result=original_step(*a,**kw)
             q=env.sim.data.qpos[0].cpu().numpy().copy();q[:3]-=origin
             v=env.sim.data.qvel[0].cpu().numpy().copy()
             f=env.sim.data.actuator_force[0].cpu().numpy().copy()
-            positions.append(q);velocities.append(v)
-            physics.append(np.r_[metrics(env.sim.data)[0].cpu().numpy(),
+            positions.append(q);velocities.append(v);forces.append(f)
+            # Use a separate native data object: Warp geometry caches precede
+            # integration, and measurement must not refresh the executing sim.
+            measured_data.qpos[:]=q;measured_data.qvel[:]=v;mujoco.mj_forward(model,measured_data)
+            tensors={key:torch.as_tensor(np.array(getattr(measured_data,key)),dtype=torch.float32)[None]
+                for key in ['xpos','xquat','cvel','geom_xpos','geom_xmat','qvel']}
+            physics.append(np.r_[metrics(SimpleNamespace(**tensors))[0].cpu().numpy(),
                 np.maximum(np.maximum(lower-q[7:],q[7:]-upper),0).max(),
                 (np.abs(v[6:])/speed).max(),(np.abs(f)/effort).max(),
                 np.maximum(np.maximum(hard_lower-q[7:],q[7:]-hard_upper),0).max()])
@@ -80,9 +96,18 @@ def main():
                 actions.append(action[0].cpu().numpy().copy())
                 obs,*_=env.step(action)
                 if failures:break
+        scale=PROFILE['action_scale']
+        scale=np.array([scale[n] for n in PROFILE['joint_names']]) if isinstance(scale,dict) else scale
+        defaults=np.array([PROFILE['default_joint_pos'][n] for n in PROFILE['joint_names']])
+        ratio=round(env.step_dt/model.opt.timestep)
         np.savez(args.out/'trajectory.npz',qpos=np.array(positions),qvel=np.array(velocities),
             actions=np.array(actions),metrics=np.array(physics),physics_dt=np.array([model.opt.timestep]),
-            action_dt=np.array([env.step_dt]))
+            action_dt=np.array([env.step_dt]),state=np.c_[positions,velocities],
+            servo_target=np.repeat(defaults+np.array(actions)*scale,ratio,axis=0),fps=np.array([1/model.opt.timestep]))
+        np.savez(args.out/'baseline-physics.npz',qpos=positions,qvel=velocities,actuator_force=forces,
+            initial_qpos=initial_q,initial_qvel=initial_v,fps=np.array([1/model.opt.timestep]))
+        np.savez(args.out/'baseline-trajectory.npz',qpos=np.array(positions)[ratio-1::ratio],
+            qvel=np.array(velocities)[ratio-1::ratio],actions=actions,fps=np.array([1/env.step_dt]))
         a=np.array(physics)
         report={'checkpoint_sha256':checkpoint_sha,'source_sha256':hashlib.sha256(args.source.read_bytes()).hexdigest(),
             'start_reference_frame':args.start_frame,'physics_steps':len(physics),'actions':len(actions),
@@ -91,11 +116,14 @@ def main():
             'maximum_soft_violation':float(a[:,12].max()),'maximum_speed_ratio':float(a[:,13].max()),
             'maximum_effort_ratio':float(a[:,14].max()),'approved_for_training':False,
             'maximum_hard_violation':float(a[:,15].max()),'hard_joint_ranges_rad':model.jnt_range[1:].tolist(),
+            'maximum_foot_compression_m':float(max(-a[:,7:9].min(),0)),
+            'metric_state_alignment':'Independent native mj_forward of each post-integration recorded state; execution sim untouched',
             'metric_columns':['com_z','com_vz','H_x','H_y','H_z','com_speed','root_angular_speed',
                 'left_foot_min','right_foot_min','nonfoot_min','root_pitch','root_up_z',
                 'soft_violation','speed_ratio','effort_ratio','hard_violation'],
             'arguments':{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()}}
         (args.out/'result.json').write_text(json.dumps(report,indent=2))
+        (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
         print(json.dumps(report),flush=True)
     finally:env.close()
 
