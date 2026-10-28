@@ -6,6 +6,7 @@ contacts). A low residual is necessary, not a proof of dynamic executability.
 
 import argparse
 import json
+import hashlib
 from pathlib import Path
 
 import mujoco
@@ -20,6 +21,7 @@ def main():
     p.add_argument("--npz", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--friction", type=float, default=.8)
+    p.add_argument('--model',type=Path,help='Explicit compiled native model, including selected sole contact variant')
     p.add_argument("--box", type=Path, help="JSON containing a box dictionary from a box45 fit/audit; enables multi-height support")
     p.add_argument("--exact-contact-wrench", action="store_true",
                    help="Also minimize peak motor effort while requiring exact floating-base force/torque balance")
@@ -30,15 +32,20 @@ def main():
         box = FixedBox(**json.loads(args.box.read_text())["box"])
     from supermimic.data.motion_convert import load_g1_model
     from supermimic.robots.dimensions import PROFILE
-    model = load_g1_model()
-    for name in PROFILE["joint_names"]:
-        model.dof_armature[model.jnt_dofadr[model.joint(name).id]] = PROFILE["armature"][name]
+    model = mujoco.MjModel.from_binary_path(str(args.model)) if args.model else load_g1_model()
+    np.testing.assert_array_equal([model.joint(i).name.rsplit('/',1)[-1] for i in range(1,model.njnt)],PROFILE['joint_names'])
+    for i,name in enumerate(PROFILE["joint_names"],1):
+        dof=int(model.jnt_dofadr[i])
+        if args.model:np.testing.assert_allclose(model.dof_armature[dof],PROFILE['armature'][name],rtol=0,atol=1e-12)
+        else:model.dof_armature[dof] = PROFILE["armature"][name]
     model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_CONTACT) | int(mujoco.mjtDisableBit.mjDSBL_LIMIT)
     data = mujoco.MjData(model)
     z = np.load(args.npz)
     fps = float(z["fps"].reshape(-1)[0])
     root = int(model.jnt_bodyid[0])
-    root_index = z["body_names"].tolist().index(model.body(root).name)
+    root_name=model.body(root).name
+    source_names=z['body_names'].tolist()
+    root_index = source_names.index(root_name if root_name in source_names else root_name.rsplit('/',1)[-1])
     q = np.c_[z["body_pos_w"][:, root_index], z["body_quat_w"][:, root_index], z["joint_pos"]].astype(float)
     v = np.zeros((len(q), model.nv))
     acceleration = np.zeros_like(v)
@@ -53,7 +60,7 @@ def main():
     v[0], v[-1] = v[1], v[-2]
     feet = []
     for g in range(model.ngeom):
-        if not model.geom(g).name.startswith("foot_"):
+        if not model.geom(g).name.rsplit('/',1)[-1].startswith("foot_"):
             continue
         if int(model.geom_type[g])==int(mujoco.mjtGeom.mjGEOM_BOX):
             vertices=np.array([[x,y,z] for x in [-1.,1.] for y in [-1.,1.] for z in [-1.,1.]])*model.geom_size[g]
@@ -66,7 +73,8 @@ def main():
     # Standalone XML has no mjlab-generated position actuators. Read the exact
     # effort limits and armatures used by get_robot_cfg(), rather than treating
     # absent XML limits as unlimited motors.
-    limits = np.array([PROFILE["effort_limit"][model.joint(j).name] for j in range(1, model.njnt)])
+    limits = np.array([PROFILE["effort_limit"][model.joint(j).name.rsplit('/',1)[-1]] for j in range(1, model.njnt)])
+    if args.model:np.testing.assert_allclose(np.max(abs(model.actuator_forcerange),axis=1),limits,rtol=0,atol=1e-12)
     rows = []
     if args.friction <= 0:
         p.error("friction must be positive")
@@ -151,11 +159,13 @@ def main():
               "actuator_limits_available": bool(np.all(limits > 0)),
               "support_geometry": "ground and box top" if box else "ground only",
               "box_source": str(args.box.resolve()) if args.box else None,
+              "model_sha256":hashlib.sha256(args.model.read_bytes()).hexdigest() if args.model else None,
               "rows": rows,
               "limitations": "Finite-difference inverse dynamics; contact patch estimated within12mm with the stated friction. Residual is a diagnostic, not a controller or a feasibility certificate; impacts need separate treatment."}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("x") as output:
         json.dump(report, output, indent=2)
+    args.out.with_suffix('.as-run.py').write_bytes(Path(__file__).read_bytes())
     print(json.dumps({k:v for k,v in report.items() if k != "rows"}))
     print("peak_torque_ratio", max(row["max_joint_torque_to_limit"] for row in rows))
 
