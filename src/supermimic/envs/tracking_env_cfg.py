@@ -40,7 +40,7 @@ from supermimic.envs.mdp import observations as sm_obs
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
 from supermimic.robots.assets import get_robot_cfg
-from supermimic.envs.box_scene import FixedBox
+from supermimic.envs.box_scene import FixedBox,FixedTerrainCollection
 
 class QuietSimulationCfg(SimulationCfg):
     """SimulationCfg that disables MuJoCo Warp's per-step overflow printf (a kernel build-time constant,
@@ -105,11 +105,15 @@ class SuperMimicEnvCfgArgs:
     anchor_obs: bool = False  # add BeyondMimic anchor-relative pose (9) to the goal group (plan D5 alt.)
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/evaluation/play.py)
     box: FixedBox | None = None
+    terrain_manifest: Path | None = None
     sole_profile: Path | None = None
     extra_command_kwargs: dict = field(default_factory=dict)
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
+    if a.box is not None and a.terrain_manifest is not None:
+        raise ValueError('Choose one fixed box or a terrain collection')
+    terrain_collection=FixedTerrainCollection(a.terrain_manifest) if a.terrain_manifest else None
     # ---------------------------------------------------------------- observations
     noise = (lambda lo, hi: Unoise(n_min=lo, n_max=hi)) if a.obs_noise else (lambda lo, hi: None)
     policy_terms = {
@@ -250,8 +254,8 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         # Warp worlds are independent. A shared zero origin places the one box
         # and robot at the same relative coordinates in every world.
         scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"),
-                       env_spacing=0.0 if a.box else 2.0,
-                       spec_fn=a.box.add_to_spec if a.box else None,
+                       env_spacing=0.0 if a.box or terrain_collection else 2.0,
+                       spec_fn=a.box.add_to_spec if a.box else (terrain_collection.add_to_spec if terrain_collection else None),
                        num_envs=a.num_envs, entities={"robot": get_robot_cfg(a.sole_profile)}),
         observations=observations,
         actions=actions,
@@ -274,7 +278,7 @@ def make_env(a: SuperMimicEnvCfgArgs, device: str = "cuda:0") -> ManagerBasedRlE
 
     configure_torch_backends()
     env = ManagerBasedRlEnv(make_env_cfg(a), device=device)
-    if a.box is not None and bool((env.scene.env_origins != 0).any()):
+    if (a.box is not None or a.terrain_manifest is not None) and bool((env.scene.env_origins != 0).any()):
         env.close()
         raise ValueError("Fixed-box worlds require zero environment origins")
     return env

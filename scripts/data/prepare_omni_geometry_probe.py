@@ -74,7 +74,8 @@ def main():
         info=None
         if distances.min()<-.00085 or (len(gaps) and gaps.max()>.001):
             pose,info=helper.restore_pose(m,pose,{}, {},lower,upper,surface_pairs=contact_pairs,
-                robot_geometry=robot,terrain_geometry=terrain,translation_domain=.02,rotation_domain=.05,max_nfev=60)
+                robot_geometry=robot,terrain_geometry=terrain,translation_domain=.02,rotation_domain=.05,max_nfev=60,
+                surface_gap_upper=.000999)
         d.qpos[:]=pose;mujoco.mj_forward(m,d)
         penetration=max(0.,-min(float(mujoco.mj_geomDistance(m,d,g,o,.02,witness)) for g,o in pairs))
         contact_gap=max([0.]+[float(mujoco.mj_geomDistance(m,d,g,o,10.,witness)) for g,o in contact_pairs])

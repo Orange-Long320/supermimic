@@ -76,6 +76,7 @@ class Trainer:
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,
                 box=cfg.env.box,
+                terrain_manifest=cfg.env.terrain_manifest,
                 sole_profile=cfg.env.sole_profile,
                 seed=cfg.seed + 1000 * self.rank,
             ),
@@ -149,6 +150,10 @@ class Trainer:
         ck = torch.load(path, map_location=self.device, weights_only=False)
         if ck["config"]["env"].get("box") != asdict(self.cfg.env).get("box"):
             raise ValueError("Full resume requires the same box geometry and placement")
+        old_terrain=ck['config']['env'].get('terrain_manifest')
+        new_terrain=self.cfg.env.terrain_manifest
+        if bool(old_terrain)!=bool(new_terrain) or (old_terrain and Path(old_terrain).read_bytes()!=Path(new_terrain).read_bytes()):
+            raise ValueError('Full resume requires the same terrain collection')
         old_sole = ck["config"]["env"].get("sole_profile")
         new_sole = self.cfg.env.sole_profile
         if bool(old_sole) != bool(new_sole) or (old_sole and Path(old_sole).read_bytes() != Path(new_sole).read_bytes()):

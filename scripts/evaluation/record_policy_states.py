@@ -53,7 +53,8 @@ def main():
     env=make_env(SuperMimicEnvCfgArgs(npz_files=[str(args.source)],num_envs=1,
         action_noise_std=0.,obs_noise=False,reset_noise=False,domain_randomization=False,
         sampling_mode='start',record_transitions=False,episode_length_s=1e5,
-        anchor_obs=cfg['env'].get('anchor_obs',False)),args.device)
+        anchor_obs=cfg['env'].get('anchor_obs',False),
+        terrain_manifest=Path(cfg['env']['terrain_manifest']) if cfg['env'].get('terrain_manifest') else None),args.device)
     try:
         cmd=env.command_manager.get_term('motion')
         assert args.start_frame<int(cmd.library.clip_last[0]-cmd.library.clip_start[0])

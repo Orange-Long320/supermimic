@@ -40,6 +40,7 @@ class EnvCfg:
     compact_library: bool = False
     anchor_obs: bool = False
     box: FixedBox | None = None
+    terrain_manifest: Path | None = None
     sole_profile: Path | None = None
 
 

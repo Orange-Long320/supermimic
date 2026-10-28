@@ -44,6 +44,7 @@ def main(
         anchor_obs=cfg["env"].get("anchor_obs", False),
         box=FixedBox(**cfg["env"]["box"]) if cfg["env"].get("box") else None,
         sole_profile=Path(cfg["env"]["sole_profile"]) if cfg["env"].get("sole_profile") else None,
+        terrain_manifest=Path(cfg['env']['terrain_manifest']) if cfg['env'].get('terrain_manifest') else None,
     )
     s = summarize(results)
     print(

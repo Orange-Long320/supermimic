@@ -1,5 +1,6 @@
 """Fixed box geometry and shared simulator/imagination scene features."""
 from dataclasses import dataclass
+from pathlib import Path
 import math
 
 
@@ -51,6 +52,34 @@ class FixedBox:
 
 
 BOX_FEATURE_DIM = 9
+
+
+class FixedTerrainCollection:
+    """Immutable boxes for spatially separated, motion-conditioned scenes."""
+    def __init__(self, manifest):
+        import json
+        import numpy as np
+        self.manifest = Path(manifest)
+        self.boxes = json.loads(self.manifest.read_text())['boxes']
+        if not self.boxes:
+            raise ValueError('Terrain collection is empty')
+        for box in self.boxes:
+            center=np.asarray(box['center']);half=np.asarray(box['half_size']);rotation=np.asarray(box['rotation_world'])
+            if center.shape!=(3,) or half.shape!=(3,) or rotation.shape!=(3,3) or not np.isfinite(np.r_[center,half,rotation.ravel()]).all() or np.any(half<=0):
+                raise ValueError('Invalid fixed terrain geometry')
+            np.testing.assert_allclose(rotation.T@rotation,np.eye(3),atol=1e-8)
+            np.testing.assert_allclose(np.linalg.det(rotation),1.,atol=1e-8)
+
+    def add_to_spec(self, spec):
+        import mujoco
+        from scipy.spatial.transform import Rotation
+        if any(g.name.startswith('omni_training_box_') for g in spec.geoms):
+            raise ValueError('Terrain collection already exists')
+        for i,box in enumerate(self.boxes):
+            q=Rotation.from_matrix(box['rotation_world']).as_quat()[[3,0,1,2]]
+            spec.worldbody.add_geom(name=f'omni_training_box_{i}',type=mujoco.mjtGeom.mjGEOM_BOX,
+                pos=box['center'],size=box['half_size'],quat=q,contype=1,conaffinity=1,condim=3,
+                friction=(.8,.005,.0001),rgba=(.35,.45,.6,1.))
 
 
 def box_features(root_pos, root_quat, box: FixedBox):
