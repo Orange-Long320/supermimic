@@ -17,8 +17,10 @@ def main():
     p.add_argument('--scan',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True)
     p.add_argument('--diagnose-only',action='store_true')
+    p.add_argument('--motor-reserve',type=float,help='Static exact-contact peak motor fraction; no motor limits are changed')
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
+    if a.motor_reserve is not None and not 0<a.motor_reserve<1:p.error('Motor reserve must be between zero and one')
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
     import mujoco
@@ -29,12 +31,13 @@ def main():
     from supermimic.envs.box_scene import FixedBox
     from supermimic.data.physics_motion import differentiate_qpos,export_qpos_motion
     from supermimic.data.motion_convert import load_g1_model
+    from supermimic.data.contact_wrench import solve_contact_effort,convex_contact_points
 
     z=np.load(a.source);original=z['qpos'];fps=float(z['fps']);q=original.copy()
     center,half=z['box_center'],z['box_half_size']
     box=FixedBox(front_x=float(center[0]-half[0]),center_y=float(center[1]),depth=float(half[0]*2),width=float(half[1]*2),height=float(half[2]*2))
     failed=json.loads(a.scan.read_text())['summary']['None']['failed_frames']
-    if not failed:raise ValueError('No static support gap to repair')
+    if not failed:raise ValueError('No static wrench or motor failure to repair')
     lo=max(0,min(failed)-round(.6*fps));hi=min(len(q)-1,max(failed)+round(.8*fps));middle=float(np.mean(failed))
     frames=np.arange(lo,hi+1)
     ease=lambda t:(lambda u:u**3*(10+u*(-15+6*u)))(np.clip(t,0,1))
@@ -58,15 +61,22 @@ def main():
             foot_geoms.append((g,local))
         if m.geom_bodyid[g] and any(k in m.body(int(m.geom_bodyid[g])).name for k in ('shoulder','elbow','wrist')) and (m.geom_contype[g] or m.geom_conaffinity[g]):arm_geoms.append(g)
     obstacles=[m.geom('box45_collision').id]+[g for g in range(m.ngeom) if m.geom_type[g]==mujoco.mjtGeom.mjGEOM_PLANE]
-    polygons=[]
+    polygons=[];contact_bases=[]
+    jp=np.zeros((3,m.nv));jr=np.zeros_like(jp)
+    rays=np.array([[x*box.friction/np.sqrt(2),y*box.friction/np.sqrt(2),1] for x,y in ((1,1),(1,-1),(-1,1),(-1,-1))]).T
+    all_caps=np.array([PROFILE['effort_limit'][name] for name in all_names])
     for i in frames:
-        d.qpos[:]=q[i];mujoco.mj_kinematics(m,d);points=[]
+        d.qpos[:]=q[i];mujoco.mj_kinematics(m,d);mujoco.mj_comPos(m,d);points=[];columns=[]
         for g,local in foot_geoms:
             world=local@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
             inside=(world[:,0]>=box.front_x)&(world[:,0]<=box.front_x+box.depth)&(abs(world[:,1]-box.center_y)<=box.width/2)
             mask=((~inside)&(abs(world[:,2])<.012))|(inside&(abs(world[:,2]-box.height)<.012))
             points.extend(world[mask,:2])
+            if a.motor_reserve is not None:
+                for point in convex_contact_points(world[mask]):
+                    mujoco.mj_jac(m,d,jp,jr,point,int(m.geom_bodyid[g]));columns.append(jp.T@rays)
         polygons.append(ConvexHull(np.asarray(points)).equations)
+        contact_bases.append(np.concatenate(columns,axis=1) if columns else None)
     low=np.full(4,-.5);high=np.full(4,.5)
     limits=m.jnt_range[joint_ids];mid=limits.mean(1);radius=np.diff(limits,axis=1)[:,0]*.9/2
     for i,w in zip(frames,weights):
@@ -78,13 +88,17 @@ def main():
         nonlocal calls
         if 'x' in cache and np.array_equal(amplitude,cache['x']):return cache['c']
         c=[];labels=[]
-        for i,w,polygon in zip(frames,weights,polygons):
+        for i,w,polygon,basis in zip(frames,weights,polygons,contact_bases):
             d.qpos[:]=q[i];d.qpos[cols]+=w*amplitude;d.qvel[:]=0;d.qacc[:]=0;mujoco.mj_inverse(m,d)
             c.extend(-(polygon[:,:2]@d.subtree_com[root,:2]+polygon[:,2]+.003*w)/.05)
             labels.extend([('support',int(i),k) for k in range(len(polygon))])
             gravity=d.qfrc_inverse[6:][upper]/caps
             c.extend(.95-gravity);c.extend(.95+gravity)
             labels.extend([('gravity',int(i),all_names[j],sign) for sign in ('upper','lower') for j in upper])
+            if a.motor_reserve is not None:
+                fit=solve_contact_effort(basis,d.qfrc_inverse.copy(),all_caps) if basis is not None else None
+                c.append(a.motor_reserve-float(fit.x[-1]) if fit is not None and fit.success else -10.)
+                labels.append(('exact_static_motor',int(i)))
             for g in arm_geoms:
                 for obstacle in obstacles:
                     c.append((mujoco.mj_geomDistance(m,d,g,obstacle,.05,witness)-.003)/.05)
