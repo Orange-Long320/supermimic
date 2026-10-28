@@ -80,6 +80,9 @@ def main():
         raise ValueError('Matching physical reward calibration is required')
     if audit.get('physical_reward_cfg',{}).get('hard_joint_weight',0.)!=args.hard_joint_weight:
         raise ValueError('Hard joint reward is not covered by the supplied static audit')
+    expected_physical=PhysicalRewardCfg(hard_joint_weight=args.hard_joint_weight)
+    if 'physical_reward_cfg' in audit and audit['physical_reward_cfg']!=vars(expected_physical):
+        raise ValueError('Physical reward settings differ from their static audit')
     args.out.mkdir(parents=True);torch.set_num_threads(1);torch.manual_seed(0)
     torch.cuda.set_device(0);torch.cuda.set_per_process_memory_fraction(.15);device='cuda:0'
     policy,config=load_policy_from_checkpoint(args.ckpt,device)
@@ -142,6 +145,8 @@ def main():
             checkpoint={'config':evaluation_config,'policy':{k:v.detach().cpu() for k,v in policy.state_dict().items()},
                 'ppo_updates':update,'local_environment_steps':update*args.horizon,
                 'source_checkpoint_sha256':metadata['source_checkpoint_sha256'],'optimizer_algorithm':'rsl_rl.PPO',
+                'experiment_reward':{'joint_weight':metadata['joint_weight'],'physical_reward':metadata['physical_reward'],
+                    'original_physical_termination_penalty':args.termination_penalty},
                 'policy_evaluation_only':True,'approved_for_training':False}
             temporary=target.with_suffix('.tmp');torch.save(checkpoint,temporary);temporary.replace(target)
         for update in range(1,args.updates+1):
