@@ -75,6 +75,7 @@ def main():
     p.add_argument("--bounded-target-joints",help="Diagnostic servo-target bounds for named joints; does not clamp simulated state")
     p.add_argument("--bounded-target-margin",type=float,default=.04)
     p.add_argument("--record-physics",action="store_true",help="Save every 5 ms qpos/qvel/actuator force for independent audits")
+    p.add_argument("--record-observations",action="store_true",help="Save baseline environment-zero pre-action policy history, goal and reference frame for feedback calibration")
     p.add_argument("--hard-penalty-linear",type=float,default=0.,help="Additional exact-penalty term to avoid trading small hard-limit violations for score")
     p.add_argument("--local-refinement",action="store_true",help="Refine a warm start with smaller steps, top 1/16 elites and a best-anchored mean")
     p.add_argument("--residual-sigma",type=float,help="Initial search deviation in normalized motor-effort fractions")
@@ -430,13 +431,16 @@ def main():
             initial_delta=torch.tensor((corrected-nominal)/action_scale,dtype=torch.float32,device=device)
         if prep_parameters.shape[1]>base_dimension:
             initial_delta+=torch.as_tensor(prep_parameters[:,base_dimension:],dtype=torch.float32,device=device)@mapping
-        states=[];velocities=[];actions=[]
+        states=[];velocities=[];actions=[];observation_trace=[]
         records=[[] for _ in range(args.num_envs)]
         maxima=[{"soft":0.,"hard":0.,"speed":0.,"effort":0.,"nonfoot_penetration":0.,
                  "foot_penetration":0.,"minimum_nonfoot_height":1e3} for _ in range(args.num_envs)]
         completed_air=np.zeros(args.num_envs,dtype=bool)
         air_run=np.zeros(args.num_envs,dtype=int)
         for step in range(round(args.seconds*50)):
+            if args.record_observations:
+                observation_trace.append((obs["policy"][0].cpu().numpy().copy(),
+                    obs["goal"][0].cpu().numpy().copy(),int(cmd.frame[0])))
             progress=torch.clamp(step*.02/clock["preparation"],0,1)
             f=progress*3
             index=f.long().clamp(max=2)
@@ -616,7 +620,7 @@ def main():
             if landing_policy is not None:reports[-1]["landing_switch_time_s"]=float(landing_times[e])
             if early_offsets is not None:reports[-1].update(early_recovery_time_s=float(early_times[e]),early_recovery_offset_s=float(early_offsets[e]))
         physical_trace=tuple(np.stack([r[k] for r in physics_trace]) for k in range(3)) if physics_trace else None
-        return reports,(np.array(states),np.array(velocities),np.array(actions),records,initial_state,physical_trace)
+        return reports,(np.array(states),np.array(velocities),np.array(actions),records,initial_state,physical_trace,observation_trace)
 
     try:
         # Establish the exact-controller baseline before searching.
@@ -627,6 +631,12 @@ def main():
         (args.out/"baseline.json").write_text(json.dumps(baseline[0],indent=2))
         (args.out/"baseline-all.json").write_text(json.dumps(baseline))
         np.savez(args.out/"baseline-trajectory.npz",qpos=payload[0][:,0],qvel=payload[1][:,0],actions=payload[2][:,0],fps=np.array([50.]))
+        if payload[6]:
+            np.savez(args.out/"baseline-observations.npz",
+                policy=np.stack([r[0] for r in payload[6]]),goal=np.stack([r[1] for r in payload[6]]),
+                reference_frame=np.array([r[2] for r in payload[6]]),
+                initial_qpos=payload[4]["qpos"][0]-np.r_[origins[0],np.zeros(m.nq-3)],
+                initial_qvel=payload[4]["qvel"][0],fps=np.array([50.]))
         if payload[5] is not None:
             positions=payload[5][0][:,0].copy();positions[:,:3]-=origins[0]
             np.savez(args.out/"baseline-physics.npz",qpos=positions,qvel=payload[5][1][:,0],
