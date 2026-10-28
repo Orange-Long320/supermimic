@@ -30,6 +30,7 @@ def main():
     p.add_argument('--entry-root-velocity',type=float,nargs=6,default=[0.]*6,
                    help='Initial-only free-root velocity perturbation: world xyz then local angular xyz')
     p.add_argument('--entry-root-z-offset',type=float,default=0.,help='Recorded initial-only root height offset for contact initialization')
+    p.add_argument('--entry-velocity-mode',choices=['reference','zero'],default='reference',help='Explicit initial state only; zero starts from rest without changing any later state')
     p.add_argument('--support-surface-heights',type=float,nargs='+',help='Explicit horizontal support heights for planned contact recovery')
     p.add_argument('--hard-grounded-com',action='store_true',help='Require the primary COM task when ground contact exists; reject physically infeasible requests')
     p.add_argument('--joint-task-weight',type=float,default=.01,help='Posture task priority; design-controller default is weak, reference tracking may require stronger posture control')
@@ -63,6 +64,7 @@ def main():
     kp=m.actuator_gainprm[:,0].copy();kd=-m.actuator_biasprm[:,2].copy()
     cols=m.jnt_qposadr[m.actuator_trnid[:,0]];vcols=m.jnt_dofadr[m.actuator_trnid[:,0]]
     actual.qpos[:]=q[args.start_frame];actual.qvel[:]=v[args.start_frame]
+    if args.entry_velocity_mode=='zero':actual.qvel[:]=0.
     actual.qpos[2]+=args.entry_root_z_offset
     actual.qvel[:6]+=np.asarray(args.entry_root_velocity)
     actual.ctrl[:]=actual.qpos[cols]+kd*actual.qvel[vcols]/kp
