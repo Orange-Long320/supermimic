@@ -195,6 +195,107 @@ def test_tracking_termination_head_excludes_velocity_labels():
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in wm.dynamics.parameters())
 
 
+def command_fixture():
+    """Exercise the real command methods without constructing a simulator."""
+    from supermimic.locomotion.env import VelocityMotionCommand
+
+    command = object.__new__(VelocityMotionCommand)
+    command.cfg = SimpleNamespace(velocity=VelocityCfg(standing_probability=0., reference_probability=1.))
+    command.is_velocity = torch.tensor([False, True, True])
+    command.velocity_command = torch.zeros(3, 3)
+    command.fallback_command = torch.tensor([[0., 0., 0.], [0.7, 0., -0.2], [0.6, 0., 0.3]])
+    command.reference_mode = command.is_velocity.clone()
+    command.reference_exhausted = torch.zeros(3, dtype=torch.bool)
+    command.command_from_reference = torch.zeros(3, dtype=torch.bool)
+    command.command_age = torch.zeros(3, dtype=torch.long)
+    command.manual_command = None
+    command._env = SimpleNamespace(device="cpu")
+    reference = torch.tensor([[0.2, 0., 0.], [0.3, 0., 0.1], [0.4, 0., -0.1]])
+    valid = torch.ones(3, dtype=torch.bool)
+    command._bounded_reference = lambda: (reference, valid)
+    return command, reference, valid
+
+
+def test_reference_recovers_and_preserves_independent_fallback():
+    command, reference, valid = command_fixture()
+    fallback = command.fallback_command.clone()
+    command._refresh_velocity()
+    assert command.command_from_reference.tolist() == [False, True, True]
+    torch.testing.assert_close(command.velocity_command[1:], reference[1:])
+    valid[1] = False
+    command._refresh_velocity()
+    torch.testing.assert_close(command.velocity_command[1], fallback[1])
+    assert not command.command_from_reference[1]
+    reference[1, 0] = 0.5
+    valid[1] = True
+    command._refresh_velocity()
+    assert command.command_from_reference[1]
+    torch.testing.assert_close(command.velocity_command[1], reference[1])
+    torch.testing.assert_close(command.fallback_command, fallback)
+
+
+def test_reference_resampling_and_manual_override_are_independent():
+    command, reference, valid = command_fixture()
+    valid[1] = False
+    command._sample_velocity(torch.tensor([1]))
+    assert command.reference_mode[1] and not command.command_from_reference[1]
+    valid[1] = True
+    command._refresh_velocity()
+    assert command.command_from_reference[1]
+    fallback = command.fallback_command.clone()
+    command.set_manual_command((0., 0., 0.))
+    assert not command.command_from_reference.any()
+    assert not command.velocity_command.any()
+    torch.testing.assert_close(command.fallback_command, fallback)
+    command.manual_command = None
+    command._refresh_velocity()
+    torch.testing.assert_close(command.velocity_command[1:], reference[1:])
+    command.cfg.velocity.standing_probability = 1.
+    untouched = command.velocity_command[2].clone()
+    command._sample_velocity(torch.tensor([1]))
+    assert not command.reference_mode[1]
+    assert not command.velocity_command[1].any()
+    assert not command.fallback_command[1].any()
+    torch.testing.assert_close(command.velocity_command[2], untouched)
+
+
+def test_model_validation_uses_executed_actions_and_never_crosses_episodes():
+    from supermimic.data.replay_buffer import ReplayBuffer
+    from supermimic.locomotion.validation import validate_velocity_model
+
+    buffer = ReplayBuffer(2, 64, STATE_DIM, NJ, XI_DIM, "cpu")
+    buffer.enable_velocity()
+    buffer.velocity_env_mask = torch.tensor([False, True])
+    limits = torch.tensor([-2., 2.]).repeat(NJ, 1)
+    clean = torch.zeros(2, NJ)
+    executed = clean.clone()
+    executed[:, 0] = 0.01
+    for episode in range(2):
+        for time in range(21):
+            state = standing()
+            state[:, NQ] = episode * 0.5 + time * 0.01
+            next_state = state.clone()
+            next_state[:, NQ] += 0.01
+            reward = velocity_reward(next_state, torch.zeros(2, 3), clean, clean, limits, 0.8, torch.zeros(NJ)) * 0.02
+            buffer.add(torch.arange(2), state, clean, executed, torch.zeros(2, XI_DIM), reward,
+                       torch.zeros(2), torch.zeros(2, dtype=torch.long), torch.zeros(2, dtype=torch.long),
+                       torch.full((2,), time == 20), torch.full((2,), time == 0),
+                       command=torch.zeros(2, 3), command_reference=torch.zeros(2, dtype=torch.bool))
+        buffer.end_episode(torch.arange(2))
+
+    def step(state, action, xi):
+        next_state = state.clone()
+        next_state[:, NQ] += action[:, 0]
+        return next_state
+
+    wm = SimpleNamespace(step=step, heads=SimpleNamespace(soft_limits=limits))
+    result = validate_velocity_model(wm, buffer, 0.8, torch.zeros(NJ), 0.02, samples=64, horizons=(1, 4, 8))
+    assert result["available_windows"] == 26
+    for check in result["checks"]:
+        assert max(check["velocity_rmse"]) < 1e-6
+        assert check["model_reward_rate"] == pytest.approx(check["native_reward_rate"], abs=1e-6)
+
+
 @pytest.mark.gpu
 @pytest.mark.dataset
 def test_velocity_clip_end_does_not_reset_physical_state():
@@ -212,11 +313,19 @@ def test_velocity_clip_end_does_not_reset_physical_state():
     try:
         cmd = env.command_manager.get_term("motion")
         env.reset()
+        cmd.reference_mode[cmd.is_velocity] = True
         cmd.frame[:] = cmd.library.clip_last[0]
         before = cmd.state_io.read()
         cmd._update_command()
         torch.testing.assert_close(cmd.state_io.read(), before, rtol=0, atol=0)
         assert not cmd.clip_end[cmd.is_velocity].any()
         assert cmd.clip_end[~cmd.is_velocity].all()
+        assert cmd.reference_exhausted[cmd.is_velocity].all()
+        cmd._sample_velocity(cmd.is_velocity.nonzero().squeeze(-1))
+        assert not cmd.command_from_reference[cmd.is_velocity].any()
+        ids = cmd.is_velocity.nonzero().squeeze(-1)[:1]
+        cmd._resample_command(ids)
+        assert not cmd.reference_exhausted[ids].any()
+        assert cmd.reference_exhausted[cmd.is_velocity.nonzero().squeeze(-1)[1:]].all()
     finally:
         env.close()

@@ -25,6 +25,9 @@ class VelocityMotionCommand(MultiClipMotionCommand):
         count = max(1, min(self.num_envs - 1, round(self.num_envs * cfg.velocity.fraction)))
         self.is_velocity = torch.arange(self.num_envs, device=self.device) >= self.num_envs - count
         self.velocity_command = torch.zeros(self.num_envs, 3, device=self.device)
+        self.fallback_command = torch.zeros_like(self.velocity_command)
+        self.reference_mode = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.reference_exhausted = torch.zeros_like(self.reference_mode)
         self.command_from_reference = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.command_age = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.command_period = max(1, round(cfg.velocity.resample_seconds / env.step_dt))
@@ -42,10 +45,10 @@ class VelocityMotionCommand(MultiClipMotionCommand):
         cfg = self.cfg.velocity
         ranges = torch.tensor((cfg.forward, cfg.lateral, cfg.yaw), device=self.device)
         random = torch.rand(len(ids), 3, device=self.device)
-        self.velocity_command[ids] = ranges[:, 0] + random * (ranges[:, 1] - ranges[:, 0])
+        self.fallback_command[ids] = ranges[:, 0] + random * (ranges[:, 1] - ranges[:, 0])
         stand = torch.rand(len(ids), device=self.device) < cfg.standing_probability
-        self.velocity_command[ids[stand]] = 0
-        self.command_from_reference[ids] = (~stand) & (torch.rand(len(ids), device=self.device) < cfg.reference_probability)
+        self.fallback_command[ids[stand]] = 0
+        self.reference_mode[ids] = (~stand) & (torch.rand(len(ids), device=self.device) < cfg.reference_probability)
         self.command_age[ids] = 0
         self._refresh_velocity()
 
@@ -53,8 +56,10 @@ class VelocityMotionCommand(MultiClipMotionCommand):
         reference, valid = self._bounded_reference()
         # Only small command projections (within the explicit tolerance) may
         # supervise the latent; larger command/reference mismatches are rejected.
-        self.command_from_reference &= valid & self.is_velocity
-        self.velocity_command = torch.where(self.command_from_reference[:, None], reference, self.velocity_command)
+        # Validity can change every frame without changing the sampled mode or
+        # overwriting the command held for fallback during this sampling period.
+        self.command_from_reference.copy_(self.reference_mode & valid & self.is_velocity & ~self.reference_exhausted)
+        self.velocity_command.copy_(torch.where(self.command_from_reference[:, None], reference, self.fallback_command))
         if self.manual_command is not None:
             self.velocity_command[self.is_velocity] = self.manual_command
             self.command_from_reference[self.is_velocity] = False
@@ -69,6 +74,7 @@ class VelocityMotionCommand(MultiClipMotionCommand):
 
     def _resample_command(self, env_ids):
         super()._resample_command(env_ids)
+        self.reference_exhausted[env_ids] = False
         self._sample_velocity(env_ids[self.is_velocity[env_ids]])
 
     def _write_reference_state_to_sim(self, env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel):
@@ -100,7 +106,7 @@ class VelocityMotionCommand(MultiClipMotionCommand):
     def _update_command(self, env_ids=None):
         super()._update_command(env_ids)
         ended = self.clip_end & self.is_velocity
-        self.command_from_reference[ended] = False
+        self.reference_exhausted[ended] = True
         # A velocity episode continues physically after its reference clip ends.
         self.clip_end[self.is_velocity] = False
         if env_ids is None:
