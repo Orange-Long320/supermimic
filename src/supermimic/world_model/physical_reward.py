@@ -25,6 +25,8 @@ class PhysicalRewardCfg:
     air_height_m: float = .02
     air_gate_width_m: float = .005
     maximum_forward_rate: float = 20.
+    hard_joint_weight: float = 0.
+    hard_joint_margin_rad: float = .001
 
 
 class PhysicalGeometry:
@@ -32,6 +34,9 @@ class PhysicalGeometry:
         self.fk=fk;self.device=torch.device(device)
         if fk.body_names!=[model.body(i).name for i in range(1,model.nbody)]:
             raise ValueError('Geometry must use the same single-tree robot as analytic FK')
+        if [model.joint(i).name.rsplit('/',1)[-1] for i in range(1,model.njnt)]!=list(PROFILE['joint_names']):
+            raise ValueError('Hard joint ranges must match the state joint order')
+        self.hard_limits=torch.tensor(model.jnt_range[1:].copy(),dtype=torch.float32,device=device)
         points=[];bodies=[];kinds=[];reference_ids=[]
         tracked_names=list(tracked_names)
         root=int(model.jnt_bodyid[0])
@@ -71,6 +76,10 @@ class PhysicalGeometry:
         z=(row[...,self.reference_ids,:]*self.points[self.foot_vertices]).sum(-1)+pos[...,self.reference_ids,2]
         return (z.amin(-1)>cfg.air_height_m).to(pos.dtype)
 
+    def joint_excess(self,state,margin=0.):
+        q=state[...,7:NQ]
+        return (self.hard_limits[:,0]+margin-q).clamp(min=0)+(q-self.hard_limits[:,1]+margin).clamp(min=0)
+
     def components(self,state,reference_pos,reference_quat,cfg,all_pos=None,all_quat=None):
         if all_pos is None:
             fk=self.fk(state[...,:NQ]);all_pos,all_quat=fk['pos'],fk['quat']
@@ -82,8 +91,9 @@ class PhysicalGeometry:
         reference_air=self.reference_air(reference_pos,reference_quat,cfg)
         forward=quat_apply(state[...,3:7],state[...,NQ+3:NQ+6])[...,1].clamp(0,cfg.maximum_forward_rate)
         air_rotation=cfg.air_rotation_weight*actual_air*reference_air*forward
+        hard_joint=-cfg.hard_joint_weight*self.joint_excess(state,cfg.hard_joint_margin_rad).sum(-1)
         return {'clearance':clearance,'air_rotation':air_rotation,'heights':height,
-                'total':clearance+air_rotation,'reference_air':reference_air}
+                'hard_joint':hard_joint,'total':clearance+air_rotation+hard_joint,'reference_air':reference_air}
 
 
 class PhysicalMotionHeads(AnalyticHeads):

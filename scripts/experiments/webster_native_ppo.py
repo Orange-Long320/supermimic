@@ -59,12 +59,16 @@ def main():
     p.add_argument('--actor-lr',type=float,default=1e-6);p.add_argument('--critic-lr',type=float,default=3e-4)
     p.add_argument('--action-std',type=float,default=.03);p.add_argument('--epochs',type=int,default=2)
     p.add_argument('--minibatches',type=int,default=4);p.add_argument('--snapshot-every',type=int,default=4)
+    p.add_argument('--hard-joint-weight',type=float,default=0.)
+    p.add_argument('--termination-penalty',type=float,default=0.)
     args=p.parse_args()
     if args.out.exists() or args.ckpt.name=='ckpt_latest.pt':p.error('Use a fresh output and immutable source')
     if not 1<=args.envs<=1024 or not 16<=args.horizon<=128 or not 1<=args.updates<=256 or not 0<args.actor_lr<=1e-5:
         p.error('Invalid bounded native-feedback experiment')
     if not 0<args.action_std<=.1 or args.epochs<1 or args.minibatches<1 or args.snapshot_every<1:
         p.error('Invalid PPO configuration')
+    if not 0<=args.hard_joint_weight<=1000 or not 0<=args.termination_penalty<=50:
+        p.error('Invalid constraint reward configuration')
     if os.environ.get('CUDA_VISIBLE_DEVICES')!=str(args.gpu):raise ValueError('Explicit physical GPU selection is required')
     def query(kind,fields):
         return subprocess.check_output(['nvidia-smi','-i',str(args.gpu),'--query-'+kind+'='+fields,'--format=csv,noheader,nounits'],text=True).strip()
@@ -74,6 +78,8 @@ def main():
     audit=json.loads(args.physical_audit.read_text());reference_sha=hashlib.sha256(args.source.read_bytes()).hexdigest()
     if not audit.get('passed') or audit.get('static_manager_fixture_maximum_error',1.)>=1e-6 or reference_sha not in audit['sha256'].values():
         raise ValueError('Matching physical reward calibration is required')
+    if audit.get('physical_reward_cfg',{}).get('hard_joint_weight',0.)!=args.hard_joint_weight:
+        raise ValueError('Hard joint reward is not covered by the supplied static audit')
     args.out.mkdir(parents=True);torch.set_num_threads(1);torch.manual_seed(0)
     torch.cuda.set_device(0);torch.cuda.set_per_process_memory_fraction(.15);device='cuda:0'
     policy,config=load_policy_from_checkpoint(args.ckpt,device)
@@ -89,7 +95,7 @@ def main():
             robot.data.soft_joint_pos_limits[0].clone(),robot.data.default_joint_pos[0].clone())
         heads.reward_cfg.w_joint_limit=-10.
         setup=SimpleNamespace(env=env,wm=SimpleNamespace(heads=heads),device=device,max_step_reward=heads.reward_cfg.max_step_reward)
-        physical_cfg=PhysicalRewardCfg();install_physical_reward(setup,model,physical_cfg)
+        physical_cfg=PhysicalRewardCfg(hard_joint_weight=args.hard_joint_weight);install_physical_reward(setup,model,physical_cfg)
         io=StateIO(env);spec=StateSpec(StateSpecCfg(**config['world_model']['state_spec']),device)
         actor=WarmActor(policy,args.action_std).to(device)
         def observation(raw):
@@ -120,6 +126,7 @@ def main():
             'clip_end_is_finite_episode_terminal_no_timeout_bootstrap':True,
             'joint_weight':float(env.reward_manager.get_term_cfg('joint_limit').weight),
             'physical_reward':vars(physical_cfg),'arguments':vars(args),
+            'original_physical_termination_penalty':args.termination_penalty,
             'physical_candidate_passed':False,'approved_for_training':False}
         (args.out/'metadata.json').write_text(json.dumps(metadata,indent=2,default=str))
         (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
@@ -143,7 +150,8 @@ def main():
                 for _ in range(args.horizon):
                     action=algo.act(obs);raw,reward,terminated,timeout,_=env.step(action)
                     next_obs=observation(raw);done=terminated|timeout
-                    algo.process_env_step(next_obs,reward,done,{})
+                    train_reward=reward-args.termination_penalty*terminated.to(reward.dtype)
+                    algo.process_env_step(next_obs,train_reward,done,{})
                     episode_counts+=torch.stack([done.sum(),terminated.sum(),(timeout&~terminated).sum()])
                     obs=next_obs
                 if storage.step!=args.horizon:raise ValueError('Incomplete PPO rollout')

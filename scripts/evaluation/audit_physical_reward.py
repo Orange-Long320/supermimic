@@ -1,5 +1,6 @@
 """Audit experimental reward geometry and gradients against recorded physics."""
 import argparse
+from dataclasses import asdict
 import hashlib
 import json
 from pathlib import Path
@@ -21,6 +22,7 @@ def main():
     p.add_argument('--capture',type=Path,required=True)
     p.add_argument('--reference',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--hard-joint-weight',type=float,default=0.)
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
     model=load_g1_model();fk=G1Kinematics(model,'cpu')
     geometry=PhysicalGeometry(model,fk,PROFILE['tracked_bodies'],'cpu')
@@ -28,7 +30,20 @@ def main():
     library=MotionLibrary([args.reference],tuple(PROFILE['tracked_bodies']),q0,device='cpu')
     z=np.load(args.capture/'trajectory.npz');states=torch.tensor(np.c_[z['qpos'],z['qvel']],dtype=torch.float32)
     expected=z['metrics'][:,7:10];actual=[];bonuses=[];reference_mask=[]
-    cfg=PhysicalRewardCfg()
+    if not 0<=args.hard_joint_weight<=1000:p.error('Invalid hard-joint reward weight')
+    cfg=PhysicalRewardCfg(hard_joint_weight=args.hard_joint_weight)
+    with torch.no_grad():hard=geometry.joint_excess(states).max(-1).values.numpy()
+    hard_error=float(abs(hard-z['metrics'][:,15]).max())
+    if hard_error>=1e-6:raise ValueError('Hard joint ranges differ from native recorded audit')
+    hard_gradient=None
+    if cfg.hard_joint_weight:
+        index=int(hard.argmax());sample=states[index:index+1].clone().requires_grad_(True)
+        joint=int(geometry.joint_excess(sample).argmax())
+        penalty=-cfg.hard_joint_weight*geometry.joint_excess(sample,cfg.hard_joint_margin_rad).sum()
+        derivative=torch.autograd.grad(penalty,sample)[0][0,7+joint]
+        expected_gradient=cfg.hard_joint_weight if sample[0,7+joint]<geometry.hard_limits[joint,0] else -cfg.hard_joint_weight
+        if abs(float(derivative)-expected_gradient)>1e-6:raise ValueError('Hard joint gradient points out of range')
+        hard_gradient={'joint':PROFILE['joint_names'][joint],'gradient':float(derivative)}
     for start in range(0,len(states),64):
         s=states[start:start+64];frame=torch.minimum(torch.arange(start,start+len(s))//4+1,library.clip_last[0])
         ref=library.bodies(frame)
@@ -87,6 +102,7 @@ def main():
     finally:env.close()
     if manager_error>=1e-6:raise ValueError('Real and imagined physical reward scaling differs')
     report={'native_geometry_maximum_error_m':error,'root_height_translation_error_m':translation_error,
+        'physical_reward_cfg':asdict(cfg),'hard_violation_maximum_error_rad':hard_error,'hard_joint_gradient':hard_gradient,
         'clearance_gradient_root_z':float(gradient[0,2]),'zero_weight_original_reward_maximum_error':identity_error,
         'hull_vertices':len(geometry.points),'physical_samples':len(states),'maximum_air_bonus_per_second':float(bonuses.max()),
         'reference_flight_samples':int(reference_mask.sum()),'passed':True,'physical_candidate_passed':False,
