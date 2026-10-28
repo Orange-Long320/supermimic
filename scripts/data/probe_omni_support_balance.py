@@ -27,11 +27,15 @@ def main():
     from supermimic.data.contact_wrench import convex_contact_points,solve_contact_effort
     m=mujoco.MjModel.from_binary_path(str(a.model));d=mujoco.MjData(m)
     flags=int(m.opt.disableflags);m.opt.disableflags=flags|int(mujoco.mjtDisableBit.mjDSBL_CONTACT)|int(mujoco.mjtDisableBit.mjDSBL_LIMIT)
-    if (m.nq,m.nv,m.nu)!=(38,37,31):raise ValueError('Expected original X2 model')
+    # The independent inverse-dynamics model has original inertias and the
+    # profile armatures but no servo actuators. This probe never executes a
+    # controller: motor inequalities use the unchanged profile effort caps.
+    if (m.nq,m.nv,m.njnt)!=(38,37,32) or m.nu not in (0,31):raise ValueError('Expected original X2 inverse-dynamics model')
     with np.load(a.reference) as z:q=z['qpos'].copy()
     if min(a.frames)<0 or max(a.frames)>=len(q):raise ValueError('Frame outside original reference')
     names=[m.joint(i).name.rsplit('/',1)[-1] for i in range(1,m.njnt)]
     if names!=PROFILE['joint_names']:raise ValueError('Joint order changed')
+    np.testing.assert_allclose(m.dof_armature[6:],[PROFILE['armature'][n] for n in names],rtol=0,atol=1e-12)
     effort=np.array([PROFILE['effort_limit'][n] for n in names])
     ids=[j+1 for j,n in enumerate(names) if any(k in n for k in ['hip_','knee_','ankle_','waist_'])]
     cols=m.jnt_qposadr[ids];vcols=np.r_[np.arange(6),m.jnt_dofadr[ids]].astype(int)
