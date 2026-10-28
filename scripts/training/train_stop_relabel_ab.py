@@ -47,7 +47,9 @@ def main(checkpoint: Path, manifest: Path, out: Path, updates: int = 64):
             critic = copy.deepcopy(trainer.critic)
             actor = JointPolicyTrainer(trainer.wm, policy, critic, trainer.lib, cfg.policy_trainer,
                                        vc, cfg.critic, trainer.command.cfg.nominal_height, trainer.command.reference_velocity)
-            actor.load_checkpoint_state(original["velocity_training"])
+            # Optimizer loading can retain same-device state tensor storage.
+            # Give each arm its own moments instead of sharing the first arm's.
+            actor.load_checkpoint_state(copy.deepcopy(original["velocity_training"]))
             actor.opt.load_state_dict(original["policy_opt"])
             actor.critic_opt.load_state_dict(original["critic_opt"])
             started = time.monotonic()
