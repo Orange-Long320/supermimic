@@ -18,6 +18,9 @@ def main():
     p.add_argument('--helper',type=Path,required=True)
     p.add_argument('--start-frame',type=int,default=0,help='200 Hz diagnostic window start')
     p.add_argument('--frames',type=int,default=0,help='0 for complete clip')
+    p.add_argument('--brake-frame',type=int,help='Optional input-reference frame where ascent braking starts (requires a complete 200 Hz parent)')
+    p.add_argument('--stop-frame',type=int,help='Input-reference frame held after smooth braking; never counts as a different source family')
+    p.add_argument('--hold-seconds',type=float,default=2.)
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
     if a.out.exists() or min(a.start_frame,a.frames)<0:p.error('New output and nonnegative window required')
@@ -32,8 +35,23 @@ def main():
     with np.load(a.candidate/'x2-reference.npz',allow_pickle=False) as z:
         q=z['qpos'].copy();fps=float(np.asarray(z['fps']).reshape(-1)[0])
     meta=json.loads((a.candidate/'result.json').read_text())
+    warp=a.brake_frame is not None or a.stop_frame is not None
+    if warp and (fps!=200. or not meta.get('complete_source_clip') or a.brake_frame is None or a.stop_frame is None
+        or not 0<=a.brake_frame<a.stop_frame<len(q) or a.hold_seconds<2 or a.start_frame or a.frames):
+        raise ValueError('Braking requires a complete 200 Hz parent, ordered input frames and at least two seconds holding')
     duration=(len(q)-1)/fps;steps=int(np.ceil(duration*50))*4
     times=np.arange(len(q))/fps;query=np.linspace(0,duration,steps+1)
+    time_map=None
+    if warp:
+        begin=a.brake_frame/fps;stop=a.stop_frame/fps;braking=2*(stop-begin)
+        clock=np.arange(round((begin+braking+a.hold_seconds)*200)+1)/200.
+        u=np.clip((clock-begin)/braking,0.,1.)
+        slowed=begin+braking*(u-2.5*u**4+3*u**5-u**6)
+        query=np.where(clock<=begin,clock,np.where(clock>=begin+braking,stop,slowed))
+        if np.any(np.diff(query)<-1e-12):raise ValueError('Source-time mapping must remain monotone')
+        time_map={'kind':'ascent_then_hold','input_fps':fps,'brake_frame':a.brake_frame,'stop_frame':a.stop_frame,
+            'braking_duration_s':braking,'hold_seconds':a.hold_seconds,
+            'description':'Source-time velocity smoothly falls from 1 to 0 with zero acceleration at both ends; original ascent prefix retained'}
     cols=np.r_[np.arange(3),np.arange(7,38)];dense=np.zeros((len(query),38))
     dense[:,cols]=PchipInterpolator(times,q[:,cols],axis=0)(query)
     dense[:,3:7]=Slerp(times,Rotation.from_quat(q[:,[4,5,6,3]]))(query).as_quat()[:,[3,0,1,2]]
@@ -63,6 +81,9 @@ def main():
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (a.out/'restore-as-run.py').write_bytes(a.helper.read_bytes())
     (a.out/'original-adapter-result.json').write_bytes((a.candidate/'result.json').read_bytes())
+    if time_map is not None:
+        np.savez_compressed(a.out/'source-time-map.npz',source_time_s=query,fps=np.array([200.]))
+        (a.out/'task-definition.json').write_text(json.dumps(time_map,indent=2))
     rows=[];accepted=[]
     for index in range(a.start_frame,end):
         pose=dense[index].copy();source_index=min(int(np.searchsorted(times,query[index],side='right')-1),len(q)-2)
@@ -98,7 +119,8 @@ def main():
         'frames':len(accepted),'fps':200.,'dense_window_start_frame':a.start_frame,'dense_window_start_time_s':a.start_frame/200.,
         'source_reference_sha256':hashlib.sha256((a.candidate/'x2-reference.npz').read_bytes()).hexdigest(),
         'model_sha256':hashlib.sha256(a.model.read_bytes()).hexdigest(),'restoration_helper_sha256':hashlib.sha256(a.helper.read_bytes()).hexdigest(),
-        'uniform_time_scale':(steps/200.)/duration,'complete_source_clip':complete,
+        'uniform_time_scale':None if warp else (steps/200.)/duration,'complete_source_clip':complete and not warp,
+        'task_variant':time_map,'complete_source_prefix':bool(complete and warp),
         'max_environment_penetration_m':max(row['penetration_m'] for row in rows),
         'maximum_joint_correction_rad':max(row['maximum_joint_correction_rad'] for row in rows),
         'corrected_frames':sum(row['restoration'] is not None for row in rows),'rows':rows,
