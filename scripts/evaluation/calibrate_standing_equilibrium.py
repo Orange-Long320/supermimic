@@ -16,7 +16,12 @@ def main():
     p.add_argument('--leg-adjustments',action='store_true',help='Also optimize hip pitch/roll and knee positions within 0.25 radians')
     p.add_argument('--refine-from',type=Path,help='Initialize from a previous calibration result')
     p.add_argument('--anchor-left-foot',action='store_true',help='Parameterize root placement by left-foot attitude to reduce contact-branch cancellation')
-    args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
+    p.add_argument('--support-height-m',type=float,default=0.,help='World height of the horizontal standing surface; no terrain or physics modification')
+    p.add_argument('--max-trials',type=int,default=7,help='Bound the number of independent calibration seeds')
+    p.add_argument('--max-nfev',type=int,default=250,help='Evaluation budget per calibration seed')
+    args=p.parse_args()
+    if not np.isfinite(args.support_height_m) or min(args.max_trials,args.max_nfev)<1:p.error('Finite support height and positive solver budgets required')
+    args.out.mkdir(parents=True,exist_ok=False)
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));d=mujoco.MjData(m)
     with np.load(args.initial) as z:q0=z['state'][0,:m.nq].copy()
@@ -51,7 +56,7 @@ def main():
             q[:3]=left_position+[0,0,x[0]]-root_rotation.apply(local.xpos[feet['left']])
         d.qpos[:]=q;d.qvel[:]=0;d.qacc[:]=0;mujoco.mj_inverse(m,d)
         heights={s:min(float((v@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])[:,2].min())
-                       for g,v,kind in meshes if kind==s) for s in ['left','right','nonfoot']}
+                       for g,v,kind in meshes if kind==s)-args.support_height_m for s in ['left','right','nonfoot']}
         normal={s:0. for s in feet};contacts=[]
         for i,c in enumerate(d.contact[:d.ncon]):
             bodies=[int(m.geom_bodyid[int(g)]) for g in c.geom];force=np.zeros(6);mujoco.mj_contactForce(m,d,i,force)
@@ -77,9 +82,9 @@ def main():
     if args.refine_from:
         previous=json.loads(args.refine_from.read_text())['best']['adjustments']
         seeds.insert(0,np.r_[previous,np.zeros(len(lower)-len(previous))])
-    for seed in seeds:
+    for seed in seeds[:args.max_trials]:
         seed=np.clip(seed,lower,upper)
-        fit=least_squares(residual,seed,jac=jacobian,bounds=(lower,upper),max_nfev=250,
+        fit=least_squares(residual,seed,jac=jacobian,bounds=(lower,upper),max_nfev=args.max_nfev,
                           ftol=1e-12,xtol=1e-12,gtol=1e-12)
         q,force,h,n,contacts=evaluate(fit.x);ratio=float((abs(force[6:])/effort).max())
         root_error=float(abs(force[:6]/scale).max());up=float(d.xmat[root].reshape(3,3)[2,2])
