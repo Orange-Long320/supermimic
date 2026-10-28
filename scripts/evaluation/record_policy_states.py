@@ -70,7 +70,9 @@ def main():
         model=env.sim.mj_model
         mujoco.mj_saveModel(model,str(args.out/'native-model.mjb'))
         measured_data=mujoco.MjData(model)
-        metrics=BatchedDesignMetrics(model,torch.device(args.device))
+        # Native reconstruction and its tensors live on CPU, independently of
+        # the device executing the policy and physics.
+        metrics=BatchedDesignMetrics(model,torch.device('cpu'))
         centre=model.jnt_range[1:].mean(axis=1)
         half=.45*np.diff(model.jnt_range[1:],axis=1).ravel()
         lower,upper=centre-half,centre+half
