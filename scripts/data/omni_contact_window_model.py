@@ -8,9 +8,11 @@ from scipy.spatial.transform import Rotation
 
 
 class ContactWindow:
-    def __init__(self,model,reference,scene,start,end):
+    def __init__(self,model,reference,scene,start,end,effort_fraction=.95):
         from supermimic.robots.dimensions import PROFILE
         self.m=m=mujoco.MjModel.from_binary_path(str(model));self.d=d=mujoco.MjData(m)
+        if not 0<effort_fraction<=1:raise ValueError('Cannot exceed original motor ratings')
+        self.effort_fraction=effort_fraction
         if (m.nq,m.nv,m.njnt)!=(38,37,32) or m.nu not in (0,31) or m.neq:raise ValueError('Original floating X2 only')
         self.names=[m.joint(i).name.rsplit('/',1)[-1] for i in range(1,m.njnt)]
         if self.names!=PROFILE['joint_names']:raise ValueError('Unexpected joint order')
@@ -96,7 +98,7 @@ class ContactWindow:
                 contact_pos=max(contact_pos,float(np.linalg.norm(d.xpos[body]-p)))
                 contact_rot=max(contact_rot,float(np.linalg.norm((r.inv()*Rotation.from_matrix(d.xmat[body].reshape(3,3))).as_rotvec())))
         base=np.asarray(base);motor=np.asarray(motor);correction=self.correction(qs)
-        excess=np.maximum(motor-.95,0.)
+        excess=np.maximum(motor-self.effort_fraction,0.)
         return dict(merit=float(np.square(base).sum()+10*np.square(excess).sum()),root_max_normalized=float(abs(base).max()),
             motor_max_ratio=float(motor.max()),speed_max_ratio=float(np.max(speed)),contact_position_error_m=contact_pos,
             contact_rotation_error_rad=contact_rot,environment_penetration_m=penetration,self_penetration_m=self_pen,

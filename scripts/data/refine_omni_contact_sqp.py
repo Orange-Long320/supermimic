@@ -20,8 +20,12 @@ def main():
     p.add_argument('--iterations',type=int,default=12)
     p.add_argument('--solver-backend',choices=['osqp','clarabel'],default='osqp')
     p.add_argument('--restore-feasibility',action='store_true',help='Explicit offline phaseI: minimize reported motor violations at unchanged caps; never a physical pass')
+    p.add_argument('--hard-root-balance',action='store_true',help='PhaseII: require zero linearized floating-base residual without root residual variables')
+    p.add_argument('--effort-fraction',type=float,default=.95,help='Optional conservative fraction, never greater than the original motor rating1.0')
+    p.add_argument('--resume',type=Path,help='Same source/model/window: resume a saved diagnostic candidate and contact coefficients')
     a=p.parse_args()
     if a.out.exists() or not 1<=a.iterations<=20:p.error('New output and at most20 SQP iterations required')
+    if not 0<a.effort_fraction<=1 or (a.hard_root_balance and a.restore_feasibility):p.error('Original motor ratings and distinct phaseI/II required')
     if os.environ.get('CUDA_VISIBLE_DEVICES')!='':raise ValueError('CPU-only diagnostic required')
     a.out.mkdir(parents=True);(a.out/'pid').write_text(str(os.getpid()))
     import mujoco
@@ -33,11 +37,12 @@ def main():
     select_robot('x2_ultra',check_assets=True)
     from supermimic.data.physics_motion import differentiate_qpos
     from omni_contact_window_model import ContactWindow
-    helper=ContactWindow(a.model,a.reference,a.scene,a.start_frame,a.end_frame)
+    helper=ContactWindow(a.model,a.reference,a.scene,a.start_frame,a.end_frame,a.effort_fraction)
     m,d=helper.m,helper.d;start,end=helper.start,helper.end;qs=helper.source.copy()
     count=end-start+1;n=end-start-1;pose_size=n*37
     sizes=[4*len(points) for points in helper.contacts];offsets=np.r_[pose_size,pose_size+np.cumsum(sizes)].astype(int)
-    residual_offset=int(offsets[-1]);motor_violation_offset=residual_offset+count*6
+    residual_offset=int(offsets[-1]);root_residual_size=0 if a.hard_root_balance else count*6
+    motor_violation_offset=residual_offset+root_residual_size
     total=motor_violation_offset+(count*31 if a.restore_feasibility else 0)
     coefficients=[]
     for i,frame in enumerate(range(start,end+1)):
@@ -45,12 +50,26 @@ def main():
         value=nnls(basis[:6]/helper.scales[:,None],required[:6]/helper.scales,maxiter=10000)[0]/helper.weight if basis.shape[1] else np.empty(0)
         coefficients.append(np.clip(value,0,4))
     sha=lambda f:hashlib.sha256(Path(f).read_bytes()).hexdigest()
+    if a.resume:
+        parent=json.loads((a.resume.parent/'progress.json').read_text())
+        bound=json.loads((a.resume.parent/'source-sha256.json').read_text())
+        if parent['source_reference_sha256']!=sha(a.reference) or parent['frames50hz']!=[start,end]:raise ValueError('Resume source/window mismatch')
+        if bound.get(str(a.model))!=sha(a.model) or bound.get(str(a.scene))!=sha(a.scene):raise ValueError('Resume model/scene mismatch')
+        with np.load(a.resume) as z:
+            qs=z['qpos'].copy();flat=z['estimated_contact_coefficients'].copy()
+            np.testing.assert_array_equal(z['coefficient_offsets'],np.r_[0,np.cumsum(sizes)])
+            if float(z['fps'][0])!=50 or qs.shape!=helper.source.shape or not np.isfinite(qs).all():raise ValueError('Resume pose format differs')
+        if not np.isfinite(flat).all() or (flat<0).any() or (flat>4).any():raise ValueError('Invalid saved contact coefficients')
+        cuts=np.r_[0,np.cumsum(sizes)];coefficients=[flat[cuts[i]:cuts[i+1]].copy() for i in range(count)]
+        np.testing.assert_array_equal(qs[:start+1],helper.source[:start+1]);np.testing.assert_array_equal(qs[end:],helper.source[end:])
     sources=[Path(__file__),Path(__file__).with_name('omni_contact_window_model.py'),a.solver_script,a.reference,a.model,a.scene]
+    if a.resume:sources.append(a.resume)
     (a.out/'source-sha256.json').write_text(json.dumps({str(f):sha(f) for f in sources},indent=2))
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     trust=1.;initial=helper.measure(qs,coefficients);history=[];started=time.monotonic()
     record=dict(pid=os.getpid(),source_reference_sha256=sha(a.reference),frames50hz=[start,end],time_scale=1.,
         phase='offline_feasibility_restoration' if a.restore_feasibility else 'strict_motor_linearization',
+        root_balance_is_hard=a.hard_root_balance,effort_fraction_of_original_rating=a.effort_fraction,
         physical_effort_caps_unchanged=True,motor_violation_variables_are_not_actuator_forces=True,
         approved_for_training=False,actual_controller_execution_verified=False,scope=__doc__,initial=initial)
     def progress(**extra):(a.out/'progress.json').write_text(json.dumps(dict(record,history=history,**extra),indent=2))
@@ -110,15 +129,16 @@ def main():
                     scale=helper.scales[j] if j<6 else helper.effort[j-6]
                     ii=list(indices)+force_indices.tolist();dd=np.r_[derivative[j],reaction[j]]/scale
                     if j<6:
-                        ii.append(residual_offset+i*6+j);dd=np.r_[dd,-1.];add(ii,dd,-required[j]/scale,-required[j]/scale)
+                        if not a.hard_root_balance:ii.append(residual_offset+i*6+j);dd=np.r_[dd,-1.]
+                        add(ii,dd,-required[j]/scale,-required[j]/scale)
                     elif a.restore_feasibility:
                         violation=motor_violation_offset+i*31+j-6
                         # The cap stays .95 of the original motor rating.
                         # Positive violation is an explicit unsatisfied offline
                         # constraint; it is never applied or called feasible.
-                        add(ii+[violation],np.r_[dd,-1.],-np.inf,.95-required[j]/scale)
-                        add(ii+[violation],np.r_[dd,1.],-.95-required[j]/scale,np.inf)
-                    else:add(ii,dd,-.95-required[j]/scale,.95-required[j]/scale)
+                        add(ii+[violation],np.r_[dd,-1.],-np.inf,a.effort_fraction-required[j]/scale)
+                        add(ii+[violation],np.r_[dd,1.],-a.effort_fraction-required[j]/scale,np.inf)
+                    else:add(ii,dd,-a.effort_fraction-required[j]/scale,a.effort_fraction-required[j]/scale)
                 # Hinge velocity is linear in neighboring hinge positions.
                 for j in range(31):
                     ii=[];dd=[]
@@ -152,14 +172,14 @@ def main():
                 for i,wrench in enumerate(original_wrenches):
                     witness[offsets[i]:offsets[i+1]]=coefficients[i]
                     witness[residual_offset+i*6:residual_offset+(i+1)*6]=wrench[:6]/helper.scales
-                    witness[motor_violation_offset+i*31:motor_violation_offset+(i+1)*31]=np.maximum(abs(wrench[6:])/helper.effort-.95,0.)+1e-10
+                    witness[motor_violation_offset+i*31:motor_violation_offset+(i+1)*31]=np.maximum(abs(wrench[6:])/helper.effort-a.effort_fraction,0.)+1e-10
                 ax=A@witness;violation=float(max(np.maximum(l-ax,0).max(),np.maximum(ax-u,0).max()))
                 (a.out/'restoration-feasibility-witness.json').write_text(json.dumps(dict(
                     maximum_linear_violation=violation,motor_violation_max_ratio=float(witness[motor_violation_offset:].max()),
                     scope='Offline nonempty search-space witness only; nonzero dynamics/motor violations are not physical support or applied forces'),indent=2))
                 if violation>1e-7:raise ValueError('Restoration matrix failed its explicit feasible-witness check')
             weights=np.r_[np.full(3,10.),np.full(3,5.),np.ones(31)]
-            diagonal=np.r_[np.tile(weights**2,n),np.full(residual_offset-pose_size,1e-4),np.full(count*6,1e4),
+            diagonal=np.r_[np.tile(weights**2,n),np.full(residual_offset-pose_size,1e-4),np.full(root_residual_size,1e4),
                 np.full(count*31 if a.restore_feasibility else 0,1e5)]
             P=sp.diags(diagonal,format='csc');linear=np.zeros(total)
             linear[:pose_size]=(correction[start+1:end]*weights**2).ravel()
