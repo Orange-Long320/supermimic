@@ -13,7 +13,7 @@ import mujoco
 import numpy as np
 from scipy.optimize import nnls
 from scipy.spatial.transform import Rotation
-from supermimic.data.contact_wrench import solve_contact_effort
+from supermimic.data.contact_wrench import solve_contact_effort,convex_contact_points
 
 
 def main():
@@ -105,8 +105,7 @@ def main():
                           & (np.abs(world[:,1]-box.center_y) <= box.width/2))
                 support = ((~inside) & (np.abs(world[:,2]) < .012)) | (inside & (np.abs(world[:,2]-box.height) < .012))
                 near = world[support]
-            if len(near) > 12:
-                near = near[np.linspace(0, len(near) - 1, 12).astype(int)]
+            near=convex_contact_points(near)
             for point in near:
                 contact_points.append(point[:2].tolist())
                 mujoco.mj_jac(model, data, jp, jr, point, int(model.geom_bodyid[g]))

@@ -27,7 +27,7 @@ def main():
     from scipy.interpolate import make_interp_spline
     from scipy.spatial.transform import Rotation
     from supermimic.envs.box_scene import FixedBox
-    from supermimic.data.contact_wrench import solve_contact_effort
+    from supermimic.data.contact_wrench import solve_contact_effort,convex_contact_points
     from supermimic.robots.dimensions import PROFILE
 
     z=np.load(a.source);q=z['qpos'];fps=float(z['fps']);center,half=z['box_center'],z['box_half_size']
@@ -58,7 +58,7 @@ def main():
             world=local@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
             inside=(world[:,0]>=box.front_x)&(world[:,0]<=box.front_x+box.depth)&(abs(world[:,1]-box.center_y)<=box.width/2)
             near=world[((~inside)&(abs(world[:,2])<.012))|(inside&(abs(world[:,2]-box.height)<.012))]
-            if len(near)>12:near=near[np.linspace(0,len(near)-1,12).astype(int)]
+            near=convex_contact_points(near)
             for point in near:
                 mujoco.mj_jac(m,d,jp,jr,point,int(m.geom_bodyid[g]));columns.append(jp.T@rays)
         basis=np.concatenate(columns,axis=1) if columns else None
