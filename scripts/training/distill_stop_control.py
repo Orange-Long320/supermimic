@@ -27,10 +27,12 @@ def main(checkpoint: Path, stop_teacher: Path, manifest: Path, out: Path, update
         "--robot", "x2_ultra", "--velocity.enabled", "--env.anchor-obs", "--run-name", "collection",
         "--log-root", str(out), "--resume", str(checkpoint), "--data.manifest", str(manifest),
         "--env.num-envs", "32", "--env.replay-capacity", "1000", "--env.action-noise-std", "0",
+        "--env.episode-length-s", "25",
         "--env.no-obs-noise", "--env.no-reset-noise", "--env.no-domain-randomization",
         "--wm-trainer.compile", "None", "--policy-trainer.compile", "None",
     ])
     trainer = Trainer(cfg)
+    trainer.env.cfg.auto_reset = False
     original = torch.load(checkpoint, map_location=trainer.device, weights_only=False)
     stop, _ = load_policy_from_checkpoint(stop_teacher, trainer.device)
     stop = stop.encoders["velocity"].requires_grad_(False)
@@ -63,7 +65,11 @@ def main(checkpoint: Path, stop_teacher: Path, manifest: Path, out: Path, update
                 records.append(x.clone()); commands.append(applied.clone())
                 obs, _, terminated, timeout, _ = trainer.env.step(action)
                 if (terminated | timeout).any():
-                    raise RuntimeError("Teacher collection failed; retain log and do not silently reset")
+                    failure = {"step": step + 1, "phase": phase,
+                               "terminated_ids": terminated.nonzero().flatten().tolist(),
+                               "timeout_ids": timeout.nonzero().flatten().tolist(), "trace": trace}
+                    (out / "teacher_failure.json").write_text(json.dumps(failure, indent=2) + "\n")
+                    raise RuntimeError(f"Teacher collection failed at step {step + 1}; term={failure['terminated_ids']}, timeout={failure['timeout_ids']}")
                 if step % 10 == 0:
                     trace.append({"time": (step + 1) * trainer.env.step_dt, "phase": phase,
                                   "command": applied.tolist(), "velocity": measured_velocity(cmd.state_io.read()).tolist()})
