@@ -30,6 +30,7 @@ def support_metrics(rows,first_air):
 
 
 from supermimic.data.entry_state import entry_velocity_state
+from supermimic.data.flight_budget import rising_ballistic_apex
 
 
 def compare_rollout_positions(first,second):
@@ -64,6 +65,8 @@ def main():
     p.add_argument("--landing-frame",type=int)
     p.add_argument("--target-vz",type=float,default=2.4)
     p.add_argument("--target-hy",type=float,default=25.)
+    p.add_argument("--apex-height-weight",type=float,default=0.,help="Optional deficit penalty for predicted COM apex; launch velocity alone ignores launch height")
+    p.add_argument("--target-apex-height",type=float,default=1.,help="Absolute COM apex target in metres; estimated only, never an acceptance certificate")
     p.add_argument("--entry-vx",type=float,help="Initial COM world-x speed; preserve centroidal H and zero planted-foot velocity")
     p.add_argument("--joint-stop-margin",type=float,help="Diagnostic predictive servo guard inside mechanical joint ranges; no state clipping")
     p.add_argument("--joint-stop-horizon",type=float,default=.1)
@@ -94,6 +97,8 @@ def main():
     p.add_argument("--projection-frequency",type=float,default=35.)
     p.add_argument("--projection-margin",type=float,default=.04)
     args=p.parse_args()
+    if not np.isfinite(args.apex_height_weight) or args.apex_height_weight<0 or not np.isfinite(args.target_apex_height) or args.target_apex_height<=0:
+        p.error('Apex objective requires finite nonnegative weight and positive height')
     if args.air_rotation_weight<0 or args.air_rotation_target<=0 or not 0<args.landing_window_seconds<=args.seconds:
         p.error('Invalid airborne-rotation objective or landing window')
     if any(x is not None and (not np.isfinite(x) or x<=0) for x in [args.residual_sigma,args.clock_sigma]):p.error('Search deviations must be finite and positive')
@@ -527,8 +532,15 @@ def main():
             # Prefer the measured ascending flight event and explicitly score
             # continuous air; do not optimize a grounded extension proxy.
             event_rows=[rows[i] for i in positive_air] or [r for r in rows if r["time"]>=.25]
+            def estimated_apex(r):
+                if not np.isfinite([r['com_z'],r['vz']]).all():return None
+                return (rising_ballistic_apex(r['com_z'],r['vz'],-float(m.opt.gravity[2]))
+                    if positive_air else None)
             def event_error(r):
-                return ((r["vz"]-args.target_vz)**2*4+np.sum((np.array(r["momentum"])-[0,args.target_hy,0])**2)/64
+                apex=estimated_apex(r)
+                if apex is None:apex=r['com_z'] if np.isfinite(r['com_z']) else -np.inf
+                apex_cost=(args.apex_height_weight*max(args.target_apex_height-apex,0)**2 if args.apex_height_weight else 0.)
+                return (apex_cost+(r["vz"]-args.target_vz)**2*4+np.sum((np.array(r["momentum"])-[0,args.target_hy,0])**2)/64
                     +sum(max(.025-h,0)*60 for h in r["feet"].values()))
             event=min(event_rows,key=event_error)
             event_cost=event_error(event)
@@ -579,7 +591,9 @@ def main():
             reports.append({"cost":float(cost),"maxima":physical,"air_frames":len(air),
                 "consecutive_ascending_air_frames":longest_air,"single_left_support_frames":len(single),
                 "mean_prelaunch_right_foot_clearance_deficit_m":right_deficit,
-                "objective_event":{"time":event["time"],"vz":event["vz"],"momentum":event["momentum"],"feet":event["feet"]},
+                "objective_event":{"time":event["time"],"vz":event["vz"],"momentum":event["momentum"],"feet":event["feet"],
+                    "com_z":event['com_z'],"ballistic_apex_estimate_m":estimated_apex(event),
+                    "ascending_air_event":bool(positive_air)},
                 "maximum_forward_rotation_rad":float(pitch.max()-pitch[0]),"final":rows[-1],
                 "airborne_forward_rotation_rad":air_rotation,
                 "landing_window_seconds":args.landing_window_seconds,"landing_window_passed":bool(landed),
