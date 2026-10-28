@@ -77,8 +77,9 @@ class NativeContactController(SingleSupportController):
             task=np.r_[task,np.eye(m.nv)[3:6]*acc*weight]
             target_task=np.r_[target_task,np.asarray(self.root_acceleration_ref)*weight]
         grounded=bool(len(self.contact_points(d)))
-        if grounded and getattr(self,'stabilize_support',True):
-            if not getattr(self,'grounded',True):
+        reference_feet=bool(getattr(self,'reference_foot_targets_valid',False))
+        if (grounded or reference_feet) and getattr(self,'stabilize_support',True):
+            if not reference_feet and not getattr(self,'grounded',True):
                 self.foot_position=d.xpos[self.foot].copy()
                 self.foot_rotation=Rotation.from_matrix(d.xmat[self.foot].reshape(3,3))
             rotation=Rotation.from_matrix(d.xmat[self.foot].reshape(3,3))
@@ -211,6 +212,8 @@ class NativeContactController(SingleSupportController):
             'support_velocity_residual':float(np.maximum(velocity_rhs-velocity_matrix@result.x,0).max()) if len(velocity_rows) else 0.,
             'com_acceleration_error':float(np.linalg.norm(com@(result.x*acc)-desired_com)),
             'hard_com_acceleration_active':hard_com,
+            'actual_primary_foot_contact':grounded,
+            'reference_foot_tracking_without_contact':bool(reference_feet and not grounded),
             'desired_com_acceleration':(desired_com+drift[1]).tolist(),
             'achieved_com_acceleration':(com@(result.x*acc)+drift[1]).tolist(),
             'desired_momentum_rate':(desired_momentum+drift[2]).tolist(),

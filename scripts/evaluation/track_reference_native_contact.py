@@ -35,7 +35,9 @@ def main():
     p.add_argument('--support-surface-heights',type=float,nargs='+',help='Explicit horizontal support heights for planned contact recovery')
     p.add_argument('--hard-grounded-com',action='store_true',help='Require the primary COM task when ground contact exists; reject physically infeasible requests')
     p.add_argument('--joint-task-weight',type=float,default=.01,help='Posture task priority; design-controller default is weak, reference tracking may require stronger posture control')
+    p.add_argument('--foot-task-weight',type=float,default=.1,help='Soft reference-foot tracking priority; does not create support forces')
     args=p.parse_args()
+    if not np.isfinite(args.foot_task_weight) or args.foot_task_weight<0:p.error('Foot task weight must be finite and nonnegative')
     if args.joint_prediction_source and not args.native_controller_source:p.error('A private predictor requires an explicit private controller snapshot')
     args.out.mkdir(parents=True,exist_ok=False)
     (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
@@ -67,9 +69,10 @@ def main():
     eq=np.load(args.equilibrium)['qpos'].copy();root=int(m.jnt_bodyid[0])
     feet={s:m.body('robot/'+s+'_ankle_roll_link').id for s in ['left','right']}
     controller=NativeContactController(m,eq,effort,speed,feet['left'])
-    controller.integration_aware=True;controller.foot_task_weight=.1
+    controller.integration_aware=True;controller.foot_task_weight=args.foot_task_weight
     controller.joint_task_weight=args.joint_task_weight
     controller.stabilize_support_normal=args.recover_planned_contacts
+    controller.reference_foot_targets_valid=args.recover_planned_contacts
     controller.com_acceleration_hard=args.hard_grounded_com
     controller.root_acceleration_weight=10.
     kp=m.actuator_gainprm[:,0].copy();kd=-m.actuator_biasprm[:,2].copy()

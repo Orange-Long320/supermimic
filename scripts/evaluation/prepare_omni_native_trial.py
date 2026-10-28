@@ -21,10 +21,11 @@ def main():
     p.add_argument('--seconds',type=float,default=2.)
     p.add_argument('--wall-seconds',type=int,default=180)
     p.add_argument('--joint-task-weight',type=float,default=.1)
+    p.add_argument('--foot-task-weight',type=float,default=.1)
     p.add_argument('--source-start-frame',type=int,help='Required only when the source artifact lacks origin metadata')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
-    if a.out.exists() or min(a.seconds,a.wall_seconds,a.joint_task_weight)<=0:p.error('New output and positive bounds required')
+    if a.out.exists() or min(a.seconds,a.wall_seconds,a.joint_task_weight,a.foot_task_weight)<=0:p.error('New output and positive bounds required')
     from supermimic.robots.paths import ROOT,select_robot
     select_robot('x2_ultra',check_assets=True)
     import mujoco
@@ -77,6 +78,7 @@ def main():
     command=[sys.executable,str(a.out/'tracker.py'),'--model',str(a.model),'--reference',str(a.out/'reference-qpos.npz'),
         '--equilibrium',str(a.out/'controller-posture-seed.npz'),'--start-frame','0','--seconds',str(a.seconds),
         '--entry-velocity-mode','zero','--entry-root-z-offset',str(offset),'--joint-task-weight',str(a.joint_task_weight),
+        '--foot-task-weight',str(a.foot_task_weight),
         '--recover-planned-contacts','--support-surface-heights',*[str(h) for h in sorted(set(heights))],
         '--native-controller-source',str(a.out/'native-inverse-snapshot.py'),'--out',str(a.out/'trace')]
     if a.joint_predictor:command+=['--joint-prediction-source',str(a.out/'joint-prediction-snapshot.py')]
