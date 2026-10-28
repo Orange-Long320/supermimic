@@ -30,6 +30,7 @@ def main():
     p.add_argument('--entry-root-velocity',type=float,nargs=6,default=[0.]*6,
                    help='Initial-only free-root velocity perturbation: world xyz then local angular xyz')
     p.add_argument('--hard-grounded-com',action='store_true',help='Require the primary COM task when ground contact exists; reject physically infeasible requests')
+    p.add_argument('--joint-task-weight',type=float,default=.01,help='Posture task priority; design-controller default is weak, reference tracking may require stronger posture control')
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
     (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (args.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'command':[sys.executable,*sys.argv],
@@ -53,6 +54,7 @@ def main():
     feet={s:m.body('robot/'+s+'_ankle_roll_link').id for s in ['left','right']}
     controller=NativeContactController(m,eq,effort,speed,feet['left'])
     controller.integration_aware=True;controller.foot_task_weight=.1
+    controller.joint_task_weight=args.joint_task_weight
     controller.stabilize_support_normal=args.recover_planned_contacts
     controller.com_acceleration_hard=args.hard_grounded_com
     controller.root_acceleration_weight=10.

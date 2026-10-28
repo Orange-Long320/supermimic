@@ -31,3 +31,13 @@ def test_frame_alternating_noise_is_removed_even_when_central_speed_is_zero():
     assert np.sqrt(np.mean(result[10:-10,7]**2))<.01
     np.testing.assert_array_equal(result[:,8],q[:,8])
     np.testing.assert_array_equal(result[[0,-1]],q[[0,-1]])
+
+
+def test_settling_preserves_entry_speed_without_overshooting_soft_limit():
+    module=load_repair()
+    curve,seconds=module.bounded_settling_curve(-2.067,-2.1,-.726,1.2,-2.238,-.118,.04)
+    assert seconds<1.2
+    np.testing.assert_allclose(curve.derivative()(0),-.726,atol=1e-12)
+    np.testing.assert_allclose(curve.derivative()(seconds),0.,atol=1e-12)
+    values=curve(np.linspace(0,seconds,501))
+    assert values.min()>=-2.238 and values.max()<=-.118

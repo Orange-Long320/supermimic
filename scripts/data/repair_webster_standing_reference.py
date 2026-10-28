@@ -25,6 +25,20 @@ def smoothstep(u):
     return u**3 * (10 + u * (-15 + 6 * u))
 
 
+def bounded_settling_curve(start,end,rate,duration,low,high,min_duration):
+    """Preserve entry velocity using bounded quintic Bezier control points."""
+    if min(start,end)<low-1e-8 or max(start,end)>high+1e-8:
+        raise ValueError('Posture endpoint outside soft limits')
+    seconds=duration
+    if abs(rate)>1e-9:
+        gap=(high-start) if rate>0 else (start-low)
+        seconds=min(seconds,2.5*max(gap-1e-6,0)/abs(rate))
+    if seconds<min_duration:
+        raise ValueError('Incoming rate cannot settle inside limits at this sample rate; start the transition earlier')
+    curve=BPoly.from_derivatives([0,seconds],[[start,rate,0.],[end,0.,0.]])
+    return curve,seconds
+
+
 def smooth_wrists(poses, names, strength=30.):
     """Penalize second differences without moving the first/last wrist pose."""
     result = poses.copy()
@@ -221,7 +235,17 @@ def main():
     def boundary_curve(first,last,seconds,rate):
         return BPoly.from_derivatives([0,seconds],[[first,rate,np.zeros_like(first)],[last,np.zeros_like(first),np.zeros_like(first)]])
     if args.match_entry_velocity:
-        joint_curve=boundary_curve(initial[7:],end[7:],duration,velocity[6:])
+        all_ranges=m.jnt_range[1:];all_centre=all_ranges.mean(axis=1)
+        all_half=np.diff(all_ranges,axis=1)[:,0]*factor/2
+        joint_curves=[];joint_durations=[]
+        for j,name in enumerate(names):
+            if 7+j in columns:
+                joint_curves.append(boundary_curve(np.array(initial[7+j]),np.array(end[7+j]),duration,np.array(velocity[6+j])))
+                joint_durations.append(duration)
+            else:
+                curve_j,seconds_j=bounded_settling_curve(initial[7+j],end[7+j],velocity[6+j],duration,
+                    all_centre[j]-all_half[j],all_centre[j]+all_half[j],2/fps)
+                joint_curves.append(curve_j);joint_durations.append(seconds_j)
         root_angle_curve=boundary_curve(np.zeros(3),(rot0.inv()*rot1).as_rotvec(),duration,velocity[3:6])
         flat_time=min(.25,duration*.4)
         left_angle_curve=boundary_curve(np.zeros(3),(lr.inv()*final_feet['left'][1]).as_rotvec(),flat_time,left_omega)
@@ -258,7 +282,8 @@ def main():
             right_pos=right_pos_curve(min(t,duration*.45))
             right_rot=rr*Rotation.from_rotvec(right_angle_curve(min(t,duration*.45)))
             right_pos[2]=max(right_pos[2],right_floor_height-right_rot.apply(right_local)[:,2].min())
-            root_rot=rot0*Rotation.from_rotvec(root_angle_curve(t));posture[7:]=joint_curve(t)
+            root_rot=rot0*Rotation.from_rotvec(root_angle_curve(t))
+            posture[7:]=[float(c(min(t,seconds))) for c,seconds in zip(joint_curves,joint_durations)]
 
         targets.append((foot_pos,foot_rot,right_pos,right_rot,root_rot,posture))
     # Optimize the complete transition together. Independent frame IK admits
@@ -356,6 +381,7 @@ def main():
             'output_sha256':hashlib.sha256((args.out/'webster.npz').read_bytes()).hexdigest(),
             'frames':len(full),'fps':fps,'transition_frame':frame,'transition_seconds':duration,
             'optimizer_success':bool(solved.success),'optimizer_nfev':int(solved.nfev),
+            'shortened_posture_curves_s':{name:seconds for name,seconds in zip(names,joint_durations) if seconds<duration-1e-8} if args.match_entry_velocity else {},
             'wrist_before':jitter(original),'wrist_after':jitter(source),
             'maximum_arm_clearance_adjustment_rad':float(abs(arm_changes).max()),
             'prefix_com_preservation_max_error_m':max(com_error),
