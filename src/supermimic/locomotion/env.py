@@ -98,7 +98,7 @@ class VelocityMotionCommand(MultiClipMotionCommand):
         # A velocity episode continues physically after its reference clip ends.
         self.clip_end[self.is_velocity] = False
         if env_ids is None:
-            reset = self._env.reset_buf
+            reset = getattr(self._env, "reset_buf", torch.zeros_like(self.is_velocity))
             self.command_age[self.is_velocity & ~reset] += 1
             ids = (self.is_velocity & (self.command_age >= self.command_period)).nonzero().squeeze(-1)
             self._sample_velocity(ids)

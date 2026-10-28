@@ -232,16 +232,17 @@ class Trainer:
         while self.iteration < sch.total_iterations:
             # ---------------- (1) collect one vectorised env step
             t0 = time.perf_counter()
+            used_velocity_command = self.command.velocity_command.clone() if cfg.velocity.enabled else None
             action = self.act(obs)
             obs, rew, term, tout, extras = env.step(action)
             self.ep_reward_sum += rew
             self.ep_len += 1
             if cfg.velocity.enabled:
-                mask = self.command.is_velocity
+                mask = self.command.is_velocity & ~term & ~tout
                 from supermimic.locomotion.task import measured_velocity
 
-                error = measured_velocity(self.recorder.state_io.read()) - self.command.velocity_command
-                if self.writer is not None and self.iteration % sch.log_interval == 0:
+                error = measured_velocity(self.recorder.state_io.read()) - used_velocity_command
+                if self.writer is not None and self.iteration % sch.log_interval == 0 and mask.any():
                     self.writer.add_scalar("velocity/sim_linear_error", float(error[mask, :2].norm(dim=-1).mean()), self.iteration)
                     self.writer.add_scalar("velocity/sim_yaw_error", float(error[mask, 2].abs().mean()), self.iteration)
             done = term | tout
@@ -334,6 +335,11 @@ class Trainer:
                         f"imag_ret {agg.get('policy/imag_return_undisc', float('nan'))/max(agg_n,1):.3f} surv {agg.get('policy/imag_survival_H', float('nan'))/max(agg_n,1):.3f} | "
                         f"t sim/wm/pi {timers['sim']:.1f}/{timers['wm']:.1f}/{timers['policy']:.1f}s"
                     )
+                    if cfg.velocity.enabled:
+                        msg += (
+                            f" | vel_r {agg.get('policy/velocity/reward_mean', float('nan'))/max(agg_n,1):.4f}"
+                            f" vel_surv {agg.get('policy/velocity/survival', float('nan'))/max(agg_n,1):.3f}"
+                        )
                     print(msg, flush=True)
                 agg, agg_n = {}, 0
                 finished_returns, finished_lens = [], []

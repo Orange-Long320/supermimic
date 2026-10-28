@@ -142,3 +142,52 @@ def test_keyboard_release_lease_and_ramp():
     assert mailbox.read(1., now=0.8) == (0., 0., 0.)
     with pytest.raises(ValueError):
         mailbox.put((float("nan"), 0., 0.))
+
+
+def test_tracking_termination_head_excludes_velocity_labels():
+    from supermimic.world_model.heads import ReferenceFrame
+    from supermimic.world_model.world_model import WorldModel, WorldModelCfg
+
+    def termination_features(position, quaternion, reference):
+        return torch.stack((position[:, 2] - reference.root_pos_w[:, 2], position[:, 2] * 0), -1)
+
+    heads = SimpleNamespace(termination_features=termination_features)
+    wm = WorldModel(WorldModelCfg(hidden=(16,), term_hidden=(8,)), heads, "cpu")
+    state = standing()
+    reference = ReferenceFrame(None, None, None, None, state[:, :3], state[:, 3:7])
+    states = torch.stack((state, state + 0.01))
+    loss, metrics = wm.window_loss(
+        states, torch.zeros(1, 2, NJ), torch.zeros(2, XI_DIM), torch.ones(1, 2),
+        [reference], termination_mask=torch.zeros(1, 2, dtype=torch.bool),
+    )
+    loss.backward()
+    assert metrics["term_bce"] == 0
+    assert all(p.grad is None or not p.grad.any() for p in wm.term_head.parameters())
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in wm.dynamics.parameters())
+
+
+@pytest.mark.gpu
+@pytest.mark.dataset
+def test_velocity_clip_end_does_not_reset_physical_state():
+    from supermimic.envs import SuperMimicEnvCfgArgs, make_env
+    from supermimic.robots.paths import lafan_npz_dir
+
+    motion = lafan_npz_dir() / "walk1_subject1.npz"
+    if not torch.cuda.is_available() or not motion.exists():
+        pytest.skip("Needs server GPU and prepared walking motion")
+    env = make_env(SuperMimicEnvCfgArgs(
+        npz_files=[str(motion)], num_envs=4, record_transitions=False,
+        domain_randomization=False, reset_noise=False, obs_noise=False,
+        velocity=VelocityCfg(enabled=True),
+    ))
+    try:
+        cmd = env.command_manager.get_term("motion")
+        env.reset()
+        cmd.frame[:] = cmd.library.clip_last[0]
+        before = cmd.state_io.read()
+        cmd._update_command()
+        torch.testing.assert_close(cmd.state_io.read(), before, rtol=0, atol=0)
+        assert not cmd.clip_end[cmd.is_velocity].any()
+        assert cmd.clip_end[~cmd.is_velocity].all()
+    finally:
+        env.close()
