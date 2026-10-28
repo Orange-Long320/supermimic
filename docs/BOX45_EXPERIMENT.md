@@ -215,3 +215,5 @@
 - 已核验现有X2 LAFAN70000控制器SHA `dc8f02f29f6e03064e9e3c9f4de3cb831a241181636c012dbbb558ee681377a8`，源文件读取前后inode/大小/mtime不变；只提取policy/config为36.48MB私有冻结快照 `omni_frozen_lafan_20261029_r1/frozen-policy.pt`，SHA `191772bb2adc8db5eb8b2f5ea8815320bb2f1e44f8d68455a0e1a884cf9dee7e`。机器人x2_ultra、anchor_obs=true、goal_dim729已核对，不训练或修改该控制器。
 - 新原生CPU冻结策略诊断入口复用项目已有analytic_observation/flatten_history_term_major/anchor_relative_obs/MotionLibrary，不改观测维度或加未训练的箱体特征。对照实际mjlab CircularBuffer源码确认初始历史填满首帧，沿用已有参考时钟下一控制帧预览。模型沿用已验证Scene/get_robot_cfg/MujocoCfg编译入口，普通位置电机目标为原default+action_scale*action，无根力或中途状态重置。仍须先做与现有环境的初始接口一致性检查，再运行完整CPU诊断及独立命令重放/几何/力矩验收；该过程是冻结反馈验证与可能的参考生成，不是新策略训练，现有失败参考不会自动批准。
 - 50Hz诊断导出使用PCHIP位置/关节、SLERP根姿态、与输出时钟一致的广义速度，并记录不足一个控制步的统一时长变化；原始30Hz候选保持不变，不把30Hz数据直接按50Hz播放。新导出和原生冻结策略入口均为checkpoint，尚无爬箱成功证据。
+- 50Hz导出与原生场景编译均实际完成：step28输出603帧/12.04秒（原12.0333秒，统一时间因子1.000554）；hand46输出605帧/12.08秒（原12.0667秒，因子1.001105）。两者0.9重置界内，原生31电机、原质量惯量/限位/原箱顶及正面实际碰撞探针均通过；这不是动作验收。
+- 初始接口检查入口将与真实CPU mjlab环境的首次reset比较初始状态、完整历史、下一控制帧goal、冻结策略输出和电机目标。执行前核对了实际CircularBuffer首帧回填规则；策略目标的default/action_scale也按原float32处理后送原生电机。尚未执行完不将手写适配当作已验证接口。

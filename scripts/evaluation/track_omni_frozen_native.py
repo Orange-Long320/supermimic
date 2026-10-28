@@ -44,7 +44,7 @@ def main():
     if (checkpoint_before.st_ino,checkpoint_before.st_size,checkpoint_before.st_mtime_ns)!=(checkpoint_after.st_ino,checkpoint_after.st_size,checkpoint_after.st_mtime_ns):raise ValueError('Controller changed while loading')
     if cfg.get('robot')!='x2_ultra' or cfg['env'].get('box'):raise ValueError('Expected the existing non-box X2 motion controller')
     defaults=torch.tensor([PROFILE['default_joint_pos'][n] for n in names],dtype=torch.float32)
-    scale=np.array([PROFILE['action_scale'][n] for n in names],dtype=float)
+    scale=torch.tensor([PROFILE['action_scale'][n] for n in names],dtype=torch.float32)
     effort=np.array([PROFILE['effort_limit'][n] for n in names],dtype=float)
     lib=MotionLibrary([a.motion],tuple(PROFILE['tracked_bodies']),defaults,device='cpu')
     anchor_name=PROFILE['anchor_body'];anchor=m.body('robot/'+anchor_name).id;anchor_index=lib.body_names.index(anchor_name)
@@ -73,7 +73,7 @@ def main():
                 goal=torch.cat([goal,rel],dim=-1)
             observation=flatten_history_term_major(torch.stack(history,dim=0))
             obs_trace.append(observation[0].numpy().copy());goal_trace.append(goal[0].numpy().copy())
-            action=policy(observation,goal);target=defaults.numpy()+action[0].numpy()*scale
+            action=policy(observation,goal);target=(defaults+action[0]*scale).numpy().astype(float)
             if not np.isfinite(target).all():raise ValueError('Nonfinite policy command')
             actions.append(action[0].numpy().copy())
             for substep in range(4):
