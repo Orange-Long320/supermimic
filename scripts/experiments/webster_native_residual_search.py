@@ -228,7 +228,7 @@ def main():
             'free_gpu_mib_at_start':free,'torch_peak_allocated_mib':torch.cuda.max_memory_allocated()/2**20,
             'torch_peak_reserved_mib':torch.cuda.max_memory_reserved()/2**20,'best':best_summary,
             'source_sha256':digest(args.source),'checkpoint_sha256':digest(args.ckpt),
-            'limitation':'Two-second native search proposal with live policy feedback; independent seven-second replay required',
+            'limitation':f'{args.seconds:g}-second native search proposal with live policy feedback; independent seven-second replay required',
             'physical_candidate_passed':False,'approved_for_training':False}
         (args.out/'completed.json').write_text(json.dumps(record,indent=2,default=str))
     finally:
