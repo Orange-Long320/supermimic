@@ -27,6 +27,7 @@ def main():
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--hold-last-reference',action='store_true',help='Ignore clip-end timeout and hold its last reference state; original physical failures still stop capture')
     p.add_argument('--record-observations',action='store_true')
+    p.add_argument('--clip-servo-targets',action='store_true',help='Diagnostic only: clamp proposed motor position targets to original hard joint ranges; not policy-alone execution')
     p.add_argument('--residual-commands',type=Path,help='Explicit 50 Hz additive action proposal; marks capture as hybrid control')
     p.add_argument('--prefix-trace',type=Path,help='Directory containing recorded 50 Hz actions and initial native state')
     p.add_argument('--prefix-until',type=float,default=0.,help='Keep recorded commands until this time, then blend back to the live policy')
@@ -37,6 +38,7 @@ def main():
     if args.prefix_trace and (args.prefix_until<=0 or args.prefix_blend<0):p.error('Prefix needs positive duration and nonnegative blending')
     if not args.prefix_trace and (args.prefix_until or args.prefix_joints):p.error('Prefix options require a recorded trace')
     if args.residual_commands and (args.prefix_trace or args.start_frame):p.error('Residual proposals require frame zero and no recorded prefix')
+    if args.clip_servo_targets and (args.residual_commands or args.prefix_trace):p.error('Servo clipping diagnostic must be isolated from other command interventions')
     args.out.mkdir(parents=True,exist_ok=False)
     as_run_source=Path(__file__).read_bytes()
     torch.set_num_threads(1)
@@ -78,6 +80,13 @@ def main():
         half=.45*np.diff(model.jnt_range[1:],axis=1).ravel()
         lower,upper=centre-half,centre+half
         hard_lower,hard_upper=model.jnt_range[1:].T
+        target_scale=PROFILE['action_scale']
+        target_scale=np.array([target_scale[n] for n in PROFILE['joint_names']]) if isinstance(target_scale,dict) else np.full(len(hard_lower),target_scale)
+        if not np.isfinite(target_scale).all() or not (target_scale>0).all():raise ValueError('Expected positive finite action scales')
+        target_default=np.array([PROFILE['default_joint_pos'][n] for n in PROFILE['joint_names']])
+        clip_lower=torch.as_tensor((hard_lower-target_default)/target_scale,device=args.device)
+        clip_upper=torch.as_tensor((hard_upper-target_default)/target_scale,device=args.device)
+        clipped_commands=0
         assert [model.joint(i).name.rsplit('/',1)[-1] for i in range(1,model.njnt)]==list(PROFILE['joint_names'])
         effort=np.array([PROFILE['effort_limit'][n] for n in PROFILE['joint_names']])
         speed=np.array([PROFILE['velocity_limit'][n] for n in PROFILE['joint_names']])
@@ -148,6 +157,10 @@ def main():
                     fraction=min(max((t-args.prefix_until)/args.prefix_blend,0),1) if args.prefix_blend else 0.
                     recorded=torch.as_tensor(prefix_actions[step,prefix_indices],dtype=action.dtype,device=action.device)
                     action[:,prefix_indices]=torch.lerp(recorded,action[:,prefix_indices],fraction)
+                if args.clip_servo_targets:
+                    proposed=action
+                    action=torch.maximum(torch.minimum(action,clip_upper),clip_lower).to(proposed.dtype)
+                    clipped_commands+=int(bool((action!=proposed).any()))
                 actions.append(action[0].cpu().numpy().copy())
                 obs,*_=env.step(action)
                 if prefix_actions is not None and t<args.prefix_until+args.prefix_blend and t<=args.prefix_until and len(prefix_indices)==len(PROFILE['joint_names']):
@@ -178,7 +191,8 @@ def main():
             'maximum_soft_violation':float(a[:,12].max()),'maximum_speed_ratio':float(a[:,13].max()),
             'maximum_effort_ratio':float(a[:,14].max()),'approved_for_training':False,
             'maximum_hard_violation':float(a[:,15].max()),'hard_joint_ranges_rad':model.jnt_range[1:].tolist(),
-            'policy_alone':prefix_details is None and residual_details is None,'recorded_prefix':prefix_details,
+            'policy_alone':prefix_details is None and residual_details is None and not args.clip_servo_targets,'recorded_prefix':prefix_details,
+            'diagnostic_servo_target_clipping':args.clip_servo_targets,'clipped_command_steps':clipped_commands,
             'recorded_residual':residual_details,
             'prefix_reproduction_maximum_qpos_error':max(prefix_errors) if prefix_errors else None,
             'maximum_foot_compression_m':float(max(-a[:,7:9].min(),0)),
