@@ -75,3 +75,15 @@
 - 结束后脚本保存 `ckpt_final.pt` 并运行 60 秒连续评测，产出 `eval_60s.json`；评测包括首次失败、重置次数、稳定阶段速度误差和零指令停稳速度。只有评测完成后才能判断是否达到目标。
 - 原 GPU0 Webster 任务未修改、未停止。训练权重和数据没有提交到 Git；固定源码与本地提交已在服务器保存 bundle 备份。
 - 浏览器键盘 HTTP 传输测试已通过（1 passed），覆盖命令送达与非法输入拒绝；未把它作为策略学会行走的证据。
+
+## 第 1000 步前进/转向/停止录像（已完成）
+
+- 用户要求录制当前模型。选取请求时最新的不可变检查点 `x2_velocity_pilot_1h_gpu1_20261028_r1/ckpt_0001000.pt`，SHA256 `7ce64ce1a148c00ecbd3f5cea6cdc25b8571ed8cfe3d750af641009f29550fb4`。
+- 新增录像入口 `scripts/evaluation/render_velocity.py`，源码回档点 `fe1ef6b`；复用训练源码 `36900b0` 和专用主环境，未改正在训练的快照。
+- 录像在空闲 GPU2 执行，CUDA 与 EGL 都显式指定 GPU2。会话 `x2_velocity_video_20261028_r1`，录像 Python PID `911221`；已正常退出码 0。GPU1 训练继续运行。
+- 运行命令与哈希：`/home/2025-Long.xh/HHD/data/supermimic/logs/x2_velocity_video_20261028_r1/`。
+- 服务端视频与逐帧测量：`/home/2025-Long.xh/HHD/data/supermimic/videos/x2_velocity_preview_20261028_r1/forward_turn_stop.mp4`、同名 JSON。
+- 24 秒、1280×720、25 FPS、600 帧，H.264。未挑选多个种子；seed=0 的首次连续物理 rollout，展示 env0，无重置、无跌倒。0–2 秒零指令，2–9 秒前进 0.3 m/s，9–16 秒前进 0.3 m/s 加左转 0.4 rad/s，16–24 秒零指令。
+- 画面显示目标/实际速度、阶段与移动轨迹；速度接口的策略输入不包含未来参考姿态。已检查四时刻拼图，图像、阶段标签与速度读数正常。
+- 各阶段去除首 1 秒后，本次单条轨迹测得：前进平均 `vx=0.290 m/s`（目标 0.3）；左转平均 `wz=0.085 rad/s`（目标 0.4）；STOP 平均平面速度 `0.267 m/s`（目标 0）。结论是前进速度接近目标，但转向响应偏弱、尚不能停稳；视频不是完整训练验收或泛化证明。
+- 视频与 JSON 已传回本地可展示目录 `/Users/orange/.codex/visualizations/2026/10/28/01a18229-5cdd-7ed0-9053-e5e3931e9a95/x2_velocity_preview/`，产物未提交 Git。
