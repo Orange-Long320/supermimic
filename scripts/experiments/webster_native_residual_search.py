@@ -38,13 +38,17 @@ def main():
     p.add_argument('--max-seconds', type=float, default=300.)
     p.add_argument('--seconds', type=float, default=2.)
     p.add_argument('--sigma', type=float, default=.04)
+    p.add_argument('--initialize', type=Path, help='Same-source residual coefficients for local refinement')
+    p.add_argument('--terminal-seconds', type=float, default=.3)
     args = p.parse_args()
     if args.out.exists() or args.ckpt.name == 'ckpt_latest.pt':
         p.error('Use a fresh directory and immutable checkpoint')
-    if not 8 <= args.envs <= 256 or not 0 <= args.iterations <= 32 or not 1.8 <= args.seconds <= 3.:
+    if not 8 <= args.envs <= 256 or not 0 <= args.iterations <= 32 or not 1.8 <= args.seconds <= 7.:
         p.error('Invalid bounded native search')
     if not 0 < args.sigma <= .1 or not 0 < args.max_seconds <= 900:
         p.error('Invalid search budget')
+    if not .3 <= args.terminal_seconds <= 1. or args.terminal_seconds > args.seconds:
+        p.error('Invalid terminal stability window')
     if os.environ.get('CUDA_VISIBLE_DEVICES') != str(args.gpu):
         raise ValueError('Explicit physical GPU selection is required')
     query = lambda kind, fields: subprocess.check_output(
@@ -174,7 +178,7 @@ def main():
                 rotation = float(pitch[i,end]-pitch[i,first]) if first is not None else 0.
                 total = float(pitch[i].max()-pitch[i,0])
                 hard = float(r[:,8].max()); foot = float(max(-r[:,:2].min(),0)); body = float(r[:,2].min())
-                tail = s[-15:]
+                tail = s[-round(args.terminal_seconds/.02):]
                 support_window = s[max(0,(first or 0)-8):(first or 0)]
                 left = (support_window[:,0]<.01)&(support_window[:,1]>.04)
                 support = len(left)>=4 and left.sum()>=4 and (support_window[:,1]>.04).all()
@@ -189,6 +193,18 @@ def main():
             return summaries
         dim = (len(knots)-2, len(joints))
         mean = torch.zeros(dim, device=device)
+        if args.initialize:
+            with np.load(args.initialize) as seed:
+                if str(seed['source_checkpoint_sha256']) != digest(args.ckpt) or str(seed['reference_sha256']) != digest(args.source):
+                    raise ValueError('Initialization belongs to a different source policy/reference')
+                coefficients = seed['parameters'].copy()
+                if coefficients.shape != dim or not np.isfinite(coefficients).all() or abs(coefficients).max() > .200001 or not np.array_equal(seed['knot_times'], knots):
+                    raise ValueError('Initialization coefficient layout/bounds differ')
+                reproduced = torch.einsum('tk,kg,gj->tj', basis_t,
+                    torch.tensor(coefficients, dtype=torch.float32, device=device), mapping).cpu().numpy()
+                if seed['actions'].shape != reproduced.shape or abs(reproduced-seed['actions']).max() >= 1e-6:
+                    raise ValueError('Initialization actions do not match the recorded coefficient basis')
+                mean.copy_(torch.tensor(coefficients, device=device))
         std = torch.full(dim, args.sigma, device=device)
         best_parameters = mean.clone(); best_summary = None
         start = time.monotonic(); completed = 0
@@ -197,7 +213,9 @@ def main():
             population = mean+torch.randn(args.envs, *dim, device=device)*std
             population.clamp_(-.2,.2)
             population[0] = best_parameters
-            if iteration == 0: population.zero_()
+            if iteration == 0:
+                population[:] = mean
+                population[-1].zero_()  # Retain a real unchanged-policy control.
             rows, failed = rollout(population)
             summaries = score(rows, failed, population)
             order = sorted(range(args.envs), key=lambda i:summaries[i]['score'])
@@ -228,6 +246,7 @@ def main():
             'free_gpu_mib_at_start':free,'torch_peak_allocated_mib':torch.cuda.max_memory_allocated()/2**20,
             'torch_peak_reserved_mib':torch.cuda.max_memory_reserved()/2**20,'best':best_summary,
             'source_sha256':digest(args.source),'checkpoint_sha256':digest(args.ckpt),
+            'initialization_sha256':digest(args.initialize) if args.initialize else None,
             'limitation':f'{args.seconds:g}-second native search proposal with live policy feedback; independent seven-second replay required',
             'physical_candidate_passed':False,'approved_for_training':False}
         (args.out/'completed.json').write_text(json.dumps(record,indent=2,default=str))
