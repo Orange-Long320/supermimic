@@ -12,6 +12,7 @@ def main():
     p.add_argument('--model',type=Path,required=True)
     p.add_argument('--scene',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--preview-fps',type=float,default=15.,help='Temporal sampling for bounded CPU previews; playback keeps source duration')
     a=p.parse_args()
     if a.out.exists():p.error('Output exists')
     os.environ.setdefault('MUJOCO_GL','osmesa')
@@ -20,6 +21,7 @@ def main():
     from PIL import Image
     from scipy.spatial.transform import Rotation
     with np.load(a.reference,allow_pickle=False) as z:q=z['qpos'];fps=float(np.asarray(z['fps']).reshape(-1)[0])
+    if not np.isfinite(a.preview_fps) or not 0<a.preview_fps<=fps:p.error('Preview rate must be positive and at most the source rate')
     spec=mujoco.MjSpec.from_file(str(a.model));scene=json.loads(a.scene.read_text())
     spec.worldbody.add_geom(name='preview_floor',type=mujoco.mjtGeom.mjGEOM_PLANE,size=(0,0,.05),rgba=(.75,.75,.75,1))
     spec.worldbody.add_light(pos=(1,-3,5),dir=(0,0,-1))
@@ -33,7 +35,7 @@ def main():
     camera.lookat[:2]=(q[:,:2].min(0)+q[:,:2].max(0))/2;camera.lookat[2]=.8
     camera.distance=max(3.,float(np.ptp(q[:,:2],axis=0).max())*1.2+1.5);camera.azimuth=135;camera.elevation=-20
     a.out.parent.mkdir(parents=True,exist_ok=True)
-    step=max(1,round(fps/15));label="drawtext=text='X2 KINEMATIC CANDIDATE | not policy or physics execution':x=8:y=8:fontsize=15:fontcolor=white:box=1:boxcolor=black@0.7"
+    step=max(1,round(fps/a.preview_fps));label="drawtext=text='X2 KINEMATIC CANDIDATE | not policy or physics execution':x=8:y=8:fontsize=15:fontcolor=white:box=1:boxcolor=black@0.7"
     command=['ffmpeg','-nostdin','-v','error','-f','rawvideo','-pix_fmt','rgb24','-s','640x480','-r',str(fps/step),'-i','pipe:0','-an','-vf',label,'-c:v','libx264','-threads','2','-pix_fmt','yuv420p','-movflags','+faststart','-n',str(a.out)]
     previews=[];preview_indices=set(np.linspace(0,len(q)-1,4).astype(int).tolist())
     with mujoco.Renderer(model,width=640,height=480) as renderer:
