@@ -5,7 +5,6 @@ import hashlib
 import io
 import json
 from pathlib import Path
-import shutil
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -21,6 +20,7 @@ def main():
     import mujoco
     import numpy as np
     from scipy.spatial.transform import Rotation
+    from scipy.spatial import ConvexHull
     raw=a.source.resolve();a.out.mkdir(parents=True)
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     config=raw/'holosoma-sources/src/holosoma_retargeting/holosoma_retargeting/config_types/data_conversion.py'
@@ -77,8 +77,14 @@ def main():
                 vertices*=np.fromstring(mesh.get('scale','1 1 1'),sep=' ')
                 pose=poses[link.get('name')]@transform(collision.find('origin'))
                 vertices=vertices@pose[:3,:3].T+pose[:3,3]
-                if any(len(np.unique(vertices[:,axis].round(8)))!=2 for axis in range(3)):raise ValueError('Expected axis-aligned source boxes')
-                result.append({'name':link.get('name'),'low':vertices.min(0).tolist(),'high':vertices.max(0).tolist()})
+                footprint=vertices[ConvexHull(vertices[:,:2]).vertices,:2]
+                if len(footprint)!=4:raise ValueError('Expected rectangular source terrain')
+                axis=footprint[1]-footprint[0];axis/=np.linalg.norm(axis)
+                rotation=np.eye(3);rotation[:2,0]=axis;rotation[:2,1]=[-axis[1],axis[0]]
+                local=vertices@rotation;lo,hi=local.min(0),local.max(0)
+                if np.minimum(abs(local-lo),abs(local-hi)).max()>1e-6:raise ValueError('Source mesh is not a horizontal rectangular prism')
+                result.append({'name':link.get('name'),'low':vertices.min(0).tolist(),'high':vertices.max(0).tolist(),
+                    'center':(rotation@((lo+hi)/2)).tolist(),'half_size':((hi-lo)/2).tolist(),'rotation_world':rotation.tolist()})
         return result
 
     rows=[];candidates=[]
@@ -100,7 +106,9 @@ def main():
             for box in scene_boxes:
                 low,high=np.array(box['low']),np.array(box['high']);height=float(high[2])
                 if height<.12:continue
-                on=((foot[:,:,:2]>=low[:2]-.02)&(foot[:,:,:2]<=high[:2]+.02)).all(2)&(abs(foot[:,:,2]-height)<.04)
+                center,half,rotation=np.array(box['center']),np.array(box['half_size']),np.array(box['rotation_world'])
+                local_feet=(foot-center)@rotation;local_hands=(hand-center)@rotation
+                on=(abs(local_feet[:,:,:2])<=half[:2]+.02).all(2)&(abs(local_feet[:,:,2]-half[2])<.04)
                 both=on.all(1);runs=[];start=None
                 for k,flag in enumerate(np.r_[both,False]):
                     if flag and start is None:start=k
@@ -111,10 +119,10 @@ def main():
                 first=begin
                 while first>0 and on[first-1].any():first-=1
                 begin_window=max(0,first-round(.6*fps/stride));end_window=min(len(frames),end+1)
-                distance=np.linalg.norm(np.maximum(np.maximum(low-hand,hand-high),0),axis=2)
+                distance=np.linalg.norm(np.maximum(abs(local_hands)-half,0),axis=2)
                 possible_hands=bool((distance[begin_window:end_window]<.08).any())
                 ground=bool((abs(foot[begin_window,:,2])<.06).all())
-                candidates.append({'motion':entry,'box':box,'height_m':height,'dimensions_m':(high-low).tolist(),
+                candidates.append({'motion':entry,'box':box,'height_m':height,'dimensions_m':(half*2).tolist(),
                     'start_frame':int(frames[begin_window]),'end_frame':int(frames[min(end_window-1,len(frames)-1)]),
                     'both_feet_near_top_seconds':length*stride/fps,'possible_hand_contact':possible_hands,'starts_near_ground':ground,
                     'height_error_m':abs(height-a.preferred_height),'fps':fps})
