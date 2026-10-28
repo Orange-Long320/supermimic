@@ -75,15 +75,19 @@ def main():
         if distances.min()<-.00085 or (len(gaps) and gaps.max()>.001):
             pose,info=helper.restore_pose(m,pose,{}, {},lower,upper,surface_pairs=contact_pairs,
                 robot_geometry=robot,terrain_geometry=terrain,translation_domain=.02,rotation_domain=.05,max_nfev=60)
-            if not info['geometry_and_task_feasible']:
-                (a.out/'failure.json').write_text(json.dumps({'index':index,'restoration':info},indent=2))
-                np.savez_compressed(a.out/'failed-pose.npz',qpos=pose,original=dense[index])
-                raise RuntimeError(f'Geometry resampling rejected frame {index}')
         d.qpos[:]=pose;mujoco.mj_forward(m,d)
         penetration=max(0.,-min(float(mujoco.mj_geomDistance(m,d,g,o,.02,witness)) for g,o in pairs))
+        contact_gap=max([0.]+[float(mujoco.mj_geomDistance(m,d,g,o,10.,witness)) for g,o in contact_pairs])
         soft=float(np.maximum(np.maximum(lower-pose[7:],pose[7:]-upper),0).max())
-        if penetration>.001 or soft>1e-8:raise RuntimeError('Independent post-projection bound failed')
+        # The optimizer aims for 0.8 mm. Its internal target is distinct from
+        # the unchanged independently checked 1 mm acceptance threshold.
+        if penetration>.001 or contact_gap>.001 or soft>1e-8:
+            (a.out/'failure.json').write_text(json.dumps({'index':index,'restoration':info,
+                'penetration_m':penetration,'contact_gap_m':contact_gap,'task_joint_violation_rad':soft},indent=2))
+            np.savez_compressed(a.out/'failed-pose.npz',qpos=pose,original=dense[index])
+            raise RuntimeError(f'Independent resampling constraints rejected frame {index}')
         accepted.append(pose);rows.append({'index':index,'penetration_m':penetration,'contact_pairs':len(contact_pairs),
+            'source_contact_gap_m':contact_gap,'task_joint_violation_rad':soft,
             'maximum_joint_correction_rad':float(abs(pose[7:]-dense[index,7:]).max()),'restoration':info})
         if index%100==0:print(json.dumps({k:v for k,v in rows[-1].items() if k!='restoration'}),flush=True)
     accepted=np.asarray(accepted)
