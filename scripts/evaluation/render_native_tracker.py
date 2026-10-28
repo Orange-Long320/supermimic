@@ -13,6 +13,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--trace',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--support-height',type=float,default=0.)
     args=p.parse_args()
     if args.out.exists():p.error('Output already exists')
     report=json.loads((args.trace/'result.json').read_text())
@@ -23,7 +24,7 @@ def main():
     z=np.load(args.trace/'trajectory.npz');states=z['state'];dt=float(z['dt'])
     stride=max(1,round(1/(50*dt)));fps=1/(stride*dt)
     camera=mujoco.MjvCamera();camera.type=mujoco.mjtCamera.mjCAMERA_FREE
-    camera.lookat[:]=states[:,:3].mean(axis=0);camera.lookat[2]=.65
+    camera.lookat[:]=states[:,:3].mean(axis=0);camera.lookat[2]=.65+args.support_height
     camera.distance=2.7;camera.azimuth=120;camera.elevation=-12
     width=min(960,m.vis.global_.offwidth);height=min(720,m.vis.global_.offheight)
     args.out.parent.mkdir(parents=True,exist_ok=True)

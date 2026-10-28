@@ -27,8 +27,12 @@ def main():
     p.add_argument('--standing-endpoint',type=Path,help='Checked box-top equilibrium; align only its horizontal foot-hull centre')
     p.add_argument('--constraint-rounds',type=int,default=1,help='Augmented-Lagrangian rounds for native clearance constraints')
     p.add_argument('--static-balance',action='store_true',help='Constrain COM projection inside planned support polygon with 5mm margin')
+    p.add_argument('--contact-consistent',action='store_true',help='Use 0.5mm compliant compression for planted feet')
+    p.add_argument('--waist-effort',action='store_true',help='Reserve 20 percent waist motor effort above gravity demand')
+    p.add_argument('--constraint-tolerance',type=float,default=.0005)
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
+    if a.constraint_rounds<1 or a.constraint_tolerance<=0:p.error('Positive constraint rounds/tolerance required')
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
     import mujoco
@@ -42,6 +46,7 @@ def main():
     from supermimic.robots.assets import get_spec
     from supermimic.envs.box_scene import FixedBox
     from supermimic.data.physics_motion import differentiate_qpos,export_qpos_motion
+    from supermimic.robots.dimensions import PROFILE
 
     z=np.load(a.source);original=z['qpos'].copy();fps=float(z['fps'])
     center,half=z['box_center'],z['box_half_size']
@@ -150,6 +155,7 @@ def main():
             else:point=right+((right+left_top)/2-right)*ease((t-ld)/1.)
             com[i,:2]=point
         com_weight=500.
+    contact_strength=np.zeros((n,2))
     balance_normals=[];balance_offsets=[];max_faces=0
     if a.static_balance:
         if not a.support_centred:raise ValueError('Static balance requires explicit support phases')
@@ -169,6 +175,16 @@ def main():
             points=[]
             for j,(side,b) in enumerate(zip(('left','right'),bodies)):
                 lift,land=[timing[side][k]*scale for k in ('lift_seconds','land_seconds')]
+                u=(t-lift)/(land-lift)
+                strength=1. if u<=0 or u>=1 else 1-ease(u/.08) if u<.08 else ease((u-.92)/.08) if u>.92 else 0.
+                contact_strength[i,j]=strength
+                if a.contact_consistent and strength>0:
+                    position,rotation=targets[i][j]
+                    world=np.asarray(foot_local[b])@rotation.T+position
+                    surface=0. if t<(lift+land)/2 else box.height
+                    correction=(world[:,2].min()-(surface-.0005))*strength*(1-end_blend[i])
+                    position=position.copy();position[2]-=correction
+                    targets[i][j]=(position,rotation)
                 if lift<t<land:continue
                 position,rotation=targets[i][j]
                 world=np.asarray(foot_local[b])@rotation.T+position
@@ -179,6 +195,15 @@ def main():
             balance_normals.append(hull.equations[:,:2]);balance_offsets.append(hull.equations[:,2])
             max_faces=max(max_faces,len(hull.equations))
         width+=max_faces
+    elif a.contact_consistent:raise ValueError('Contact-consistent targets require static-balance support phases')
+    waist_count=6 if a.waist_effort else 0
+    if waist_count:
+        gravity_model=spec.compile();gravity_model.opt.disableflags|=int(mujoco.mjtDisableBit.mjDSBL_CONTACT)|int(mujoco.mjtDisableBit.mjDSBL_LIMIT)
+        gravity_data=mujoco.MjData(gravity_model)
+        waist_names=['waist_'+j+'_joint' for j in ('yaw','roll','pitch')]
+        waist_dofs=np.array([gravity_model.jnt_dofadr[gravity_model.joint(s).id] for s in waist_names],dtype=int)
+        waist_caps=np.array([PROFILE['effort_limit'][s] for s in waist_names])
+        gravity_derivative=np.zeros((m.nv,m.nv));width+=waist_count
     smooth=gaussian_filter1d(original[:end+1,7:],fps*.15,axis=0,mode='nearest')
     rotation=Rotation.from_quat(original[:end+1,[4,5,6,3]])
     reference_rotation=rotation[0]
@@ -212,7 +237,7 @@ def main():
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (a.out/'launch.json').write_text(json.dumps({'argv':[sys.executable,*sys.argv],'pid':os.getpid(),'source_sha256':hashlib.sha256(a.source.read_bytes()).hexdigest()},indent=2)+'\n')
     cache={};calls=0
-    penalty=1500.**2;lagrange=np.zeros((n,2*len(geoms)+max_faces));constraint_history=[]
+    penalty=1500.**2;lagrange=np.zeros((n,2*len(geoms)+max_faces+waist_count));constraint_history=[]
 
     def evaluate(flat):
         nonlocal calls
@@ -251,7 +276,10 @@ def main():
             collision_column=0
             for g in geoms:
                 is_foot=m.geom(g).name.startswith('foot_')
-                foot_margin=a.foot_margin*(1-end_blend[i])-.001*end_blend[i] if standing is not None else a.foot_margin
+                foot_margin=a.foot_margin*(1-end_blend[i])-.0008*end_blend[i] if standing is not None else a.foot_margin
+                if a.contact_consistent and is_foot:
+                    j=bodies.index(int(m.geom_bodyid[g]));strength=max(contact_strength[i,j],end_blend[i])
+                    foot_margin=a.foot_margin*(1-strength)-.0008*strength
                 for obstacle,margin in [(box_id,foot_margin if is_foot else .006),(floor_id,max(.001,foot_margin) if is_foot and standing is None else foot_margin if is_foot else .006)]:
                     dist=mujoco.mj_geomDistance(m,d,g,obstacle,.05,witness)
                     gap=margin-dist;violations[i,collision_column]=gap
@@ -273,6 +301,18 @@ def main():
                         r[row]=shifted*np.sqrt(penalty);jac[row,cols]=normal@com_jac*np.sqrt(penalty)
                 else:violations[i,collision_column]=-1.
                 row+=1;collision_column+=1
+            if waist_count:
+                gravity_data.qpos[:]=q;gravity_data.qvel[:]=0;gravity_data.qacc[:]=0
+                mujoco.mj_inverse(gravity_model,gravity_data)
+                torque=gravity_data.qfrc_inverse[waist_dofs]/waist_caps
+                mujoco.mjd_inverseFD(gravity_model,gravity_data,1e-6,False,gravity_derivative,None,None,None,None,None,None)
+                derivative=gravity_derivative.T[waist_dofs]@mapping/waist_caps[:,None]
+                for k in range(3):
+                    for sign in (1.,-1.):
+                        gap=(sign*torque[k]-.8)*.05
+                        violations[i,collision_column]=gap;shifted=gap+lagrange[i,collision_column]/penalty
+                        if shifted>0:r[row]=shifted*np.sqrt(penalty);jac[row,cols]=sign*derivative[k]*.05*np.sqrt(penalty)
+                        row+=1;collision_column+=1
             assert row==(i+1)*width
         row=n*width
         for i in range(1,n-1):
@@ -309,8 +349,8 @@ def main():
         start=projected
     if a.check_jacobian:
         r,jac=evaluate(start);checks=[]
-        for i in [0,min(n-1,42),n-1]:
-            for column in ((0,2,3,4,5,7,14,20) if nr else (0,2,3,7,14)):
+        for i in [0,round((n-1)*.6),round((n-1)*.7),n-1]:
+            for column in ((2,3,4,5,20) if nr else (0,2,3,7,14)):
                 c=i*nv+column;plus=start.copy();minus=start.copy();plus[c]+=1e-6;minus[c]-=1e-6
                 numeric=(evaluate(plus)[0]-evaluate(minus)[0])/2e-6
                 analytic=jac[:,c].toarray().ravel()
@@ -323,9 +363,9 @@ def main():
         result=least_squares(lambda x:evaluate(x)[0],start,jac=lambda x:evaluate(x)[1],bounds=(low.ravel(),high.ravel()),max_nfev=a.max_nfev,ftol=1e-6,xtol=1e-6,gtol=1e-6,verbose=1,tr_solver='lsmr',x_scale='jac')
         evaluate(result.x);gap=cache['violations'].copy()
         violation=float(max(0,gap.max()))
-        constraint_history.append({'round':outer,'maximum_clearance_violation_m':violation,'cost':result.cost,'nfev':result.nfev})
+        constraint_history.append({'round':outer,'maximum_scaled_constraint_violation':violation,'native_clearance_violation_m':float(max(0,gap[:,:2*len(geoms)].max())),'support_polygon_violation_m':float(max(0,gap[:,2*len(geoms):2*len(geoms)+max_faces].max())) if max_faces else 0.,'waist_effort_violation_fraction':float(max(0,gap[:,-waist_count:].max())/.05) if waist_count else 0.,'cost':result.cost,'nfev':result.nfev})
         print('constraint_round',constraint_history[-1],flush=True)
-        if violation<.0005:break
+        if violation<a.constraint_tolerance:break
         lagrange=np.maximum(0,lagrange+penalty*gap);penalty*=10
         start=result.x.copy();cache.clear()
     solved=result.x.reshape(n,nv);knots=base.copy();knots[:,:3]=solved[:,:3];knots[:,qcols]=solved[:,3+nr:]
