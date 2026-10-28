@@ -104,9 +104,12 @@ def main():
     p.add_argument('--max-nfev', type=int, default=100)
     p.add_argument('--resume',type=Path,help='Warm start from a saved optimization qpos sequence')
     p.add_argument('--match-entry-velocity',action='store_true',help='Match incoming joint and foot twists and include the incoming samples in smoothing')
+    p.add_argument('--capture-recovery-steps',action='store_true',help='Plant the moving right foot, step left toward the capture target, then align right; constrain COM instead of returning the root')
     args = p.parse_args()
     if args.wrist_strength<0 or args.max_nfev<1 or args.seconds<=.2:
         p.error('Nonnegative smoothing strength, positive evaluations and seconds > .2 required')
+    if args.capture_recovery_steps and not args.match_entry_velocity:
+        p.error('Capture recovery requires matching incoming velocities')
     args.out.mkdir(parents=True, exist_ok=False)
     (args.out / 'as-run.py').write_bytes(Path(__file__).read_bytes())
     (args.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'hostname':socket.gethostname(),
@@ -198,7 +201,8 @@ def main():
     lateral = Rotation.from_euler('z',heading).apply([0.,1.,0.])
     right_lateral = float(geo.foot('right')[0] @ lateral)
     allowed_lateral = float(initial_feet['left'][0] @ lateral) - .20
-    end[:2] -= max(right_lateral-allowed_lateral,0)*lateral[:2]
+    if not args.capture_recovery_steps:
+        end[:2] -= max(right_lateral-allowed_lateral,0)*lateral[:2]
     geo.update(end)
     final_feet = {s: geo.foot(s) for s in geo.feet}
     final_com = geo.data.subtree_com[geo.root].copy()
@@ -212,6 +216,10 @@ def main():
     curve = BPoly.from_derivatives([0, stop_time, duration*.7, duration],
         [[initial_com, com_velocity, np.zeros(3)], [support_com, np.zeros(3), np.zeros(3)],
          [support_com, np.zeros(3), np.zeros(3)], [final_com, np.zeros(3), np.zeros(3)]])
+    if args.capture_recovery_steps:
+        curve=BPoly.from_derivatives([0,stop_time,duration],
+            [[initial_com,com_velocity,np.zeros(3)],[final_com,np.zeros(3),np.zeros(3)],
+             [final_com,np.zeros(3),np.zeros(3)]])
     rot0 = Rotation.from_quat(initial[[4, 5, 6, 3]])
     rot1 = Rotation.from_quat(end[[4, 5, 6, 3]])
     columns = np.array([m.jnt_qposadr[m.joint(side+'_' + s + '_joint').id]
@@ -255,6 +263,14 @@ def main():
         plant_time=min(.12,duration*.2);plant_end=pivot.copy();plant_end[:2]+=.5*plant_time*pivot_velocity[:2]
         plant_end[2]=final_pivot[2]
         pivot_curve=boundary_curve(pivot,plant_end,plant_time,pivot_velocity)
+        if args.capture_recovery_steps:
+            plant_time=min(.12,duration*.12)
+            # Keep the first touchdown near the current foot. Symmetry is a
+            # later step, not a reason to sweep the airborne foot across support.
+            right_plant=rp.copy();right_plant[:2]+=.5*plant_time*right_velocity[:2]
+            right_plant[2]=right_floor_height-er.apply(right_local)[:,2].min()
+            right_pos_curve=boundary_curve(rp,right_plant,plant_time,right_velocity)
+            right_angle_curve=boundary_curve(np.zeros(3),(rr.inv()*er).as_rotvec(),plant_time,right_omega)
     for i in range(1, count + 1):
         t = i / fps; u = t / duration; a = float(smoothstep(u))
         flat = float(smoothstep(t / min(.25, duration * .4)))
@@ -284,6 +300,16 @@ def main():
             right_pos[2]=max(right_pos[2],right_floor_height-right_rot.apply(right_local)[:,2].min())
             root_rot=rot0*Rotation.from_rotvec(root_angle_curve(t))
             posture[7:]=[float(c(min(t,seconds))) for c,seconds in zip(joint_curves,joint_durations)]
+            if args.capture_recovery_steps:
+                step=float(smoothstep((t-duration*.18)/(duration*.32)))
+                contact=(1-step)*planted+step*final_pivot
+                contact[2]+=.035*np.sin(np.pi*step)**2
+                foot_pos=contact-foot_rot.apply(local_pivot)
+                foot_pos[2]=max(foot_pos[2],right_floor_height-foot_rot.apply(left_local)[:,2].min())
+                align=float(smoothstep((t-duration*.62)/(duration*.3)))
+                right_pos=(1-align)*right_pos_curve(min(t,plant_time))+align*ep
+                right_rot=rr*Rotation.from_rotvec(right_angle_curve(min(t,plant_time)))
+                right_pos[2]=max(right_pos[2],right_floor_height-right_rot.apply(right_local)[:,2].min())+.035*np.sin(np.pi*align)**2
 
         targets.append((foot_pos,foot_rot,right_pos,right_rot,root_rot,posture))
     # Optimize the complete transition together. Independent frame IK admits
@@ -293,6 +319,10 @@ def main():
          [end[:3],np.zeros(3),np.zeros(3)]])
     n=count-1; width=18
     nominal=np.array([np.r_[root_curve((i+1)/fps),np.zeros(3),targets[i][5][columns]] for i in range(n)])
+    if args.capture_recovery_steps:
+        for i in range(n):
+            t=(i+1)/fps;a=float(smoothstep(t/duration))
+            nominal[i,:3]=curve(t)+(1-a)*(initial[:3]-initial_com)+a*(end[:3]-final_com)
     low=np.tile(np.r_[[-.15,-.15,-.12],np.full(3,-.2),lower],(n,1))
     high=np.tile(np.r_[[.15,.15,.12],np.full(3,.2),upper],(n,1))
     low[:,:3]+=nominal[:,:3];high[:,:3]+=nominal[:,:3]
@@ -312,7 +342,7 @@ def main():
             geo.update(q);left=geo.foot('left');right=geo.foot('right')
             r.extend(np.r_[(left[0]-lp)*10000,(lr_target.inv()*left[1]).as_rotvec()*2000,
                 (right[0]-rp)*10000,(rr_target.inv()*right[1]).as_rotvec()*2000,
-                (q[:3]-nominal[i,:3])*500,
+                ((geo.data.subtree_com[geo.root]-curve((i+1)/fps)) if args.capture_recovery_steps else (q[:3]-nominal[i,:3]))*500,
                 np.asarray(values).reshape(n,width)[i,3:6]*200,
                 (q[columns]-posture[columns])*2])
         rotation=Rotation.from_quat(qs[:,[4,5,6,3]])
@@ -408,7 +438,7 @@ def main():
         and report['fit_max_right_rotation_error_rad']<.01)
     (args.out/'result.json').write_text(json.dumps(report,indent=2))
     (args.out/'contacts.json').write_bytes((args.source.parent/'contacts.json').read_bytes())
-    (args.out/'manifest_filtered.csv').write_text(f'name,frames,keep,reason\nwebster,{len(full)},1,reference repair candidate; dynamic validation pending\n')
+    (args.out/'manifest_filtered.csv').write_text(f'name,frames,keep,reason\nwebster,{len(full)},0,reference repair candidate; dynamic validation pending\n')
     print(json.dumps({k:x for k,x in report.items() if k!='ik'}),flush=True)
 
 
