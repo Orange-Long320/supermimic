@@ -112,7 +112,9 @@ def main():
         a.out.mkdir(parents=True,exist_ok=False)
         worst=[{'value':float(values[k]),'label':cache['labels'][k]} for k in np.argsort(values)[:10]]
         (a.out/'diagnostic.json').write_text(json.dumps(worst,indent=2)+'\n');print(json.dumps(worst));return
-    result=minimize(lambda x:.5*x@x,initial,jac=lambda x:x,method='SLSQP',bounds=Bounds(low,high),constraints=[{'type':'ineq','fun':constraints}],options={'maxiter':100,'ftol':1e-10})
+    options={'maxiter':100,'ftol':1e-10}
+    if a.motor_reserve is not None:options['eps']=1e-5  # Resolve LP solver tolerance in numerical constraint derivatives.
+    result=minimize(lambda x:.5*x@x,initial,jac=lambda x:x,method='SLSQP',bounds=Bounds(low,high),constraints=[{'type':'ineq','fun':constraints}],options=options)
     minimum=float(constraints(result.x).min())
     if not result.success or minimum< -1e-6:
         a.out.mkdir(parents=True,exist_ok=False)
@@ -127,6 +129,7 @@ def main():
     export_qpos_motion(raw,q,a.out/'motion-fk.npz',fps,qvel=velocity,source=a.source)
     report={'source_sha256':hashlib.sha256(a.source.read_bytes()).hexdigest(),'joints':names,'amplitude_rad':result.x.tolist(),'window_frames':[int(lo),int(hi)],'minimum_constraint':minimum,'root_and_legs_unchanged':True,'training_approved':False,'box':{'front_x':box.front_x,'center_y':box.center_y,'depth':box.depth,'width':box.width,'height':box.height,'friction':box.friction}}
     (a.out/'balance.json').write_text(json.dumps(report,indent=2)+'\n');(a.out/'as-run.py').write_bytes(Path(__file__).read_bytes());print(json.dumps(report,indent=2))
+    (a.out/'constraints.json').write_text(json.dumps({'static_motor_fraction':a.motor_reserve,'optimizer_options':options},indent=2)+'\n')
 
 
 if __name__=='__main__':main()
