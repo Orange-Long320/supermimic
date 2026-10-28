@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0"):
+def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0):
     import json
     from dataclasses import asdict
 
@@ -28,7 +28,7 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
     vc = VelocityCfg(**saved["velocity"])
     files = discover_npz(lafan_npz_dir(), names=["walk1_subject1"])
     args = SuperMimicEnvCfgArgs(
-        npz_files=[str(p) for p in files], num_envs=num_envs, future_frames=saved["env"]["future_frames"],
+        npz_files=[str(p) for p in files], num_envs=num_envs, seed=seed, future_frames=saved["env"]["future_frames"],
         episode_length_s=seconds + 5, action_noise_std=0., obs_noise=False, reset_noise=False,
         domain_randomization=False, record_transitions=False, anchor_obs=saved["env"]["anchor_obs"], velocity=vc,
     )
