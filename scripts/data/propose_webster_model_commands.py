@@ -16,6 +16,7 @@ import torch
 from scipy.spatial import ConvexHull
 
 from supermimic.data.command_basis import preparation_command_basis
+from supermimic.data.motion_convert import load_g1_model
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.kinematics.rotations import quat_apply
 from supermimic.robots.dimensions import PROFILE, XI_DIM
@@ -51,7 +52,13 @@ def main():
     joints = ['left_hip_pitch_joint', 'left_knee_joint']
     columns = [1+(k-1)*count+labels.index(n) for k in [2, 3] for n in joints]
     model = mujoco.MjModel.from_binary_path(str(args.trace/'native-model.mjb'))
-    fk = G1Kinematics(model, 'cpu'); nq = model.nq
+    asset = load_g1_model()
+    assert (asset.nq, asset.nv) == (model.nq, model.nv)
+    assert [model.joint(i).name.rsplit('/', 1)[-1] for i in range(model.njnt)] == [asset.joint(i).name for i in range(asset.njnt)]
+    fk = G1Kinematics(asset, 'cpu'); nq = model.nq
+    # The scene has a separate fixed terrain body before the robot's free root.
+    native_body_ids = np.array([model.body('robot/'+n).id for n in fk.body_names])
+    native_to_fk = {int(b): i for i, b in enumerate(native_body_ids)}
     names = PROFILE['joint_names']; joint_indices = [names.index(n) for n in joints]
     data = np.load(args.trace/'baseline-trajectory.npz')
     assert float(data['fps'][0]) == 50 and data['qpos'].ndim == 2
@@ -68,17 +75,17 @@ def main():
     assert foot_geoms and np.allclose(model.geom_friction[foot_geoms, 0], 1)
     xi = torch.zeros((len(starts), XI_DIM)); xi[:, 0] = 1
     as_tensor = lambda x: torch.as_tensor(np.asarray(x), dtype=torch.float32)
-    mass = as_tensor(model.body_mass[1:]); ipos = as_tensor(model.body_ipos[1:])
+    mass = as_tensor(model.body_mass[native_body_ids]); ipos = as_tensor(model.body_ipos[native_body_ids])
     points, bodies, kinds = [], [], []
     for g in range(model.ngeom):
         b = int(model.geom_bodyid[g])
-        if not b or not (model.geom_contype[g] or model.geom_conaffinity[g]): continue
+        if b not in native_to_fk or not (model.geom_contype[g] or model.geom_conaffinity[g]): continue
         mesh = int(model.geom_dataid[g]); assert mesh >= 0
         vertices = model.mesh_vert[model.mesh_vertadr[mesh]:model.mesh_vertadr[mesh]+model.mesh_vertnum[mesh]]
         vertices = vertices[ConvexHull(vertices).vertices]
         rotation = np.zeros(9); mujoco.mju_quat2Mat(rotation, model.geom_quat[g])
         points.extend(vertices@rotation.reshape(3, 3).T+model.geom_pos[g])
-        bodies.extend([b-1]*len(vertices)); kinds.extend([g in foot_geoms]*len(vertices))
+        bodies.extend([native_to_fk[b]]*len(vertices)); kinds.extend([g in foot_geoms]*len(vertices))
     points = as_tensor(points); bodies = torch.tensor(bodies); feet = torch.tensor(kinds)
     def physical_features(s):
         out = fk(s[:, :nq], s[:, nq:]); offset = quat_apply(out['quat'], ipos.expand_as(out['pos']))
@@ -88,6 +95,16 @@ def main():
         height = (out['pos'][:, bodies]+quat_apply(out['quat'][:, bodies], points.expand(len(s), -1, -1)))[:, :, 2]
         return torch.stack([com_z, vz, height[:, feet].amin(-1), height[:, ~feet].amin(-1)], -1)
     with torch.no_grad():
+        check = physical_features(states[starts]); check_pose = fk(states[starts, :nq])['pos']
+        native_data = mujoco.MjData(model); pose_error = 0.; com_error = 0.
+        for i, state in enumerate(states[starts].numpy()):
+            native_data.qpos[:] = state[:nq]; native_data.qvel[:] = state[nq:]
+            mujoco.mj_forward(model, native_data); mujoco.mj_subtreeVel(model, native_data)
+            root = int(model.jnt_bodyid[0])
+            pose_error = max(pose_error, float(abs(check_pose[i].numpy()-native_data.xpos[native_body_ids]).max()))
+            com_error = max(com_error, abs(float(check[i, 0])-native_data.subtree_com[root, 2]),
+                            abs(float(check[i, 1])-native_data.subtree_linvel[root, 2]))
+        assert max(pose_error, com_error) < 3e-5, 'Asset FK differs from the recorded native scene; proposal rejected'
         native_features = torch.stack([physical_features(states[starts+h]) for h in range(1, 5)])
         s = states[starts]; baseline_states = []
         for h in range(1, 5):
@@ -132,6 +149,7 @@ def main():
     np.savez(args.out/'parameter-grid.npz', parameters=np.asarray(candidates))
     result = {'approved_for_training': False, 'actual_state_modified': False, 'policy_trained': False,
         'scope': 'Bias-corrected four-step, recorded-action model proposals; native replay remains mandatory.',
+        'native_fk_validation': {'maximum_link_position_error_m': pose_error, 'maximum_COM_height_or_velocity_error': com_error},
         'columns': columns, 'joints': joints, 'scales': scales, 'best_delta': best[1].tolist(), 'history': history,
         'elapsed_s': time.monotonic()-started, 'input_sha256': {'ckpt': digest(args.ckpt), 'solution': digest(args.solution),
         'trajectory': digest(args.trace/'baseline-trajectory.npz'), 'model': digest(args.trace/'native-model.mjb')}}
