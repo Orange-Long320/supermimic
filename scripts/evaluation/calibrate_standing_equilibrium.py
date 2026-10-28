@@ -20,8 +20,10 @@ def main():
     p.add_argument('--max-trials',type=int,default=7,help='Bound the number of independent calibration seeds')
     p.add_argument('--max-nfev',type=int,default=250,help='Evaluation budget per calibration seed')
     p.add_argument('--polish-fixed-pressure',action='store_true',help='Polish native root-force balance with the fitted left-foot pressure attitude fixed')
+    p.add_argument('--joint-limit-factor',type=float,default=1.,help='Optional tighter optimization range, e.g. existing reset factor 0.9; physical limits unchanged')
     args=p.parse_args()
     if not np.isfinite(args.support_height_m) or min(args.max_trials,args.max_nfev)<1:p.error('Finite support height and positive solver budgets required')
+    if not 0<args.joint_limit_factor<=1:p.error('Joint range factor must be in (0,1]')
     if args.polish_fixed_pressure and not args.anchor_left_foot:p.error('Fixed pressure polishing requires an explicit left-foot anchor')
     args.out.mkdir(parents=True,exist_ok=False)
     from supermimic.robots.dimensions import PROFILE
@@ -45,8 +47,11 @@ def main():
         meshes.append((g,m.mesh_vert[a:a+n].copy(),side))
     scale=np.r_[np.full(3,weight),np.full(3,weight*.7)]
     radius=np.r_[np.full(4,.15),np.full(len(joints)-4,.25)]
-    lower=np.r_[[-.12,-.15,-.15],np.maximum(m.jnt_range[joints,0]+.025-q0[columns],-radius)]
-    upper=np.r_[[.03,.15,.15],np.minimum(m.jnt_range[joints,1]-.025-q0[columns],radius)]
+    mid=m.jnt_range[joints].mean(axis=1);half=np.diff(m.jnt_range[joints],axis=1).reshape(-1)*.5*args.joint_limit_factor
+    joint_lower=np.maximum(m.jnt_range[joints,0]+.025,mid-half)
+    joint_upper=np.minimum(m.jnt_range[joints,1]-.025,mid+half)
+    lower=np.r_[[-.12,-.15,-.15],np.maximum(joint_lower-q0[columns],-radius)]
+    upper=np.r_[[.03,.15,.15],np.minimum(joint_upper-q0[columns],radius)]
     def evaluate(x):
         q=q0.copy();q[2]+=x[0];q[3:7]=(Rotation.from_rotvec([x[1],x[2],0])*rotation0).as_quat()[[3,0,1,2]]
         q[columns]+=x[3:]
