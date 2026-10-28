@@ -40,6 +40,9 @@ def main():
     p.add_argument('--sigma', type=float, default=.04)
     p.add_argument('--initialize', type=Path, help='Same-source residual coefficients for local refinement')
     p.add_argument('--terminal-seconds', type=float, default=.3)
+    p.add_argument('--phase', choices=['landing','preparation'], default='landing')
+    p.add_argument('--base-residual', type=Path)
+    p.add_argument('--base-capture', type=Path, help='Independent seven-second capture of the fixed base residual')
     args = p.parse_args()
     if args.out.exists() or args.ckpt.name == 'ckpt_latest.pt':
         p.error('Use a fresh directory and immutable checkpoint')
@@ -49,6 +52,8 @@ def main():
         p.error('Invalid search budget')
     if not .3 <= args.terminal_seconds <= 1. or args.terminal_seconds > args.seconds:
         p.error('Invalid terminal stability window')
+    if bool(args.base_residual) != bool(args.base_capture) or (args.phase == 'preparation' and (not args.base_residual or args.seconds != 7 or args.terminal_seconds != 1)):
+        p.error('Preparation search requires an independently recorded base and full7s/terminal1s coverage')
     if os.environ.get('CUDA_VISIBLE_DEVICES') != str(args.gpu):
         raise ValueError('Explicit physical GPU selection is required')
     query = lambda kind, fields: subprocess.check_output(
@@ -111,8 +116,9 @@ def main():
             return result
         env.sim.step = capture
         names = list(PROFILE['joint_names'])
-        joints = [i for i, n in enumerate(names) if any(s in n for s in ['hip_', 'knee_', 'ankle_', 'waist_'])]
-        knots = np.array([.70, .82, .96, 1.10, 1.26, 1.50, 1.70])
+        tokens = ['hip_', 'knee_', 'ankle_'] if args.phase == 'preparation' else ['hip_', 'knee_', 'ankle_', 'waist_']
+        joints = [i for i, n in enumerate(names) if any(s in n for s in tokens)]
+        knots = np.array([-.02, 0., .06, .12, .22, .40, .60, .70] if args.phase == 'preparation' else [.70, .82, .96, 1.10, 1.26, 1.50, 1.70])
         times = np.arange(350)*.02
         basis = np.zeros((350, len(knots)-2))
         for row, t in enumerate(times):
@@ -127,6 +133,22 @@ def main():
         for g, j in enumerate(joints):
             mapping[g, j] = PROFILE['effort_limit'][names[j]]/PROFILE['stiffness'][names[j]]/scale[j]
         basis_t = torch.tensor(basis, dtype=torch.float32, device=device)
+        base_actions = torch.zeros(350,len(names),device=device)
+        base_gates = None
+        if args.base_residual:
+            with np.load(args.base_residual) as fixed:
+                if str(fixed['source_checkpoint_sha256']) != digest(args.ckpt) or str(fixed['reference_sha256']) != digest(args.source) or list(fixed['joint_names']) != names or float(fixed['fps'][0]) != 50:
+                    raise ValueError('Fixed base belongs to a different policy/reference or action clock')
+                values = fixed['actions'].copy()
+                if values.shape != (350,len(names)) or not np.isfinite(values).all():
+                    raise ValueError('Invalid fixed base actions')
+                base_actions.copy_(torch.tensor(values,dtype=torch.float32,device=device))
+            base_info = json.loads((args.base_capture/'result.json').read_text())
+            base_gates = json.loads((args.base_capture/'canonical-gates.json').read_text())
+            if base_info['checkpoint_sha256'] != digest(args.ckpt) or base_info['source_sha256'] != digest(args.source) or base_info['recorded_residual']['sha256'] != digest(args.base_residual):
+                raise ValueError('Independent base capture uses different inputs')
+            if base_gates['trajectory_sha256'] != digest(args.base_capture/'trajectory.npz') or not base_gates['uninterrupted_seven_seconds'] or not base_gates['gates']['last_one_second_stable']:
+                raise ValueError('Fixed base must have independent uninterrupted seven-second and terminal stability evidence')
         speed = torch.tensor([PROFILE['velocity_limit'][n] for n in names], device=device)
         mass = torch.tensor(model.body_mass[1:].copy(), dtype=torch.float32, device=device)
         ipos = torch.tensor(model.body_ipos[1:].copy(), dtype=torch.float32, device=device)
@@ -155,7 +177,7 @@ def main():
             initial = np.load(args.baseline/'initial-state.npz')['state'][0]
             initial_error = float(abs(state-torch.tensor(initial, device=device)).max())
             if initial_error >= 2e-5: raise ValueError('Original initial states differ; no rewrite permitted')
-            residual = torch.einsum('tk,ekg,gj->tej', basis_t, parameters, mapping)
+            residual = torch.einsum('tk,ekg,gj->tej', basis_t, parameters, mapping)+base_actions[:,None]
             rows = []
             for step in range(round(args.seconds/.02)):
                 captured.clear()
@@ -187,9 +209,22 @@ def main():
                 loss = (4000*max(hard-.0001,0)+2000*max(foot-.005,0)+2000*max(.005-body,0)
                     +50*max(3.5-rotation,0)+1000*max(float(r[:,9].max())-1,0)
                     +1000*(not core)+.1*float(parameters[i].square().sum()))
+                early_hard = float(r[:140,8].max())
+                early_foot = float(max(-r[:140,:2].min(),0))
+                base_preserved = None
+                if args.phase == 'preparation':
+                    base_preserved = bool(core and hard <= base_gates['maximum_hard_violation_rad']+.001
+                        and foot <= base_gates['maximum_foot_compression_m']+.001
+                        and body >= base_gates['minimum_nonfoot_height_m']-.001
+                        and rotation >= base_gates['canonical_first_air_rotation_rad']-.01
+                        and float(r[:,9].max()) <= 1)
+                    loss = (1000*(not base_preserved)+10000*max(early_hard-.0001,0)
+                        +2000*max(early_foot-.0048,0)+.1*float(parameters[i].square().sum()))
                 summaries.append(dict(score=float(loss), core_preserved=core, original_failure=bool(failed[i]),
                     hard_rad=hard, foot_m=foot, nonfoot_min_m=body, first_air_rotation_rad=rotation,
-                    total_rotation_rad=total, terminal_0p3s_stable=stable, single_left_support=bool(support)))
+                    total_rotation_rad=total, terminal_window_stable=stable, single_left_support=bool(support),
+                    preparation_hard_rad=early_hard, preparation_foot_compression_m=early_foot,
+                    fixed_base_preserved=base_preserved))
             return summaries
         dim = (len(knots)-2, len(joints))
         mean = torch.zeros(dim, device=device)
@@ -201,7 +236,7 @@ def main():
                 if coefficients.shape != dim or not np.isfinite(coefficients).all() or abs(coefficients).max() > .200001 or not np.array_equal(seed['knot_times'], knots):
                     raise ValueError('Initialization coefficient layout/bounds differ')
                 reproduced = torch.einsum('tk,kg,gj->tj', basis_t,
-                    torch.tensor(coefficients, dtype=torch.float32, device=device), mapping).cpu().numpy()
+                    torch.tensor(coefficients, dtype=torch.float32, device=device), mapping).cpu().numpy()+base_actions.cpu().numpy()
                 if seed['actions'].shape != reproduced.shape or abs(reproduced-seed['actions']).max() >= 1e-6:
                     raise ValueError('Initialization actions do not match the recorded coefficient basis')
                 mean.copy_(torch.tensor(coefficients, device=device))
@@ -215,7 +250,7 @@ def main():
             population[0] = best_parameters
             if iteration == 0:
                 population[:] = mean
-                population[-1].zero_()  # Retain a real unchanged-policy control.
+                population[-1].zero_()  # Retain a real zero-additional-correction control.
             rows, failed = rollout(population)
             summaries = score(rows, failed, population)
             order = sorted(range(args.envs), key=lambda i:summaries[i]['score'])
@@ -223,7 +258,7 @@ def main():
             if best_summary is None or summaries[winner]['score'] < best_summary['score']:
                 best_summary = summaries[winner]
                 best_parameters = population[winner].clone()
-                delta = torch.einsum('tk,kg,gj->tj', basis_t, best_parameters, mapping).cpu().numpy()
+                delta = (torch.einsum('tk,kg,gj->tj', basis_t, best_parameters, mapping)+base_actions).cpu().numpy()
                 np.savez(args.out/'best-residual.npz', actions=delta, fps=np.array([50.]),
                     source_checkpoint_sha256=np.array(digest(args.ckpt)), reference_sha256=np.array(digest(args.source)),
                     parameters=best_parameters.cpu().numpy(), knot_times=knots,
@@ -235,7 +270,10 @@ def main():
                 mean = .2*mean+.8*elite.mean(0)
                 std = (.2*std+.8*elite.std(0)).clamp(min=.005)
             entry = {'iteration':iteration,'elapsed_s':time.monotonic()-start,'best':best_summary,
-                'population_winner':summaries[winner], 'initial_state_maximum_error':initial_error}
+                'population_winner':summaries[winner], 'initial_state_maximum_error':initial_error,
+                'population_original_failure_count':sum(s['original_failure'] for s in summaries),
+                'population_preparation_hard_pass_count':sum(s['preparation_hard_rad']<1e-4 for s in summaries),
+                'population_fixed_base_preserved_count':sum(s['fixed_base_preserved'] is True for s in summaries)}
             with (args.out/'progress.jsonl').open('a') as f: f.write(json.dumps(entry)+'\n')
             if iteration == 0:
                 np.savez(args.out/'gpu-baseline.npz', metrics=rows, failures=failed)
@@ -247,6 +285,8 @@ def main():
             'torch_peak_reserved_mib':torch.cuda.max_memory_reserved()/2**20,'best':best_summary,
             'source_sha256':digest(args.source),'checkpoint_sha256':digest(args.ckpt),
             'initialization_sha256':digest(args.initialize) if args.initialize else None,
+            'base_residual_sha256':digest(args.base_residual) if args.base_residual else None,
+            'fixed_base_acceptance_evidence':base_gates,
             'limitation':f'{args.seconds:g}-second native search proposal with live policy feedback; independent seven-second replay required',
             'physical_candidate_passed':False,'approved_for_training':False}
         (args.out/'completed.json').write_text(json.dumps(record,indent=2,default=str))
