@@ -87,7 +87,7 @@ def main():
                     'center':(rotation@((lo+hi)/2)).tolist(),'half_size':((hi-lo)/2).tolist(),'rotation_world':rotation.tolist()})
         return result
 
-    rows=[];candidates=[]
+    rows=[];candidates=[];hand_candidates=[]
     with zipfile.ZipFile(raw/'robot-terrain.zip') as archive:
         for number,entry in enumerate(sorted(x for x in archive.namelist() if x.endswith('.npz'))):
             content=archive.read(entry)
@@ -108,6 +108,21 @@ def main():
                 if height<.12:continue
                 center,half,rotation=np.array(box['center']),np.array(box['half_size']),np.array(box['rotation_world'])
                 local_feet=(foot-center)@rotation;local_hands=(hand-center)@rotation
+                # Scan the whole clip before requiring a bilateral foot landing.
+                # High climbs may use hands long before either foot reaches the top.
+                distance=np.linalg.norm(np.maximum(abs(local_hands)-half,0),axis=2)
+                near=distance<.08
+                hand_frames=np.flatnonzero(near.any(1))
+                if len(hand_frames)*stride/fps>=.3:
+                    hand_candidates.append({'motion':entry,'box':box,
+                        'platform_top_world_m':height,
+                        'start_frame':int(frames[hand_frames[0]]),
+                        'end_frame':int(frames[hand_frames[-1]]),
+                        'hand_near_box_seconds':float(len(hand_frames)*stride/fps),
+                        'left_hand_near_seconds':float(near[:,0].sum()*stride/fps),
+                        'right_hand_near_seconds':float(near[:,1].sum()*stride/fps),
+                        'root_vertical_range_m':float(np.ptp(q[:,6])),
+                        'status':'Full-clip proximity candidate; support force, climb direction and joint order require independent validation'})
                 on=(abs(local_feet[:,:,:2])<=half[:2]+.02).all(2)&(abs(local_feet[:,:,2]-half[2])<.04)
                 both=on.all(1);runs=[];start=None
                 for k,flag in enumerate(np.r_[both,False]):
@@ -142,7 +157,8 @@ def main():
             rows.append({'motion':entry,'sha256':hashlib.sha256(content).hexdigest(),'frames':len(q),'fps':fps,'quaternion_error':quaternion_error,'boxes':scene_boxes})
             if number%25==0:print(f'screened={number+1}',flush=True)
     candidates.sort(key=lambda c:(c['possible_hand_contact'],c['approach_surface_height_m'] is None,c['height_error_m']))
-    report={'motions':rows,'candidate_windows':candidates,'preferred_height_m':a.preferred_height,'height_is_hard_constraint':False,
+    hand_candidates.sort(key=lambda c:(-c['root_vertical_range_m'],-c['hand_near_box_seconds']))
+    report={'motions':rows,'candidate_windows':candidates,'hand_proximity_candidates':hand_candidates,'preferred_height_m':a.preferred_height,'height_is_hard_constraint':False,
         'joint_order_source':str(config),'limitations':'G1 FK and 10Hz proximity screening only. Hand proximity is not measured support; foot markers are not force contacts. Not X2 data, not trained policy, not a physical feasibility certificate.'}
     (a.out/'screening.json').write_text(json.dumps(report,indent=2)+'\n')
     if candidates:

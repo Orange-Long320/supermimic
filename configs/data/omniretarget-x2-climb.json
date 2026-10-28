@@ -4,7 +4,7 @@
   "target_height_m": 0.45,
   "height_is_hard_constraint": false,
   "height_preference_source": "User: any height is acceptable, prioritize 45 cm",
-  "scope": "Simulation; source screening, X2 adaptation and validation before policy training",
+  "scope": "Simulation; multiple climbing motions adapted and audited separately, then one motion-conditioned policy; no hardware deployment",
   "dataset": {
     "repository": "omniretarget/OmniRetarget_Dataset",
     "revision": "135259130158f1cb1799e4ab9b6566c938285fc9",
@@ -19,18 +19,19 @@
     "revision": "b739a6cb7b1f8b9918669f8f776edb1855bfda1a",
     "package": "src/holosoma_retargeting",
     "raw_climbing_demo_count": 5,
-    "x2_support": "Requires custom robot configuration and mapping; not yet verified"
+    "x2_support": "Custom mapping and 163-frame kinematic adaptation executed; independent dynamics and continuous execution pending"
   },
   "server": {
     "raw": "/home/2025-Long.xh/HHD/data/supermimic/data/external/omniretarget_20261028_r1/raw",
-    "screening": "/home/2025-Long.xh/HHD/data/supermimic/logs/omni_terrain_screen_20261028_r2/audit",
+    "screening": "/home/2025-Long.xh/HHD/data/supermimic/logs/omni_terrain_screen_20261029_r4/audit",
     "environment": "/home/2025-Long.xh/HHD/venvs/supermimic-omniretarget"
   },
   "candidate_motions": [
     {
       "motion": "robot-terrain/climb_14_z_scale_1.0.npz",
       "approximate_platform_top_m": 0.475,
-      "status": "Preferred height candidate; approach and hand support need visual review"
+      "status": "163-frame X2 kinematic candidate; world top differs from effective rise due to raised approach mat; dynamics pending",
+      "approximate_effective_source_rise_m": 0.4
     },
     {
       "motion": "robot-terrain/climb_06_z_scale_0.9.npz",
@@ -38,5 +39,52 @@
       "status": "Ground-entry baseline candidate; no hand proximity detected by coarse FK screening"
     }
   ],
-  "training_approved": false
+  "training_approved": false,
+  "motion_collection": {
+    "initial_target_count": 6,
+    "count_is_hard_constraint": false,
+    "categories": [
+      "foot-supported step-ups at varied heights",
+      "hand-supported higher climbs"
+    ],
+    "selection": [
+      "prioritize effective step rise near 0.45 m",
+      "retain distinct source families rather than counting scaled copies as distinct skills",
+      "keep each clip paired with its measured terrain and contact phases"
+    ],
+    "mixing_gate": "Independent geometry, physical force/torque and continuous-execution checks per clip before single-GPU smoke",
+    "status": "Source screening and X2 adaptation in progress; multi-motion training has not started"
+  },
+  "multi_motion_review_queue": [
+    {
+      "motion": "robot-terrain/climb_15_z_scale_1.1.npz",
+      "category": "step-up; coarse effective rise 0.440m",
+      "status": "Provisional source review only; no physical support or X2 success certified"
+    },
+    {
+      "motion": "robot-terrain/climb_06_z_scale_1.2.npz",
+      "category": "step-up; coarse effective rise 0.427m",
+      "status": "Provisional source review only; no physical support or X2 success certified"
+    },
+    {
+      "motion": "robot-terrain/climb_14_z_scale_1.0.npz",
+      "category": "step-up; X2 kinematic candidate, effective source rise about 0.400m",
+      "status": "Provisional source review only; no physical support or X2 success certified"
+    },
+    {
+      "motion": "robot-terrain/climb_20_z_scale_1.2.npz",
+      "category": "possible hand-supported climb; full-clip proximity",
+      "status": "Provisional source review only; no physical support or X2 success certified"
+    },
+    {
+      "motion": "robot-terrain/climb_11_z_scale_1.2.npz",
+      "category": "possible hand-supported climb; full-clip proximity",
+      "status": "Provisional source review only; no physical support or X2 success certified"
+    },
+    {
+      "motion": "robot-terrain/climb_25_z_scale_1.2.npz",
+      "category": "possible hand-supported climb; full-clip proximity",
+      "status": "Provisional source review only; no physical support or X2 success certified"
+    }
+  ]
 }
