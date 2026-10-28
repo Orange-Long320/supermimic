@@ -23,6 +23,7 @@ def main():
     p.add_argument('--knot-stride',type=int,default=5)
     p.add_argument('--foot-margin',type=float,default=0.0)
     p.add_argument('--free-torso',action='store_true',help='Optimize root orientation and waist joints for COM balance')
+    p.add_argument('--natural-swing',action='store_true',help='Advance up to the box edge during lift instead of lifting vertically in place')
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
     from supermimic.robots.paths import select_robot
@@ -68,6 +69,35 @@ def main():
         targets.append([(d.xpos[b].copy(),d.xmat[b].reshape(3,3).copy()) for b in bodies])
         com.append(d.subtree_com[root].copy())
     com=gaussian_filter1d(np.array(com),2,axis=0,mode='nearest')
+    if a.natural_swing:
+        timing=json.loads((Path(__file__).resolve().parents[2]/'configs/video/box45-contacts.json').read_text())
+        scale=json.loads((a.source.parent/'fit.json').read_text())['time_scale']
+        ease=lambda u:(lambda t:t**3*(10+t*(-15+6*t)))(np.clip(u,0,1))
+        for side,b in zip(('left','right'),bodies):
+            lift,land=[timing[side][k]*scale for k in ('lift_seconds','land_seconds')]
+            def sole(frame):
+                d.qpos[:]=original[frame];mujoco.mj_kinematics(m,d);points=[]
+                for g in geoms:
+                    if int(m.geom_bodyid[g])!=b or not m.geom(g).name.startswith('foot_'):continue
+                    mesh=m.geom_dataid[g];adr,count=m.mesh_vertadr[mesh],m.mesh_vertnum[mesh]
+                    local=m.mesh_vert[adr:adr+count];points.extend(local@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])
+                points=np.asarray(points);local=(points-d.xpos[b])@d.xmat[b].reshape(3,3)
+                point=np.r_[(local[:,:2].min(0)+local[:,:2].max(0))/2,local[:,2].min()]
+                return point,d.xpos[b]+d.xmat[b].reshape(3,3)@point,float(points[:,0].max())
+            local,start,toe=sole(round(lift*fps));_,finish,_=sole(end)
+            _,neutral,neutral_toe=sole(0)
+            pre=start.copy();pre[0]=box.front_x-.02-max(toe-start[0],neutral_toe-neutral[0]);pre[2]=box.height+.035
+            if pre[0]<start[0]:raise ValueError('Initial foot is already inside the swing edge margin')
+            for i,t in enumerate(times):
+                u=(t-lift)/(land-lift)
+                if not 0<u<1:continue
+                if u<.35:point=start+(pre-start)*ease(u/.35)
+                elif u<.75:
+                    point=pre+(finish-pre)*ease((u-.35)/.4);point[2]=pre[2]
+                else:
+                    point=finish.copy();point[2]+=(pre[2]-point[2])*(1-ease((u-.75)/.25))
+                j=bodies.index(b);_,rotation=targets[i][j]
+                targets[i][j]=(point-rotation@local,rotation)
     com_weight=40.
     if a.support_centred:
         def sole_center(frame,side):
@@ -207,7 +237,7 @@ def main():
         (a.out/'jacobian-check.json').write_text(json.dumps(report,indent=2)+'\n');print(report)
         if not report['passed']:raise SystemExit('Jacobian check failed')
         return
-    result=least_squares(lambda x:evaluate(x)[0],start,jac=lambda x:evaluate(x)[1],bounds=(low.ravel(),high.ravel()),max_nfev=a.max_nfev,ftol=1e-6,xtol=1e-6,gtol=1e-6,verbose=1,tr_solver='lsmr')
+    result=least_squares(lambda x:evaluate(x)[0],start,jac=lambda x:evaluate(x)[1],bounds=(low.ravel(),high.ravel()),max_nfev=a.max_nfev,ftol=1e-6,xtol=1e-6,gtol=1e-6,verbose=1,tr_solver='lsmr',x_scale='jac')
     solved=result.x.reshape(n,nv);knots=base.copy();knots[:,:3]=solved[:,:3];knots[:,qcols]=solved[:,3+nr:]
     if nr:knots[:,3:7]=(Rotation.from_quat(base[:,[4,5,6,3]])*Rotation.from_rotvec(solved[:,3:6])).as_quat()[:,[3,0,1,2]]
     np.savez_compressed(a.out/'solver-knots.npz',x=result.x,indices=indices,source_sha256=hashlib.sha256(a.source.read_bytes()).hexdigest())
