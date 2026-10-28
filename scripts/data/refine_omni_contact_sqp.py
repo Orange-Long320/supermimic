@@ -23,9 +23,11 @@ def main():
     p.add_argument('--hard-root-balance',action='store_true',help='PhaseII: require zero linearized floating-base residual without root residual variables')
     p.add_argument('--effort-fraction',type=float,default=.95,help='Optional conservative fraction, never greater than the original motor rating1.0')
     p.add_argument('--resume',type=Path,help='Same source/model/window: resume a saved diagnostic candidate and contact coefficients')
+    p.add_argument('--minimum-correction',action='store_true',help='Hard-root phase only: smallest state/force correction, without pulling a nearly feasible path back toward the bad source')
     a=p.parse_args()
     if a.out.exists() or not 1<=a.iterations<=20:p.error('New output and at most20 SQP iterations required')
     if not 0<a.effort_fraction<=1 or (a.hard_root_balance and a.restore_feasibility):p.error('Original motor ratings and distinct phaseI/II required')
+    if a.minimum_correction and not a.hard_root_balance:p.error('Minimum correction requires hard floating-base balance')
     if os.environ.get('CUDA_VISIBLE_DEVICES')!='':raise ValueError('CPU-only diagnostic required')
     a.out.mkdir(parents=True);(a.out/'pid').write_text(str(os.getpid()))
     import mujoco
@@ -70,6 +72,7 @@ def main():
     record=dict(pid=os.getpid(),source_reference_sha256=sha(a.reference),frames50hz=[start,end],time_scale=1.,
         phase='offline_feasibility_restoration' if a.restore_feasibility else 'hard_floating_base_and_original_motor_caps' if a.hard_root_balance else 'strict_motor_linearization',
         root_balance_is_hard=a.hard_root_balance,effort_fraction_of_original_rating=a.effort_fraction,
+        minimum_correction_objective=a.minimum_correction,
         physical_effort_caps_unchanged=True,motor_violation_variables_are_not_actuator_forces=True,
         approved_for_training=False,actual_controller_execution_verified=False,scope=__doc__,initial=initial)
     def progress(**extra):(a.out/'progress.json').write_text(json.dumps(dict(record,history=history,**extra),indent=2))
@@ -182,7 +185,8 @@ def main():
             diagonal=np.r_[np.tile(weights**2,n),np.full(residual_offset-pose_size,1e-4),np.full(root_residual_size,1e4),
                 np.full(count*31 if a.restore_feasibility else 0,1e5)]
             P=sp.diags(diagonal,format='csc');linear=np.zeros(total)
-            linear[:pose_size]=(correction[start+1:end]*weights**2).ravel()
+            if a.minimum_correction:linear[pose_size:residual_offset]=-1e-4*np.concatenate(coefficients)
+            else:linear[:pose_size]=(correction[start+1:end]*weights**2).ravel()
             sr=[];sc=[];sv=[];smooth_current=[];smooth_weights=np.r_[np.full(3,500.),np.full(3,50.),np.full(31,5.)]
             for i,frame in enumerate(range(start-1,end+2)):
                 smooth_current.extend(correction[frame-1]-2*correction[frame]+correction[frame+1])
@@ -190,7 +194,8 @@ def main():
                     if start<node<end:
                         sr.extend(range(i*37,(i+1)*37));sc.extend(range((node-start-1)*37,(node-start)*37));sv.extend(coefficient*smooth_weights)
             D=sp.coo_matrix((sv,(sr,sc)),shape=(len(smooth_current),total)).tocsc()
-            P=P+D.T@D;linear+=np.asarray(D.T@(np.array(smooth_current)*np.tile(smooth_weights,len(smooth_current)//37))).ravel()
+            P=P+D.T@D
+            if not a.minimum_correction:linear+=np.asarray(D.T@(np.array(smooth_current)*np.tile(smooth_weights,len(smooth_current)//37))).ravel()
             directory=a.out/f'qp-{iteration:02d}';directory.mkdir();sp.save_npz(directory/'P.npz',sp.triu(P,format='csc'));sp.save_npz(directory/'A.npz',A)
             np.savez_compressed(directory/'vectors.npz',q=linear,lower=l,upper=u)
             solver_env=os.environ.copy();solver_env.pop('PYTHONPATH',None)
@@ -226,9 +231,11 @@ def main():
             np.savez_compressed(a.out/f'candidate-{iteration:02d}.npz',**arrays)
             np.savez_compressed(a.out/'candidate-latest.npz',**arrays)
             progress(status='running');print(json.dumps(dict(iteration=iteration,accepted=accepted,trust=trust,last=trials[-1])),flush=True)
+            if accepted and a.hard_root_balance and trials[-1]['root_max_normalized']<=1e-10 and trials[-1]['motor_max_ratio']<=1.000001:
+                termination='estimated_contact_node_equations_converged';break
             if trust<.125:termination='Native hard-geometry line search could not improve dynamics';break
         np.testing.assert_array_equal(qs[:start+1],helper.source[:start+1]);np.testing.assert_array_equal(qs[end:],helper.source[end:])
-        final=helper.measure(qs,coefficients);progress(status='completed' if termination=='iteration_budget' else 'stopped',
+        final=helper.measure(qs,coefficients);progress(status='completed' if termination in ['iteration_budget','estimated_contact_node_equations_converged'] else 'stopped',
             termination_reason=termination,final=final,elapsed_seconds=time.monotonic()-started)
     except Exception as error:
         progress(status='failed',reason=str(error));raise
