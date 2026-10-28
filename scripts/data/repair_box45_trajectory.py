@@ -30,12 +30,14 @@ def main():
     p.add_argument('--contact-consistent',action='store_true',help='Use 0.5mm compliant compression for planted feet')
     p.add_argument('--waist-effort',action='store_true',help='Reserve 20 percent waist motor effort above gravity demand')
     p.add_argument('--free-shoulders',action='store_true',help='Allow shoulder pitch/roll counterbalance without changing contact order')
+    p.add_argument('--shoulder-reference-limit-deg',type=float,help='Task-quality bound around the smoothed source/standing shoulder reference; also strengthens its posture cost')
     p.add_argument('--stance-constraints',action='store_true',help='Constrain planted foot pose, preventing contact area loss from foot tilt')
     p.add_argument('--stance-ankle-effort',action='store_true',help='Keep single-support ankle upstream gravity moment below 90 percent motor cap')
     p.add_argument('--constraint-tolerance',type=float,default=.0005)
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
     if a.constraint_rounds<1 or a.constraint_tolerance<=0:p.error('Positive constraint rounds/tolerance required')
+    if a.shoulder_reference_limit_deg is not None and (not a.free_shoulders or a.shoulder_reference_limit_deg<=0):p.error('A positive shoulder reference limit requires free shoulders')
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
     import mujoco
@@ -241,11 +243,18 @@ def main():
     ranges=m.jnt_range[joint_ids];mid=ranges.mean(1);radius=np.diff(ranges,axis=1)[:,0]*.9/2
     low=np.tile(np.r_[[-.5,-.7,.25],np.full(nr,-.6),mid-radius+1e-6],(n,1))
     high=np.tile(np.r_[[1.5,.7,1.7],np.full(nr,.6),mid+radius-1e-6],(n,1))
+    shoulder_columns=np.array([3+nr+k for k,name in enumerate(leg_names) if 'shoulder' in name],dtype=int)
+    if a.shoulder_reference_limit_deg is not None:
+        deviation=np.radians(a.shoulder_reference_limit_deg)
+        low[:,shoulder_columns]=np.maximum(low[:,shoulder_columns],reference[:,shoulder_columns]-deviation)
+        high[:,shoulder_columns]=np.minimum(high[:,shoulder_columns],reference[:,shoulder_columns]+deviation)
+        if np.any(low>=high):raise ValueError('Shoulder reference and robot ranges do not overlap')
     if standing is not None:
         endpoint=np.r_[standing[:3],np.zeros(nr),standing[qcols]]
         if np.any(endpoint<low[-1]) or np.any(endpoint>high[-1]):raise ValueError('Standing outside optimization bounds')
         low[-1]=endpoint-1e-9;high[-1]=endpoint+1e-9
     posture_scale=np.r_[np.full(3,5.),np.full(nr,5.),np.full(len(qcols),.25)]
+    if a.shoulder_reference_limit_deg is not None:posture_scale[shoulder_columns]=5.
     acceleration_scale=np.r_[np.full(3,1.),np.full(nr,.2),np.full(len(qcols),.08)]/dt**2
     boundary_scale=np.r_[np.full(3,10.),np.ones(nv-3)]/dt
     total=n*width+(n-2)*nv+2*nv
@@ -439,6 +448,9 @@ def main():
     np.savez_compressed(a.out/'aligned-diagnostic.npz',qpos=q,fps=fps,box_center=center,box_half_size=half)
     export_qpos_motion(m,q,a.out/'motion-fk.npz',fps,qvel=velocity,source=a.source)
     report={'cost':result.cost,'optimality':result.optimality,'nfev':result.nfev,'solver_success':bool(result.success),'constraint_history':constraint_history,'frames':len(q),'peak_root_acceleration_m_s2':float(np.linalg.norm(np.diff(q[:,:3],n=2,axis=0)*fps**2,axis=1).max()),'peak_joint_acceleration_rad_s2':float(abs(np.diff(q[:,7:],n=2,axis=0)*fps**2).max()),'box':{'front_x':box.front_x,'center_y':box.center_y,'depth':box.depth,'width':box.width,'height':box.height,'friction':box.friction},'training_approved':False}
+    if a.shoulder_reference_limit_deg is not None:
+        report['shoulder_reference_limit_deg']=a.shoulder_reference_limit_deg
+        report['shoulder_peak_reference_deviation_deg']=float(np.degrees(abs(solved[:,shoulder_columns]-reference[:,shoulder_columns])).max())
     (a.out/'repair.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
 
 
