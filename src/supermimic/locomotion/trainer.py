@@ -27,6 +27,22 @@ from supermimic.world_model.heads import (
 from supermimic.world_model.wm_trainer import reference_at
 
 
+def relabel_stop_starts(start, fraction):
+    """Counterfactual goal learning; keep physical history and replay immutable.
+
+    Replay starts are already randomly ordered. Taking their first fraction
+    avoids introducing additional RNG draws into paired training comparisons.
+    """
+    count = round(len(start.state) * fraction)
+    if count == 0:
+        return start
+    command = start.command.clone()
+    reference = start.command_reference.clone()
+    command[:count] = 0
+    reference[:count] = False
+    return replace(start, command=command, command_reference=reference)
+
+
 class JointPolicyTrainer(PolicyTrainer):
     def __init__(self, wm, policy, critic, lib, cfg, velocity_cfg, critic_cfg, nominal_height, reference_velocity=None):
         if cfg.batch_size < 2:
@@ -131,6 +147,7 @@ class JointPolicyTrainer(PolicyTrainer):
     def _velocity_update(self, buffer):
         cfg = self.cfg
         start = buffer.sample_starts(self.velocity_batch, cfg.history, env_mask=buffer.velocity_env_mask)
+        start = relabel_stop_starts(start, self.velocity_cfg.stop_relabel_fraction)
         xi = self.wm.spec.normalize_xi(start.xi)
         encoder = self.policy.encoders["velocity"]
         modules = (self.wm, self.policy.decoder, self.velocity_critic)

@@ -126,10 +126,30 @@ def test_velocity_imagined_update_and_checkpoint_roundtrip():
     assert all(p.requires_grad for p in wm.parameters())
 
 
-@pytest.mark.parametrize("config", [VelocityCfg(forward=(1., 2.)), VelocityCfg(fraction=1.), VelocityCfg(resample_seconds=0)])
+@pytest.mark.parametrize("config", [VelocityCfg(forward=(1., 2.)), VelocityCfg(fraction=1.), VelocityCfg(resample_seconds=0), VelocityCfg(stop_relabel_fraction=1.1)])
 def test_invalid_velocity_settings_fail_early(config):
     with pytest.raises(ValueError):
         config.validate()
+
+
+def test_stop_relabel_keeps_physical_history_and_disables_reference_only_for_new_goals():
+    from supermimic.data.replay_buffer import StartBatch
+    from supermimic.locomotion.trainer import relabel_stop_starts
+
+    state = standing(4)
+    history = state[None].repeat(10, 1, 1)
+    command = torch.tensor([[0.3, 0., 0.4]]).repeat(4, 1)
+    reference = torch.ones(4, dtype=torch.bool)
+    start = StartBatch(state, torch.zeros(4, XI_DIM), torch.arange(4), torch.zeros(4, NJ),
+                       history, torch.zeros(10, 4, NJ), command, reference)
+    assert relabel_stop_starts(start, 0.) is start
+    stop = relabel_stop_starts(start, 0.5)
+    assert stop.state is state and stop.hist_states is history
+    assert stop.hist_actions is start.hist_actions and stop.prev_action is start.prev_action
+    assert not stop.command[:2].any() and not stop.command_reference[:2].any()
+    torch.testing.assert_close(stop.command[2:], command[2:])
+    assert stop.command_reference[2:].all()
+    assert command[:, 0].eq(.3).all() and reference.all()
 
 
 def test_keyboard_release_lease_and_ramp():
