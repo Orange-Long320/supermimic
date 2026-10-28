@@ -22,6 +22,7 @@ def main():
     p.add_argument('--polish-fixed-pressure',action='store_true',help='Polish native root-force balance with the fitted left-foot pressure attitude fixed')
     args=p.parse_args()
     if not np.isfinite(args.support_height_m) or min(args.max_trials,args.max_nfev)<1:p.error('Finite support height and positive solver budgets required')
+    if args.polish_fixed_pressure and not args.anchor_left_foot:p.error('Fixed pressure polishing requires an explicit left-foot anchor')
     args.out.mkdir(parents=True,exist_ok=False)
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));d=mujoco.MjData(m)
@@ -89,7 +90,6 @@ def main():
                           ftol=1e-12,xtol=1e-12,gtol=1e-12)
         polish_evaluations=0
         if args.polish_fixed_pressure:
-            if not args.anchor_left_foot:p.error('Fixed pressure polishing requires an explicit left-foot anchor')
             fixed=fit.x.copy();indices=np.r_[0,np.arange(3,len(fixed))]
             def balance(y):
                 x=fixed.copy();x[indices]=y
@@ -113,7 +113,8 @@ def main():
         hard=float(np.maximum(np.maximum(m.jnt_range[1:,0]-q[7:],q[7:]-m.jnt_range[1:,1]),0).max())
         passed=bool(root_error<1e-5 and ratio<=1 and hard<1e-9 and min(n.values())>10 and
                     min(h[s] for s in feet)>-.005 and max(h[s] for s in feet)<.005 and h['nonfoot']>.005 and up>.85)
-        item={'adjustments':fit.x.tolist(),'cost':float(fit.cost),'root_force_residual_normalized':root_error,
+        final_residual=residual(fit.x)
+        item={'adjustments':fit.x.tolist(),'cost':float(.5*final_residual@final_residual),'initial_fit_cost':float(fit.cost),'root_force_residual_normalized':root_error,
               'maximum_motor_ratio':ratio,'root_force_residual':force[:6].tolist(),'heights':h,'normal_force_n':n,'contact_bodies':contacts,
               'root_up_z':up,'hard_violation_rad':hard,'static_force_feasible':passed,
               'strict_geometry_static_feasible':passed,'evaluations':int(fit.nfev),
