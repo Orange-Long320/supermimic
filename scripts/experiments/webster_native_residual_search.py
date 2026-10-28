@@ -43,7 +43,7 @@ def main():
     p.add_argument('--coefficient-limit', type=float, default=.2, help='Command search bound; native actuator force limits remain unchanged')
     p.add_argument('--initialize', type=Path, help='Same-source residual coefficients for local refinement')
     p.add_argument('--terminal-seconds', type=float, default=.3)
-    p.add_argument('--phase', choices=['landing','preparation','landing_limits','landing_brake_grid'], default='landing')
+    p.add_argument('--phase', choices=['landing','preparation','landing_limits','landing_brake_grid','landing_leg_grid'], default='landing')
     p.add_argument('--base-residual', type=Path)
     p.add_argument('--base-capture', type=Path, help='Independent seven-second capture of the fixed base residual')
     args = p.parse_args()
@@ -61,10 +61,12 @@ def main():
         p.error('Invalid terminal stability window')
     if bool(args.base_residual) != bool(args.base_capture) or (args.phase == 'preparation' and (not args.base_residual or args.seconds != 7 or args.terminal_seconds != 1)):
         p.error('Preparation search requires an independently recorded base and full7s/terminal1s coverage')
-    if args.phase in ['landing_limits','landing_brake_grid'] and (not args.base_residual or args.seconds != 7 or args.terminal_seconds != 1):
+    if args.phase in ['landing_limits','landing_brake_grid','landing_leg_grid'] and (not args.base_residual or args.seconds != 7 or args.terminal_seconds != 1):
         p.error('Landing-limit refinement requires an independently recorded full7s base')
     if args.phase == 'landing_brake_grid' and (args.envs < 216 or args.iterations != 0 or args.coefficient_limit != 1 or args.initialize):
         p.error('Directed brake grid requires at least 216 worlds, zero iterations, bound 1 and no initializer')
+    if args.phase == 'landing_leg_grid' and (args.envs != 256 or args.iterations != 0 or args.coefficient_limit != 1 or args.initialize):
+        p.error('Leg landing grid requires 256 worlds, zero iterations, bound 1 and no initializer')
     if os.environ.get('CUDA_VISIBLE_DEVICES') != str(args.gpu):
         raise ValueError('Explicit physical GPU selection is required')
     query = lambda kind, fields: subprocess.check_output(
@@ -136,6 +138,9 @@ def main():
         if args.phase == 'landing_brake_grid':
             joints = [names.index(n) for n in ['waist_pitch_joint','waist_roll_joint','right_ankle_pitch_joint']]
             knots = np.array([.76,.80,.84,.88,.92,.96,1.,1.04,1.08,1.12,1.16,1.20,1.24,1.28,1.32,1.36,1.42])
+        if args.phase == 'landing_leg_grid':
+            joints = [names.index(n) for n in ['right_hip_pitch_joint','right_knee_joint']]
+            knots = np.array([.98,1.02,1.06,1.10,1.16,1.22,1.30,1.40,1.60])
         times = np.arange(350)*.02
         basis = np.zeros((350, len(knots)-2))
         for row, t in enumerate(times):
@@ -272,7 +277,12 @@ def main():
             population = mean+torch.randn(args.envs, *dim, device=device)*std
             population.clamp_(-args.coefficient_limit,args.coefficient_limit)
             population[0] = best_parameters
-            if args.phase == 'landing_brake_grid':
+            if args.phase == 'landing_leg_grid':
+                population.zero_()
+                for row, amplitudes in enumerate(product(np.linspace(0.,1.,16),repeat=2)):
+                    population[row,:,0] = -float(amplitudes[0])
+                    population[row,:,1] = -float(amplitudes[1])
+            elif args.phase == 'landing_brake_grid':
                 population.zero_()
                 # Three independent, inward braking amplitudes; every action
                 # still goes through the original force-limited actuators.
