@@ -32,9 +32,10 @@ def main():
     model = spec.compile()
     data = mujoco.MjData(model)
     feet = [[g for g in range(model.ngeom) if model.geom(g).name.startswith('foot_')
-             and side in model.geom(g).name] for side in ('left', 'right')]
+             and side in model.body(int(model.geom_bodyid[g])).name] for side in ('left', 'right')]
     if not all(feet):
         raise ValueError('Missing left/right native foot geometry')
+    foot_names = [[model.geom(g).name for g in ids] for ids in feet]
     vertices = {}
     for g in sum(feet, []):
         if model.geom_type[g] == mujoco.mjtGeom.mjGEOM_MESH:
@@ -80,6 +81,13 @@ def main():
         spec.worldbody.add_geom(name='audit_floor',type=mujoco.mjtGeom.mjGEOM_PLANE,
                                size=(0,0,.05),contype=1,conaffinity=1)
     model = spec.compile()
+    # World geoms are compiled before robot geoms. Resolve names again after
+    # adding the box/floor instead of reusing the old numeric geom indices.
+    old_vertices = {name: vertices[g] for names, ids in zip(foot_names, feet) for name,g in zip(names,ids)}
+    feet = [[model.geom(name).id for name in names] for names in foot_names]
+    vertices = {model.geom(name).id: local for name,local in old_vertices.items()}
+    for side, ids in zip(('left','right'), feet):
+        assert all(side in model.body(int(model.geom_bodyid[g])).name for g in ids)
     data = mujoco.MjData(model)
     box_id = model.geom('box45_collision').id
     bounds = model.jnt_range[1:]

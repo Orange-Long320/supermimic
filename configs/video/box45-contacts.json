@@ -1,0 +1,9 @@
+{
+  "source": "IMG_4868.MOV",
+  "source_fps": 30,
+  "status": "visual timing estimates, approximately +/-0.1s; candidate robot timing may need retiming",
+  "left": {"lift_seconds": 2.2, "land_seconds": 2.7},
+  "right": {"lift_seconds": 1.0, "land_seconds": 1.9},
+  "lead_foot": "right",
+  "contact_targets": "ground before each lift; box top after each landing; no hand support"
+}
