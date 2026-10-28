@@ -11,7 +11,10 @@ def main():
     parser.add_argument("--robot", required=True)
     parser.add_argument("--npz", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--width",type=int,default=960)
+    parser.add_argument("--height",type=int,default=720)
     args = parser.parse_args()
+    if args.width<=0 or args.height<=0:parser.error('Positive render dimensions required')
     if args.out.exists():
         parser.error("output already exists")
     from supermimic.robots.paths import select_robot
@@ -37,8 +40,8 @@ def main():
     camera.azimuth = 120
     camera.elevation = -12
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    width = min(960, model.vis.global_.offwidth)
-    height = min(720, model.vis.global_.offheight)
+    width = min(args.width, model.vis.global_.offwidth)
+    height = min(args.height, model.vis.global_.offheight)
     renderer = mujoco.Renderer(model, width=width, height=height)
     label = "drawtext=text='X2 Ultra | REFERENCE ONLY | no policy rollout':x=15:y=15:fontsize=16:fontcolor=white:box=1:boxcolor=black@0.7"
     command = ["ffmpeg", "-nostdin", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}", "-r", str(fps), "-i", "pipe:0", "-an", "-vf", label, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-threads", "2", "-movflags", "+faststart", "-n", str(args.out)]
