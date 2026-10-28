@@ -59,6 +59,7 @@ def main():
     try:
         for iteration in range(a.iterations):
             correction=helper.correction(qs);rows=[];cols=[];values=[];lower=[];upper=[];row=0
+            original_wrenches=[]
             def add(indices,data,lo,hi):
                 nonlocal row
                 indices=np.asarray(indices,dtype=int).ravel();data=np.asarray(data,dtype=float).ravel()
@@ -77,6 +78,7 @@ def main():
             if np.any(low>high):raise ValueError('Current candidate left original source/soft-limit domain')
             for i,frame in enumerate(range(start,end+1)):
                 required=helper.inverse(qs,frame);basis=helper.basis(helper.contacts[i]);velocity=d.qvel.copy()
+                original_wrenches.append(required-basis@(coefficients[i]*helper.weight))
                 derivatives=[];indices=[];eps=1e-6
                 for node in range(max(start+1,frame-1),min(end-1,frame+1)+1):
                     block=np.zeros((37,37));trial=qs.copy()
@@ -145,6 +147,17 @@ def main():
             # exchange arrays, never imported binary dependencies.
             A=sp.coo_matrix((values,(rows,cols)),shape=(row,total)).tocsc()
             A=sp.vstack([A,sp.eye(total,format='csc')],format='csc');l=np.r_[lower,low];u=np.r_[upper,high]
+            if iteration==0 and a.restore_feasibility:
+                witness=np.zeros(total)
+                for i,wrench in enumerate(original_wrenches):
+                    witness[offsets[i]:offsets[i+1]]=coefficients[i]
+                    witness[residual_offset+i*6:residual_offset+(i+1)*6]=wrench[:6]/helper.scales
+                    witness[motor_violation_offset+i*31:motor_violation_offset+(i+1)*31]=np.maximum(abs(wrench[6:])/helper.effort-.95,0.)+1e-10
+                ax=A@witness;violation=float(max(np.maximum(l-ax,0).max(),np.maximum(ax-u,0).max()))
+                (a.out/'restoration-feasibility-witness.json').write_text(json.dumps(dict(
+                    maximum_linear_violation=violation,motor_violation_max_ratio=float(witness[motor_violation_offset:].max()),
+                    scope='Offline nonempty search-space witness only; nonzero dynamics/motor violations are not physical support or applied forces'),indent=2))
+                if violation>1e-7:raise ValueError('Restoration matrix failed its explicit feasible-witness check')
             weights=np.r_[np.full(3,10.),np.full(3,5.),np.ones(31)]
             diagonal=np.r_[np.tile(weights**2,n),np.full(residual_offset-pose_size,1e-4),np.full(count*6,1e4),
                 np.full(count*31 if a.restore_feasibility else 0,1e5)]
