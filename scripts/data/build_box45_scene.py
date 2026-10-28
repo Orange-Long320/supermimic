@@ -6,6 +6,7 @@ import argparse
 from dataclasses import asdict
 import hashlib
 import json
+import os
 from pathlib import Path
 
 
@@ -15,6 +16,7 @@ def main():
     placement.add_argument("--front-x", type=float, help="Explicit box front in reference frame")
     placement.add_argument("--reference", type=Path, help="Aligned diagnostic NPZ with preserved box placement")
     parser.add_argument("--center-y", type=float, default=0.0)
+    parser.add_argument("--sole-profile",type=Path,help="Explicit conservative sole contact augmentation for this model only")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if args.out.exists():
@@ -42,8 +44,14 @@ def main():
     box = FixedBox(front_x=front_x, center_y=center_y,
                    depth=cfg["depth_m"], width=cfg["front_width_m"],
                    height=cfg["height_m"], friction=cfg["friction"]["value"])
+    robot_cfg=get_robot_cfg()
+    if args.sole_profile:
+        if os.environ.get('SM_SOLE_BOX_CONFIG'):raise ValueError('Use explicit sole-profile or environment profile, not both')
+        from supermimic.robots.sole_collision import apply_sole_box_profile
+        raw_spec=robot_cfg.spec_fn
+        robot_cfg.spec_fn=lambda:apply_sole_box_profile(raw_spec(),args.sole_profile)
     scene = Scene(SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"),
-                          entities={"robot": get_robot_cfg()}), device="cpu")
+                          entities={"robot": robot_cfg}), device="cpu")
     scene.spec.option.timestep = 0.005
     baseline = scene.compile()
     box.add_to_spec(scene.spec)
@@ -83,6 +91,7 @@ def main():
             raise ValueError(f"Missing physical box contact: {label}")
         probes.append({"surface": label, "contact_distances_m": distances})
     args.out.mkdir(parents=True, exist_ok=False)
+    if args.sole_profile:(args.out/'sole-profile.json').write_bytes(args.sole_profile.read_bytes())
     scene.write(args.out / "scene")
     mujoco.mj_saveModel(model,str(args.out/'native.mjb'))
     if reference is not None:
@@ -95,6 +104,7 @@ def main():
     report = {"box": asdict(box), "nq": model.nq, "nv": model.nv, "nu": model.nu,
               "timestep_s": model.opt.timestep, "robot_inertia_limits_actuators_unchanged": True,
               "physics":asdict(physics),"integrator":int(model.opt.integrator),
+              "sole_profile":str(args.sole_profile) if args.sole_profile else os.environ.get('SM_SOLE_BOX_CONFIG'),
               "contact_probes": probes, "task_sha256": hashlib.sha256(task_path.read_bytes()).hexdigest(),
               "reference_sha256": hashlib.sha256(args.reference.read_bytes()).hexdigest() if args.reference else None,
               "placement_status": "preserved from reference" if reference is not None else "explicit diagnostic placement; not yet aligned to recovered motion",
