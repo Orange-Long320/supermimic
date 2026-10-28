@@ -59,6 +59,10 @@ def main():
     p.add_argument("--initial-command-margin",type=float,default=0.,help="Move the first position command inward for joints starting at a soft boundary; no state or actuator edits")
     p.add_argument("--initial-knot",action="store_true",help="Search the initial residual command as well as the three preparation knots")
     p.add_argument("--contact-pulses",action="store_true",help="Append two short early-contact command groups; requires explicitly expanded preparation parameters")
+    p.add_argument("--native-contact-preview",type=Path,help="Experimental early control; supply the matching two-frame native-feedback calibration result.json")
+    p.add_argument("--native-preview-trust",type=float,default=.05)
+    p.add_argument("--native-preview-seconds",type=float,default=.16)
+    p.add_argument("--native-preview-iterations",type=int,default=12)
     p.add_argument("--independent-leg-axes",action="store_true",help="Append left/right hip yaw and independent right hip roll residuals; requires explicitly migrated parameter files")
     p.add_argument("--tail-of",type=Path,help="Freeze a takeoff solution and search aerial/landing residuals instead")
     p.add_argument("--joint-phases",action="store_true",help="Use tail-of only as initialization; jointly search preparation and aerial commands")
@@ -103,6 +107,14 @@ def main():
     p.add_argument("--projection-frequency",type=float,default=35.)
     p.add_argument("--projection-margin",type=float,default=.04)
     args=p.parse_args()
+    if args.native_contact_preview:
+        if args.device!='cpu' or args.num_envs!=1 or args.iterations or not args.warmstart or not args.initial_knot:
+            p.error('Native preview requires one CPU environment, explicit initial-knot parameters and zero search iterations')
+        if any([args.tail_of,args.landing_ckpt,args.consistent_retiming,args.initial_command_margin,
+                args.bounded_target_joints,args.joint_stop_margin,args.physics_command_projection]):
+            p.error('Native preview does not implement additional controllers or continuous reference retiming')
+        if not 0<args.native_preview_trust<=.2 or not 0<args.native_preview_seconds<=.3 or not 1<=args.native_preview_iterations<=30:
+            p.error('Invalid native preview trust, duration or iteration bound')
     if args.contact_pulses and not (args.initial_knot or args.tail_of):
         p.error('Contact pulses require preparation initial-knot parameters')
     if not np.isfinite(args.residual_sigma_floor) or args.residual_sigma_floor<0:
@@ -211,6 +223,22 @@ def main():
     cmd._update_command=warped_update
     m=env.sim.mj_model
     mujoco.mj_saveModel(m,str(args.out/'native-model.mjb'))
+    if args.native_contact_preview:
+        calibration=json.loads(args.native_contact_preview.read_text())
+        for path in [args.ckpt,args.source,args.warmstart]:
+            if calibration['input_sha256'].get(str(path))!=hashlib.sha256(path.read_bytes()).hexdigest():
+                raise ValueError('Native preview calibration does not match this checkpoint, reference and parameter file')
+        if calibration.get('native_model_sha256')!=hashlib.sha256((args.out/'native-model.mjb').read_bytes()).hexdigest():
+            raise ValueError('Native preview calibration model differs from the execution scene')
+        if (not calibration.get('reference_clock_matched') or calibration['maximum_errors_by_horizon'][-1]['geometry_height_m']>=2e-5
+                or max(calibration['maximum_action_error_by_control_frame'])>=3e-5):
+            raise ValueError('Native preview feedback calibration is insufficient for this trial')
+        from supermimic.data.native_policy_preview import NativePolicyPreview
+        from supermimic.data.native_contact_controller import NativeContactController
+        import supermimic.data.native_policy_preview as preview_module
+        import supermimic.data.native_contact_controller as controller_module
+        for module in [preview_module,controller_module]:
+            (args.out/Path(module.__file__).name).write_bytes(Path(module.__file__).read_bytes())
     d=mujoco.MjData(m)
     root=int(m.jnt_bodyid[0])
     names=PROFILE["joint_names"]
@@ -374,6 +402,7 @@ def main():
         "preparation_frozen":bool(args.tail_of and not args.joint_phases),
         "preparation_parameter_dimension":preparation_dimension,"clock_parameter_indices":clock_indices,
         "contact_pulse_layout":({"start_column":base_dimension+len(groups),"centers_s":[0.,.08],"half_widths_s":[.04,.08]} if args.contact_pulses else None),
+        "native_preview_calibration_sha256":hashlib.sha256(args.native_contact_preview.read_bytes()).hexdigest() if args.native_contact_preview else None,
         "initial_knot_searched":bool((not args.tail_of or args.joint_phases) and preparation_dimension>base_dimension),
         "fixed_preparation_has_initial_knot":bool(fixed_preparation is not None and len(fixed_preparation)>base_dimension),
         "searched_parameter_indices":np.flatnonzero(search_mask).tolist(),
@@ -419,6 +448,12 @@ def main():
             env.obs_buf=obs
         clock["initial_frame"]=int(cmd.frame[0])
         clock["step"]=0
+        preview_controller=None;preview_records=[]
+        if args.native_contact_preview:
+            if np.max(np.abs(origins[0]))>1e-7:raise ValueError('Native preview needs an origin-zero environment')
+            preview=NativePolicyPreview(m,policy,cmd.library,groups,prep_parameters[0],takeoff,landing,
+                clock['initial_frame'],cfg['env'].get('anchor_obs',False),cfg['env'].get('future_frames',10),args.contact_pulses)
+            preview_controller=NativeContactController(preview,args.native_preview_trust,args.native_preview_iterations)
         if args.physics_command_projection:
             d.qpos[:]=env.sim.data.qpos[0].cpu().numpy();mujoco.mj_forward(m,d)
             mass=np.zeros((m.nv,m.nv));mujoco.mj_fullM(m,d,mass)
@@ -514,11 +549,22 @@ def main():
                     torch.minimum(target,inner_upper-ratio*torch.maximum(vel,torch.zeros_like(vel))),target)
                 action=(target-default)/scale_t
             if args.phase=='takeoff':device_mask.copy_(torch.as_tensor(physics_mask,device=device))
+            preview_prediction=None
+            if preview_controller is not None and step*.02<args.native_preview_seconds:
+                projected,preview_prediction,preview_record=preview_controller.project(
+                    env.sim.data.qpos[0].cpu().numpy(),env.sim.data.qvel[0].cpu().numpy(),
+                    obs['policy'][0].cpu().numpy(),obs['goal'][0].cpu().numpy(),action[0].cpu().numpy(),step*.02)
+                action=torch.as_tensor(projected[None],dtype=action.dtype,device=device)
             obs,_,_,_,_=env.step(action)
             q=env.sim.data.qpos.cpu().numpy().copy()
             v=env.sim.data.qvel.cpu().numpy().copy()
             force=env.sim.data.actuator_force.cpu().numpy()
             states.append(q);velocities.append(v);actions.append(action.cpu().numpy())
+            if preview_prediction is not None:
+                predicted_state=preview_prediction['states'][preview.ratio-1]
+                preview_record.update(executed_qpos_prediction_error=float(np.abs(q[0]-predicted_state[:m.nq]).max()),
+                    executed_qvel_prediction_error=float(np.abs(v[0]-predicted_state[m.nq:]).max()))
+                preview_records.append(preview_record)
             # MuJoCo caches geometry before its final integration. Refresh
             # derived fields so contact heights and orientation match saved q.
             env.sim.forward()
@@ -640,6 +686,8 @@ def main():
             if landing_policy is not None:reports[-1]["landing_switch_time_s"]=float(landing_times[e])
             if early_offsets is not None:reports[-1].update(early_recovery_time_s=float(early_times[e]),early_recovery_offset_s=float(early_offsets[e]))
         physical_trace=tuple(np.stack([r[k] for r in physics_trace]) for k in range(3)) if physics_trace else None
+        if preview_controller is not None:
+            (args.out/f'native-preview-rollout-{evaluations:03d}.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in preview_records))
         return reports,(np.array(states),np.array(velocities),np.array(actions),records,initial_state,physical_trace,observation_trace)
 
     try:
