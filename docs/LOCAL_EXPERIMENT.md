@@ -815,3 +815,10 @@ GPU 0、1 上的其他用户任务未触碰。长训尚未启动，等待短训�
 - 从原约束修正参考 `npz_repaired_ease_r1/webster.npz` 构造6候选，选中 `logs/webster_flat_tail_20261028_r2/frame075-duration020/`。原六组数据前76帧逐项不变；第75帧之后0.4秒五次曲线过渡至 `webster_flat_standing_20261028_r3/design/equilibrium.npz` 的平脚静态平衡姿态，保持2秒，共196帧/50Hz/3.90秒。
 - 过渡及保持段：硬越界0、关节速度比例0.150958、最低足网格-3.787mm、最低非脚38.306mm；几何筛选通过。独立检查最后100帧所有速度为0、左右脚底主平面倾角0°/0.0000012°，原前76帧逐项一致。此为参考运动学检查，未证明落地动态跟踪、双脚实际承重或完整策略成功，保留diagnostic_only与approved_for_training=false。
 - 新参考独立保存于服务器 `data/video/webster_BV1Xy4y1g7xA_20261027/npz_flat_standing_tail_20261028_r1/`，含清单和核验记录；NPZ SHA256 `7768bd198464f2cb1aa0e27a764a08251cf49a7cc4797126ef9debe626bc3f98`。未替换运行中训练的数据。生成与CPU录像均在服务器专用环境，记录目录 `logs/webster_flat_tail_20261028_r2/`；脚本as-run保留c57647d版本，后续本地修正端点误差计算以消除四元数正负号的等价表示影响。
+
+## 2026-10-28：用户进一步要求双脚对称、脚尖齐平
+
+- `design_flat_standing_pose.py` 新增默认关闭的symmetric-feet：保留脚底水平，统一双脚朝向，按碰撞网格脚尖前缘对齐，左右站距24cm。源码启动前回档点298788a。服务器使用同一原生模型独立CPU拟合 `logs/webster_symmetric_standing_20261028_r1/`，静态检查通过：硬越界0、归一化根受力残差8.742e-6、所需电机比例0.47045、双脚载荷220.107/219.391N、脚底倾角均0。
+- 直接复用前次第75帧过渡有少量穿地，未采用；调整起点后选择 `logs/webster_symmetric_tail_20261028_r2/frame073-duration025/`，原前74帧六组数据逐项一致，0.5秒平滑过渡并保持2秒，共199帧/50Hz。收尾几何筛选通过，最低足-2.95mm、最大较低脚底高度10.65mm，无硬越界。
+- 独立FK测得脚尖前后差8.21e-10m、双脚朝向差3.02e-9rad、站距0.239999999m；最后100帧所有速度为0。静态与运动学检查不证明策略实际落地站稳，dynamic_tracking_verified=false，仍保留诊断标记。
+- 新独立数据目录 `data/video/webster_BV1Xy4y1g7xA_20261027/npz_symmetric_standing_tail_20261028_r1/`，NPZ SHA256 `19a995e0c4cfc07faa646861264d815cc6f2df5f1dd289cd38aa16745c191c16`；未改已有训练输入。录像 `logs/webster_symmetric_tail_20261028_r2/symmetric-standing-reference.mp4` 用服务器CPU渲染，完整as-run和检查报告保留。
