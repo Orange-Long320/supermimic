@@ -11,7 +11,9 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--front-x", type=float, required=True, help="Explicit box front in reference frame")
+    placement = parser.add_mutually_exclusive_group(required=True)
+    placement.add_argument("--front-x", type=float, help="Explicit box front in reference frame")
+    placement.add_argument("--reference", type=Path, help="Aligned diagnostic NPZ with preserved box placement")
     parser.add_argument("--center-y", type=float, default=0.0)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
@@ -29,7 +31,14 @@ def main():
     task_path = Path(__file__).resolve().parents[2] / "configs/video/box45-IMG4868.json"
     task = json.loads(task_path.read_text())
     cfg = task["box"]
-    box = FixedBox(front_x=args.front_x, center_y=args.center_y,
+    reference = None
+    front_x, center_y = args.front_x, args.center_y
+    if args.reference:
+        reference = np.load(args.reference)
+        center, half = reference['box_center'], reference['box_half_size']
+        np.testing.assert_allclose(half*2,cfg['dimensions_xyz_m'],atol=1e-12)
+        front_x, center_y = float(center[0]-half[0]), float(center[1])
+    box = FixedBox(front_x=front_x, center_y=center_y,
                    depth=cfg["depth_m"], width=cfg["front_width_m"],
                    height=cfg["height_m"], friction=cfg["friction"]["value"])
     scene = Scene(SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"),
@@ -68,10 +77,19 @@ def main():
         probes.append({"surface": label, "contact_distances_m": distances})
     args.out.mkdir(parents=True, exist_ok=False)
     scene.write(args.out / "scene")
+    mujoco.mj_saveModel(model,str(args.out/'native.mjb'))
+    if reference is not None:
+        from supermimic.data.physics_motion import differentiate_qpos
+        q = reference['qpos'].copy()
+        fps = float(reference['fps'])
+        if q.shape[1] != model.nq:
+            raise ValueError('Reference/model qpos dimensions differ')
+        np.savez_compressed(args.out/'reference-qpos.npz',qpos=q,qvel=differentiate_qpos(model,q,fps),fps=np.array([fps]))
     report = {"box": asdict(box), "nq": model.nq, "nv": model.nv, "nu": model.nu,
               "timestep_s": model.opt.timestep, "robot_inertia_limits_actuators_unchanged": True,
               "contact_probes": probes, "task_sha256": hashlib.sha256(task_path.read_bytes()).hexdigest(),
-              "placement_status": "explicit diagnostic placement; not yet aligned to recovered motion",
+              "reference_sha256": hashlib.sha256(args.reference.read_bytes()).hexdigest() if args.reference else None,
+              "placement_status": "preserved from reference" if reference is not None else "explicit diagnostic placement; not yet aligned to recovered motion",
               "status": "compiled geometry and contact probes only; not robot dynamics or task success"}
     (args.out / "scene-audit.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
