@@ -46,12 +46,15 @@ def main():
     p.add_argument('--nonfoot-weight',type=float,default=0.)
     p.add_argument('--air-rotation-weight',type=float,default=0.)
     p.add_argument('--physical-audit',type=Path)
+    p.add_argument('--snapshot-local-steps',type=int,nargs='+',default=[],help='Save immutable evaluation-only policies after these local steps')
     args=p.parse_args()
     if args.out.exists() or args.ckpt.name=='ckpt_latest.pt':p.error('Use a fresh output directory and immutable checkpoint')
     if not -50<=args.joint_weight<=-2 or not 0<args.memory_fraction<=.2 or args.steps<45:
         p.error('Invalid bounded comparison settings')
     if not 0<args.learning_rate<=2e-4 or not 0<=args.foot_weight<=100 or not 0<=args.nonfoot_weight<=100 or not 0<=args.air_rotation_weight<=.1:
         p.error('Invalid experimental physical reward or learning rate')
+    if any(s<45 or s>args.steps for s in args.snapshot_local_steps) or len(set(args.snapshot_local_steps))!=len(args.snapshot_local_steps):
+        p.error('Snapshot steps must be distinct and inside the actual learning interval')
     physical_enabled=any([args.foot_weight,args.nonfoot_weight,args.air_rotation_weight])
     audit=None
     if physical_enabled:
@@ -121,21 +124,37 @@ def main():
             'arguments':vars(args)}
         (args.out/'runtime-reward-overrides.json').write_text(json.dumps(metadata,indent=2,default=str))
         (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
+        def save_evaluation(destination):
+            if destination.exists():raise ValueError('Evaluation snapshots must be immutable')
+            evaluation={'config':asdict(cfg),'policy':{k:v.cpu() for k,v in trainer.policy.state_dict().items()},
+                'iteration':trainer.iteration,'num_updates':trainer.num_updates,
+                'reward_override':metadata['reward_override'],'physical_reward':metadata['physical_reward'],
+                'source_checkpoint_sha256':metadata['source_sha256'],
+                'local_environment_steps':trainer.iteration-metadata['initial_iteration'],
+                'policy_evaluation_only':True,'approved_for_training':False}
+            temporary=destination.with_suffix('.tmp');torch.save(evaluation,temporary);temporary.replace(destination)
+        pending=set(args.snapshot_local_steps)
+        original_act=trainer.act
+        def act_with_snapshot(obs):
+            local=trainer.iteration-metadata['initial_iteration']
+            if local in pending:
+                save_evaluation(args.out/f'policy_local{local:05d}.pt');pending.remove(local)
+            return original_act(obs)
+        if pending:trainer.act=act_with_snapshot
         initial_updates=trainer.num_updates;started=time.monotonic()
         trainer.run()
         finite=all(torch.isfinite(v).all().item() for module in [trainer.wm,trainer.policy,trainer.critic]
                    for v in module.state_dict().values() if torch.is_tensor(v))
         if trainer.num_updates<=initial_updates or not finite:raise ValueError('No valid learning update completed')
-        evaluation={'config':asdict(cfg),'policy':{k:v.cpu() for k,v in trainer.policy.state_dict().items()},
-            'iteration':trainer.iteration,'num_updates':trainer.num_updates,'reward_override':metadata['reward_override'],
-            'physical_reward':metadata['physical_reward'],
-            'policy_evaluation_only':True,'approved_for_training':False}
-        torch.save(evaluation,args.out/'policy_evaluation.pt')
+        local=trainer.iteration-metadata['initial_iteration']
+        if local in pending:save_evaluation(args.out/f'policy_local{local:05d}.pt');pending.remove(local)
+        save_evaluation(args.out/'policy_evaluation.pt')
         summary={'elapsed_s':time.monotonic()-started,'final_iteration':trainer.iteration,
             'completed_updates':trainer.num_updates-initial_updates,'parameters_finite':finite,
             'torch_peak_allocated_mib':torch.cuda.max_memory_allocated(0)/2**20,
             'torch_peak_reserved_mib':torch.cuda.max_memory_reserved(0)/2**20,
             'evaluation_checkpoint_sha256':hashlib.sha256((args.out/'policy_evaluation.pt').read_bytes()).hexdigest(),
+            'requested_snapshot_steps_not_reached':sorted(pending),
             'approved_for_training':False,'physical_evaluation_pending':True}
         (args.out/'completed.json').write_text(json.dumps(summary,indent=2));print(json.dumps(summary),flush=True)
     finally:
