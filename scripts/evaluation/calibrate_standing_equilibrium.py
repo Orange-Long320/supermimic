@@ -21,9 +21,13 @@ def main():
     p.add_argument('--max-nfev',type=int,default=250,help='Evaluation budget per calibration seed')
     p.add_argument('--polish-fixed-pressure',action='store_true',help='Polish native root-force balance with the fitted left-foot pressure attitude fixed')
     p.add_argument('--joint-limit-factor',type=float,default=1.,help='Optional tighter optimization range, e.g. existing reset factor 0.9; physical limits unchanged')
+    p.add_argument('--minimum-root-up-z',type=float,help='Optional stricter upright target; legacy threshold is 0.85')
+    p.add_argument('--maximum-foot-penetration-m',type=float,help='Optional tighter foot compression limit; legacy bound is 5 mm')
     args=p.parse_args()
     if not np.isfinite(args.support_height_m) or min(args.max_trials,args.max_nfev)<1:p.error('Finite support height and positive solver budgets required')
     if not 0<args.joint_limit_factor<=1:p.error('Joint range factor must be in (0,1]')
+    if args.minimum_root_up_z is not None and not .85<=args.minimum_root_up_z<1:p.error('Upright target may only tighten the legacy threshold')
+    if args.maximum_foot_penetration_m is not None and not .00005<args.maximum_foot_penetration_m<=.005:p.error('Foot limit may only tighten the legacy bound')
     if args.polish_fixed_pressure and not args.anchor_left_foot:p.error('Fixed pressure polishing requires an explicit left-foot anchor')
     args.out.mkdir(parents=True,exist_ok=False)
     from supermimic.robots.dimensions import PROFILE
@@ -31,6 +35,11 @@ def main():
     with np.load(args.initial) as z:q0=z['state'][0,:m.nq].copy()
     names=list(PROFILE['joint_names']);effort=np.array([PROFILE['effort_limit'][n] for n in names])
     root=int(m.jnt_bodyid[0]);mass=float(m.body_mass.sum());weight=mass*9.81
+    compression_target=.0045 if args.maximum_foot_penetration_m is None else args.maximum_foot_penetration_m-.00005
+    compression_limit=.005 if args.maximum_foot_penetration_m is None else args.maximum_foot_penetration_m
+    minimum_up=.85 if args.minimum_root_up_z is None else args.minimum_root_up_z
+    def upright_residual():
+        return [] if args.minimum_root_up_z is None else [max(min(1.,minimum_up+.002)-float(d.xmat[root].reshape(3,3)[2,2]),0)*20]
     feet={side:m.body('robot/'+side+'_ankle_roll_link').id for side in ['left','right']}
     joints=[m.joint('robot/'+side+'_ankle_'+axis+'_joint').id for side in ['left','right'] for axis in ['pitch','roll']]
     if args.leg_adjustments:
@@ -75,9 +84,9 @@ def main():
     def residual(x):
         _,force,h,n,_=evaluate(x)
         return np.r_[force[:6]/scale*20,
-            [max(h[s]+.0002,0)*50 for s in feet],[max(-.0045-h[s],0)*100 for s in feet],
+            [max(h[s]+.0002,0)*50 for s in feet],[max(-compression_target-h[s],0)*100 for s in feet],
             [max(.05*weight-n[s],0)/weight*10 for s in feet],max(.005-h['nonfoot'],0)*100,
-            np.maximum(abs(force[6:])/effort-.95,0)*10,x*.001]
+            np.maximum(abs(force[6:])/effort-.95,0)*10,upright_residual(),x*.001]
     def jacobian(x):
         steps=np.r_[1e-6,np.full(len(x)-1,1e-5)];columns=[]
         for i,h in enumerate(steps):
@@ -101,8 +110,8 @@ def main():
                 _,force,h,n,_=evaluate(x)
                 return np.r_[force[:6]/scale,
                     np.maximum(abs(force[6:])/effort-1.,0),
-                    [max(-.0045-h[s],0)*100 for s in feet],max(.005-h['nonfoot'],0)*100,
-                    [max(10.-n[s],0)/weight for s in feet]]
+                    [max(-compression_target-h[s],0)*100 for s in feet],max(.005-h['nonfoot'],0)*100,
+                    [max(10.-n[s],0)/weight for s in feet],upright_residual()]
             def balance_jac(y):
                 columns=[]
                 for j,step in enumerate(np.r_[1e-7,np.full(len(y)-1,1e-6)]):
@@ -117,7 +126,7 @@ def main():
         root_error=float(abs(force[:6]/scale).max());up=float(d.xmat[root].reshape(3,3)[2,2])
         hard=float(np.maximum(np.maximum(m.jnt_range[1:,0]-q[7:],q[7:]-m.jnt_range[1:,1]),0).max())
         passed=bool(root_error<1e-5 and ratio<=1 and hard<1e-9 and min(n.values())>10 and
-                    min(h[s] for s in feet)>-.005 and max(h[s] for s in feet)<.005 and h['nonfoot']>.005 and up>.85)
+                    min(h[s] for s in feet)>-compression_limit and max(h[s] for s in feet)<.005 and h['nonfoot']>.005 and up>minimum_up)
         final_residual=residual(fit.x)
         item={'adjustments':fit.x.tolist(),'cost':float(.5*final_residual@final_residual),'initial_fit_cost':float(fit.cost),'root_force_residual_normalized':root_error,
               'maximum_motor_ratio':ratio,'root_force_residual':force[:6].tolist(),'heights':h,'normal_force_n':n,'contact_bodies':contacts,
