@@ -25,6 +25,7 @@ def main():
     import numpy as np
     from mjlab.scene import Scene, SceneCfg
     from mjlab.terrains import TerrainEntityCfg
+    from mjlab.sim import MujocoCfg
     from supermimic.robots.assets import get_robot_cfg
     from supermimic.envs.box_scene import FixedBox
 
@@ -47,6 +48,12 @@ def main():
     baseline = scene.compile()
     box.add_to_spec(scene.spec)
     model = scene.compile()
+    physics = MujocoCfg(timestep=.005,iterations=10,ls_iterations=20)
+    physics.apply(model)
+    physics.apply(baseline)
+    for field in ('timestep','integrator','cone','solver','iterations','ls_iterations','impratio','jacobian','tolerance','ls_tolerance','ccd_iterations','disableflags','enableflags'):
+        setattr(scene.spec.option,field,getattr(model.opt,field))
+    scene.spec.option.gravity[:]=model.opt.gravity
     assert (model.nq, model.nv, model.nu, model.nbody) == (baseline.nq, baseline.nv, baseline.nu, baseline.nbody)
     for name in ("body_mass", "body_inertia", "jnt_range", "actuator_ctrlrange", "actuator_forcerange", "actuator_gainprm", "actuator_biasprm"):
         np.testing.assert_array_equal(getattr(model, name), getattr(baseline, name))
@@ -87,6 +94,7 @@ def main():
         np.savez_compressed(args.out/'reference-qpos.npz',qpos=q,qvel=differentiate_qpos(model,q,fps),fps=np.array([fps]))
     report = {"box": asdict(box), "nq": model.nq, "nv": model.nv, "nu": model.nu,
               "timestep_s": model.opt.timestep, "robot_inertia_limits_actuators_unchanged": True,
+              "physics":asdict(physics),"integrator":int(model.opt.integrator),
               "contact_probes": probes, "task_sha256": hashlib.sha256(task_path.read_bytes()).hexdigest(),
               "reference_sha256": hashlib.sha256(args.reference.read_bytes()).hexdigest() if args.reference else None,
               "placement_status": "preserved from reference" if reference is not None else "explicit diagnostic placement; not yet aligned to recovered motion",

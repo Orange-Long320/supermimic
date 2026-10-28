@@ -22,6 +22,7 @@ def main():
     p.add_argument('--support-centred',action='store_true',help='Replace inherited COM drift with support-phase centres')
     p.add_argument('--knot-stride',type=int,default=5)
     p.add_argument('--foot-margin',type=float,default=0.0)
+    p.add_argument('--free-torso',action='store_true',help='Optimize root orientation and waist joints for COM balance')
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
     from supermimic.robots.paths import select_robot
@@ -54,9 +55,11 @@ def main():
     box_id=m.geom('box45_collision').id;floor_id=m.geom('repair_floor').id
     bodies=[m.body(s+'_ankle_roll_link').id for s in ('left','right')]
     leg_names=[s+'_'+j+'_joint' for s in ('left','right') for j in ('hip_pitch','hip_roll','hip_yaw','knee','ankle_pitch','ankle_roll')]
+    if a.free_torso:leg_names += ['waist_'+j+'_joint' for j in ('yaw','roll','pitch')]
     qcols=np.array([m.jnt_qposadr[m.joint(s).id] for s in leg_names],dtype=int)
     vcols=np.r_[np.arange(3),[m.jnt_dofadr[m.joint(s).id] for s in leg_names]].astype(int)
-    nv=len(vcols);root=int(m.jnt_bodyid[0])
+    nr=3 if a.free_torso else 0
+    nv=len(vcols)+nr;root=int(m.jnt_bodyid[0])
     geoms=[g for g in range(m.ngeom) if m.geom_bodyid[g]!=0 and (m.geom_contype[g] or m.geom_conaffinity[g])]
     width=nv+12+2+2*len(geoms)
     targets=[];com=[]
@@ -99,15 +102,15 @@ def main():
     rotvec=gaussian_filter1d((reference_rotation.inv()*rotation).as_rotvec(),fps*.15,axis=0,mode='nearest')
     base=original[indices].copy();base[:,7:]=smooth[indices]
     base[:,3:7]=(reference_rotation*Rotation.from_rotvec(rotvec[indices])).as_quat()[:,[3,0,1,2]]
-    initial=np.c_[original[indices,:3],original[indices][:,qcols]]
+    initial=np.c_[original[indices,:3],np.zeros((n,nr)),original[indices][:,qcols]]
     reference=gaussian_filter1d(initial,2,axis=0,mode='nearest')
     joint_ids=np.array([m.joint(s).id for s in leg_names])
     ranges=m.jnt_range[joint_ids];mid=ranges.mean(1);radius=np.diff(ranges,axis=1)[:,0]*.9/2
-    low=np.tile(np.r_[[-.5,-.7,.25],mid-radius+1e-6],(n,1))
-    high=np.tile(np.r_[[1.5,.7,1.7],mid+radius-1e-6],(n,1))
-    posture_scale=np.r_[np.full(3,5.),np.full(12,.25)]
-    acceleration_scale=np.r_[np.full(3,1.),np.full(12,.08)]/dt**2
-    boundary_scale=np.r_[np.full(3,10.),np.ones(12)]/dt
+    low=np.tile(np.r_[[-.5,-.7,.25],np.full(nr,-.6),mid-radius+1e-6],(n,1))
+    high=np.tile(np.r_[[1.5,.7,1.7],np.full(nr,.6),mid+radius-1e-6],(n,1))
+    posture_scale=np.r_[np.full(3,5.),np.full(nr,5.),np.full(len(qcols),.25)]
+    acceleration_scale=np.r_[np.full(3,1.),np.full(nr,.2),np.full(len(qcols),.08)]/dt**2
+    boundary_scale=np.r_[np.full(3,10.),np.ones(nv-3)]/dt
     total=n*width+(n-2)*nv+2*nv
     jp=np.zeros((3,m.nv));jr=np.zeros_like(jp);witness=np.zeros(6)
     a.out.mkdir(parents=True,exist_ok=False)
@@ -121,24 +124,33 @@ def main():
         x=flat.reshape(n,nv);r=np.zeros(total);jac=lil_matrix((total,n*nv))
         for i in range(n):
             row=i*width;cols=slice(i*nv,(i+1)*nv)
-            q=base[i].copy();q[:3]=x[i,:3];q[qcols]=x[i,3:]
+            q=base[i].copy();q[:3]=x[i,:3];q[qcols]=x[i,3+nr:]
+            mapping=np.zeros((m.nv,nv));mapping[:3,:3]=np.eye(3)
+            mapping[vcols[3:],np.arange(3+nr,nv)]=1
+            if nr:
+                delta=x[i,3:6];angle=np.linalg.norm(delta)
+                skew=np.array([[0,-delta[2],delta[1]],[delta[2],0,-delta[0]],[-delta[1],delta[0],0]])
+                c1=.5 if angle<1e-5 else (1-np.cos(angle))/angle**2
+                c2=1/6 if angle<1e-5 else (angle-np.sin(angle))/angle**3
+                mapping[3:6,3:6]=np.eye(3)-c1*skew+c2*skew@skew
+                q[3:7]=(Rotation.from_quat(base[i,[4,5,6,3]])*Rotation.from_rotvec(delta)).as_quat()[[3,0,1,2]]
             d.qpos[:]=q;mujoco.mj_kinematics(m,d);mujoco.mj_comPos(m,d)
             r[row:row+nv]=(x[i]-reference[i])*posture_scale
             jac[row:row+nv,cols]=np.diag(posture_scale);row+=nv
             for b,(target_p,target_r) in zip(bodies,targets[i]):
                 mujoco.mj_jacBody(m,d,jp,jr,b)
                 r[row:row+3]=(d.xpos[b]-target_p)*1000
-                jac[row:row+3,cols]=jp[:,vcols]*1000;row+=3
+                jac[row:row+3,cols]=jp@mapping*1000;row+=3
                 error=Rotation.from_matrix(target_r.T@d.xmat[b].reshape(3,3)).as_rotvec()
                 skew=np.array([[0,-error[2],error[1]],[error[2],0,-error[0]],[-error[1],error[0],0]])
                 angle=np.linalg.norm(error)
                 coeff=1/12 if angle<1e-4 else 1/angle**2-(1+np.cos(angle))/(2*angle*np.sin(angle))
                 inverse=np.eye(3)-.5*skew+coeff*skew@skew
                 r[row:row+3]=error*100
-                jac[row:row+3,cols]=inverse@target_r.T@jr[:,vcols]*100;row+=3
+                jac[row:row+3,cols]=inverse@target_r.T@jr@mapping*100;row+=3
             mujoco.mj_jacSubtreeCom(m,d,jp,root)
             r[row:row+2]=(d.subtree_com[root,:2]-com[i,:2])*com_weight
-            jac[row:row+2,cols]=jp[:2,vcols]*com_weight;row+=2
+            jac[row:row+2,cols]=jp[:2]@mapping*com_weight;row+=2
             for g in geoms:
                 is_foot=m.geom(g).name.startswith('foot_')
                 for obstacle,margin in [(box_id,a.foot_margin if is_foot else .006),(floor_id,max(.001,a.foot_margin) if is_foot else .006)]:
@@ -148,7 +160,7 @@ def main():
                         if abs(dist)>1e-9:
                             normal=(witness[3:]-witness[:3])/dist
                             mujoco.mj_jac(m,d,jp,jr,witness[:3],int(m.geom_bodyid[g]))
-                            jac[row,cols]=(normal@jp[:,vcols])*1500
+                            jac[row,cols]=(normal@jp@mapping)*1500
                     row+=1
             assert row==(i+1)*width
         row=n*width
@@ -176,13 +188,17 @@ def main():
         else:
             prior_hash=json.loads((a.resume.parent/'launch.json').read_text())['source_sha256']
             prior=saved['qpos'][indices]
-            start=np.c_[prior[:,:3],prior[:,qcols]].ravel()
+            delta=(Rotation.from_quat(base[:,[4,5,6,3]]).inv()*Rotation.from_quat(prior[:,[4,5,6,3]])).as_rotvec() if nr else np.empty((n,0))
+            start=np.c_[prior[:,:3],delta,prior[:,qcols]].ravel()
         if prior_hash!=hashlib.sha256(a.source.read_bytes()).hexdigest():raise ValueError('Resume source differs')
         if start.shape!=initial.ravel().shape:raise ValueError('Resume dimension differs')
+        projected=np.clip(start,low.ravel()+1e-8,high.ravel()-1e-8)
+        (a.out/'resume-projection.json').write_text(json.dumps({'maximum_initial_guess_projection':float(abs(projected-start).max()),'note':'Initial guess only; final trajectory is optimized under bounds and independently audited'},indent=2)+'\n')
+        start=projected
     if a.check_jacobian:
         r,jac=evaluate(start);checks=[]
         for i in [0,min(n-1,42),n-1]:
-            for column in (0,2,3,7,14):
+            for column in ((0,2,3,4,5,7,14,20) if nr else (0,2,3,7,14)):
                 c=i*nv+column;plus=start.copy();minus=start.copy();plus[c]+=1e-6;minus[c]-=1e-6
                 numeric=(evaluate(plus)[0]-evaluate(minus)[0])/2e-6
                 analytic=jac[:,c].toarray().ravel()
@@ -192,14 +208,16 @@ def main():
         if not report['passed']:raise SystemExit('Jacobian check failed')
         return
     result=least_squares(lambda x:evaluate(x)[0],start,jac=lambda x:evaluate(x)[1],bounds=(low.ravel(),high.ravel()),max_nfev=a.max_nfev,ftol=1e-6,xtol=1e-6,gtol=1e-6,verbose=1,tr_solver='lsmr')
-    solved=result.x.reshape(n,nv);knots=base.copy();knots[:,:3]=solved[:,:3];knots[:,qcols]=solved[:,3:]
+    solved=result.x.reshape(n,nv);knots=base.copy();knots[:,:3]=solved[:,:3];knots[:,qcols]=solved[:,3+nr:]
+    if nr:knots[:,3:7]=(Rotation.from_quat(base[:,[4,5,6,3]])*Rotation.from_rotvec(solved[:,3:6])).as_quat()[:,[3,0,1,2]]
     np.savez_compressed(a.out/'solver-knots.npz',x=result.x,indices=indices,source_sha256=hashlib.sha256(a.source.read_bytes()).hexdigest())
     dense_times=np.arange(end+1)/fps
     bc=([(1,np.zeros(m.nq-4)),(2,np.zeros(m.nq-4))],[(1,np.zeros(m.nq-4)),(2,np.zeros(m.nq-4))])
     scalars=np.c_[knots[:,:3],knots[:,7:]]
     scalar_curve=make_interp_spline(times,scalars,k=5,bc_type=bc)(dense_times)
     rb=([(1,np.zeros(3)),(2,np.zeros(3))],[(1,np.zeros(3)),(2,np.zeros(3))])
-    angles=make_interp_spline(times,rotvec[indices],k=5,bc_type=rb)(dense_times)
+    knot_angles=(reference_rotation.inv()*Rotation.from_quat(knots[:,[4,5,6,3]])).as_rotvec()
+    angles=make_interp_spline(times,knot_angles,k=5,bc_type=rb)(dense_times)
     quat=(reference_rotation*Rotation.from_rotvec(angles)).as_quat()[:,[3,0,1,2]]
     q=np.c_[scalar_curve[:,:3],quat,scalar_curve[:,3:]]
     q=np.r_[q,np.repeat(q[-1:],round(3*fps),axis=0)]
