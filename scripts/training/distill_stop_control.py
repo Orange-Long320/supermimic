@@ -7,7 +7,8 @@ Teachers are used only during collection/distillation; no runtime action overrid
 from pathlib import Path
 
 
-def main(checkpoint: Path, stop_teacher: Path, manifest: Path, out: Path, updates: int = 2000):
+def main(checkpoint: Path, stop_teacher: Path, manifest: Path, out: Path, updates: int = 2000,
+         stop_forward_query: float = 0., stop_yaw_query: float = 0.):
     import copy
     import json
     import time
@@ -48,6 +49,12 @@ def main(checkpoint: Path, stop_teacher: Path, manifest: Path, out: Path, update
     goals = torch.tensor([[.3, 0., 0.], [.5, 0., 0.], [.3, 0., .4], [.3, 0., -.4]], device=trainer.device).repeat(8, 1)
     applied = torch.zeros_like(goals)
     ramp = torch.tensor([1., 1., 1.5], device=trainer.device) * trainer.env.step_dt
+
+    def stopping_target(observation, goal):
+        query = torch.zeros_like(goal)
+        query[:, 0], query[:, 2] = stop_forward_query, stop_yaw_query
+        return stop(observation, query)
+
     try:
         obs, _ = trainer.env.reset()
         with torch.no_grad():
@@ -60,7 +67,7 @@ def main(checkpoint: Path, stop_teacher: Path, manifest: Path, out: Path, update
                 cmd._refresh_velocity()
                 x = obs["policy"]
                 zero = applied.square().sum(-1) < 1e-6
-                latent = torch.where(zero[:, None], stop(x, torch.zeros_like(applied)), move(x, applied))
+                latent = torch.where(zero[:, None], stopping_target(x, applied), move(x, applied))
                 action = decoder(latent, x)
                 records.append(x.clone()); commands.append(applied.clone())
                 obs, _, terminated, timeout, _ = trainer.env.step(action)
@@ -80,19 +87,20 @@ def main(checkpoint: Path, stop_teacher: Path, manifest: Path, out: Path, update
         torch.save({"observations": x, "commands": c, "trace": trace}, out / "teacher_rollouts.pt")
         opt = torch.optim.Adam(student.parameters(), lr=2e-4, betas=cfg.policy_trainer.betas)
         history, started = [], time.monotonic()
+        best_score, best_state, best_optimizer, best_step = float("inf"), None, None, None
         torch.manual_seed(20261028)
         val_obs = val_x[torch.randint(len(val_x), (2048,), device=trainer.device)]
         val_cmd = nonzero[torch.randint(len(nonzero), (2048,), device=trainer.device)].clone()
         val_cmd[:1024] = 0
         with torch.no_grad():
             val_target = torch.where((val_cmd.square().sum(-1) < 1e-6)[:, None],
-                                     stop(val_obs, torch.zeros_like(val_cmd)), move(val_obs, val_cmd))
+                                     stopping_target(val_obs, val_cmd), move(val_obs, val_cmd))
         for step in range(updates):
             sample = train_x[torch.randint(len(train_x), (1024,), device=trainer.device)]
             goal = nonzero[torch.randint(len(nonzero), (1024,), device=trainer.device)].clone()
             goal[:512] = 0
             with torch.no_grad():
-                target = torch.cat((stop(sample[:512], goal[:512]), move(sample[512:], goal[512:])))
+                target = torch.cat((stopping_target(sample[:512], goal[:512]), move(sample[512:], goal[512:])))
             prediction = student(sample, goal)
             loss = (prediction - target).square().mean()
             opt.zero_grad(set_to_none=True)
@@ -110,6 +118,12 @@ def main(checkpoint: Path, stop_teacher: Path, manifest: Path, out: Path, update
                            "move_action_rmse": float(action_error[1024:].mean())}
                 history.append(metrics)
                 print(metrics, flush=True)
+                score = float(action_error.square().mean())
+                if score < best_score:
+                    best_score, best_step = score, step + 1
+                    best_state, best_optimizer = copy.deepcopy(student.state_dict()), copy.deepcopy(opt.state_dict())
+        student.load_state_dict(best_state)
+        opt.load_state_dict(best_optimizer)
         saved = dict(original)
         saved["policy"] = trainer.policy.state_dict()
         saved["velocity_training"] = dict(original["velocity_training"])
@@ -117,6 +131,8 @@ def main(checkpoint: Path, stop_teacher: Path, manifest: Path, out: Path, update
         saved["config"] = asdict(cfg)
         saved["stop_distillation"] = {"teacher": str(stop_teacher), "moving_teacher": str(checkpoint),
                                       "updates": updates, "physical_collection_steps": 850,
+                                      "stop_teacher_query": [stop_forward_query, 0., stop_yaw_query],
+                                      "selected_step": best_step, "selection": "held-out action MSE",
                                       "full_joint_updates_unchanged": True, "teachers_required_at_inference": False}
         torch.save(saved, out / "ckpt_final.pt")
         summary = {"updates": updates, "elapsed_s": time.monotonic() - started, "teacher_failures": 0,

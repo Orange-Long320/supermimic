@@ -3,7 +3,9 @@
 from pathlib import Path
 
 
-def main(checkpoint: Path, stop_teacher: Path, out: Path, device: str = "cuda:0"):
+def main(checkpoint: Path, stop_teacher: Path, out: Path, device: str = "cuda:0",
+         forward_queries: tuple[float, ...] = (-.1, -.05, 0.),
+         yaw_queries: tuple[float, ...] = (0., .1, .2, .3, .4)):
     import json
 
     import torch
@@ -23,7 +25,7 @@ def main(checkpoint: Path, stop_teacher: Path, out: Path, device: str = "cuda:0"
         raise FileExistsError(out)
     policy, cfg = load_policy_from_checkpoint(checkpoint, device)
     stop, _ = load_policy_from_checkpoint(stop_teacher, device)
-    queries = torch.tensor([[v, 0., w] for v in (-.1, -.05, 0.) for w in (0., .1, .2, .3, .4)], device=device)
+    queries = torch.tensor([[v, 0., w] for v in forward_queries for w in yaw_queries], device=device)
     goals = torch.tensor([[.3, 0., 0.], [.5, 0., 0.], [.3, 0., .4], [.3, 0., -.4], [0., 0., 0.]], device=device)
     n, k = len(queries) * len(goals), len(queries)
     files = discover_npz(lafan_npz_dir(), names=["walk1_subject1"])
