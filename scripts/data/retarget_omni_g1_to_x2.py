@@ -34,6 +34,7 @@ def main():
     p.add_argument('--penetration-target-m',type=float,default=.0008,help='IK target tighter than the independent 1mm collision gate')
     p.add_argument('--source-flat-foot-lock',action='store_true',help='Pin sole marker heights only during source-confirmed flat support')
     p.add_argument('--source-foot-surface-lock',action='store_true',help='Preserve source-confirmed horizontal foot contact, including toe pivots; actual X2 mesh gap is constrained')
+    p.add_argument('--phase-aware-foot-sticking',action='store_true',help='Freeze all sole-corner XY points only after the source foot has established flat contact; retain source toe-surface constraints while rolling')
     p.add_argument('--collision-backtracking',action='store_true',help='Check actual collision distance before accepting each SQP step')
     p.add_argument('--restoration-helper',type=Path,help='Explicit nonlinear support-restoration module; enables one restoration attempt per failed support-transition frame')
     p.add_argument('--out',type=Path,required=True)
@@ -48,6 +49,7 @@ def main():
     from holosoma_retargeting.config_types.retargeter import FootLockConfig
     restore_pose=None
     if a.source_foot_surface_lock and not a.collision_backtracking:p.error('Surface contact locks require actual-distance backtracking')
+    if a.phase_aware_foot_sticking and not(a.source_flat_foot_lock and a.source_foot_surface_lock):p.error('Phase-aware sticking requires both flat and mesh-surface source contact locks')
     if a.restoration_helper:
         if not a.source_flat_foot_lock or not a.collision_backtracking:p.error('Restoration requires both contact locks and native constraint backtracking')
         import importlib.util
@@ -154,6 +156,14 @@ def main():
         def iterate(self,**kwargs):
             if not a.collision_backtracking:return super().iterate(**kwargs)
             self.surface_frame=kwargs['frame_idx']
+            if a.phase_aware_foot_sticking:
+                effective=kwargs['foot_sticking'].copy()
+                for key in effective:
+                    side='left' if key.lower().startswith('l') else 'right'
+                    flat_now=any(self._is_foot_locked_in_window(name,self.surface_frame) is not None for name in self.foot_links if side in name)
+                    flat_before=any(self._is_foot_locked_in_window(name,self.surface_frame-1) is not None for name in self.foot_links if side in name)
+                    if not(flat_now and flat_before):effective[key]=False
+                kwargs['foot_sticking']=effective
             q=kwargs.pop('q_n').copy();budget=kwargs.pop('n_iter')*3;last_cost=np.inf;backtracks=0;self._plane_cuts=[];restoration_attempts=0
             last_actual=self._actual_tracking_cost(q,kwargs);stopping_reason='iteration_budget'
             allowed=5e-5
@@ -239,7 +249,7 @@ def main():
             if not hasattr(self,'backtracking_records'):self.backtracking_records=[]
             if not hasattr(self,'_accepted_poses'):self._accepted_poses=[]
             self._accepted_poses.append(q[:38].copy())
-            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'restoration_attempts':restoration_attempts,'maximum_penetration_m':final,'maximum_locked_sole_height_error_m':final_foot_error,'maximum_source_foot_contact_gap_m':self.last_source_contact_gap,'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
+            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'restoration_attempts':restoration_attempts,'maximum_penetration_m':final,'maximum_locked_sole_height_error_m':final_foot_error,'maximum_source_foot_contact_gap_m':self.last_source_contact_gap,'effective_foot_sticking':{key:bool(value) for key,value in kwargs['foot_sticking'].items()},'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
             if kwargs['frame_idx']%30==0:
                 (a.out/'collision-backtracking-progress.json').write_text(json.dumps(self.backtracking_records,indent=2)+'\n')
                 np.savez_compressed(a.out/f'accepted-prefix-{kwargs["frame_idx"]:05d}.npz',qpos=np.asarray(self._accepted_poses),fps=30.,source_start_frame=a.start_frame,source_motion=a.motion)
@@ -466,6 +476,7 @@ def main():
         'source_foot_landmarks':'Heel/toe sole surface points from paired G1 spheres; upstream ankle marker is not a heel',
         'collision_backtracking':a.collision_backtracking,
         'source_foot_surface_lock':a.source_foot_surface_lock,
+        'phase_aware_foot_sticking':a.phase_aware_foot_sticking,
         'wrist_reference_limit_deg':a.wrist_reference_limit_deg,'paired_hand_collision_centroids':bool(source_hand_centers),
         'restoration_helper_sha256':hashlib.sha256(a.restoration_helper.read_bytes()).hexdigest() if a.restoration_helper else None,
         'source_model_sha256':meta['source_sha256'],'policy_evaluation':False,'training_approved':False,

@@ -112,6 +112,7 @@
     "source_flat_foot_lock": true,
     "source_foot_surface_lock": true,
     "collision_backtracking": true,
-    "nonlinear_restoration": true
+    "nonlinear_restoration": true,
+    "phase_aware_foot_sticking": true
   }
 }

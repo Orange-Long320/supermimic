@@ -56,7 +56,7 @@ def main():
         if settings:
             command+=['--joint-limit-factor',str(settings.get('joint_limit_factor',1.)),
                 '--wrist-reference-limit-deg',str(candidate.get('wrist_reference_limit_deg',settings.get('default_wrist_reference_limit_deg',15.)))]
-            for flag in ['source_flat_foot_lock','source_foot_surface_lock','collision_backtracking']:
+            for flag in ['source_flat_foot_lock','source_foot_surface_lock','phase_aware_foot_sticking','collision_backtracking']:
                 if settings.get(flag):command+=['--'+flag.replace('_','-')]
         if a.restoration_helper:command+=['--restoration-helper',str(a.out/'restoration-helper.py')]
         (folder/'command.json').write_text(json.dumps(command, indent=2)+'\n')
