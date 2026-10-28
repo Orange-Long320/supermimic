@@ -78,6 +78,7 @@ def main():
     p.add_argument("--search-groups",help="Comma-separated first joint names of residual groups to optimize; retain all other warm-start coefficients")
     p.add_argument("--floor-penalty-linear",type=float,default=0.,help="Penalize nonfoot clearance below 5 mm and foot compression beyond 5 mm")
     p.add_argument("--high-frequency-geometry",action="store_true",help="Audit post-integration foot/body geometry at every 5 ms physics step")
+    p.add_argument("--preserve-feasible-core",action="store_true",help="Prefer body-clear, within-speed/effort candidates and keep elites in that set when available")
     p.add_argument("--air-rotation-weight",type=float,default=0.,help="Weight the rotation deficit in the first continuous airborne segment")
     p.add_argument("--air-rotation-target",type=float,default=3.8)
     p.add_argument("--landing-window-seconds",type=float,default=.2)
@@ -85,7 +86,7 @@ def main():
     p.add_argument("--landing-ckpt",type=Path,help="Diagnostic phase-specific frozen landing controller")
     p.add_argument("--landing-switch-times",type=float,nargs='+',default=[1.2])
     p.add_argument("--landing-policy-blend",type=float,default=.12)
-    p.add_argument("--landing-guide-delay",type=float,help="Override absolute switch times: take over this many seconds after the retimed guide landing")
+    p.add_argument("--landing-guide-delay",type=float,help="Override absolute switch times with an offset from retimed guide landing (at least -0.3 seconds)")
     p.add_argument("--consistent-retiming",action="store_true",help="Resample future poses and velocities with one continuous physical-time clock")
     p.add_argument("--physics-command-projection",action="store_true",help="Experimental 5 ms acceleration-based motor-command projection")
     p.add_argument("--projection-frequency",type=float,default=35.)
@@ -93,9 +94,10 @@ def main():
     args=p.parse_args()
     if args.air_rotation_weight<0 or args.air_rotation_target<=0 or not 0<args.landing_window_seconds<=args.seconds:
         p.error('Invalid airborne-rotation objective or landing window')
-    if any(x is not None and x<=0 for x in [args.residual_sigma,args.clock_sigma]):p.error('Search deviations must be positive')
+    if any(x is not None and (not np.isfinite(x) or x<=0) for x in [args.residual_sigma,args.clock_sigma]):p.error('Search deviations must be finite and positive')
     if args.joint_phases and (not args.tail_of or args.phase!='full' or args.baseline_air_scales):p.error('Joint phases require full phase, a preparation seed, and no air-scale-only grid')
-    if args.landing_guide_delay is not None and (not args.landing_ckpt or args.landing_guide_delay<0 or len(args.landing_switch_times)!=1):p.error('Guide-relative landing needs one landing policy and a nonnegative delay')
+    if args.preserve_feasible_core and (args.phase!='full' or not args.high_frequency_geometry):p.error('Core-preserving search requires a full rollout with physics-rate geometry')
+    if args.landing_guide_delay is not None and (not args.landing_ckpt or not np.isfinite(args.landing_guide_delay) or args.landing_guide_delay<-.3 or len(args.landing_switch_times)!=1):p.error('Guide-relative landing needs one landing policy and a finite offset of at least -0.3 seconds')
     assert args.population%args.num_envs==0
     if args.checkpoint_grid and (args.iterations or any(c.name=='ckpt_latest.pt' for c in args.checkpoint_grid)):
         p.error('Checkpoint comparison needs immutable files and zero search iterations')
@@ -266,7 +268,7 @@ def main():
     best=None
     physics_limits=np.zeros((args.num_envs,4))
     physics_geometry=np.zeros((args.num_envs,3));physics_geometry[:,2]=1e3
-    from supermimic.data.design_limits import joint_limit_statistics
+    from supermimic.data.design_limits import joint_limit_statistics,core_valid,candidate_priority
     limit_constants=[torch.as_tensor(x,dtype=torch.float64,device=device) for x in
                      [lower,upper,hard_lower,hard_upper,velocity_limit,effort]]
     device_limits=torch.zeros((args.num_envs,4),dtype=torch.float64,device=device)
@@ -313,6 +315,7 @@ def main():
         "checkpoint_sha256":hashlib.sha256(args.ckpt.read_bytes()).hexdigest(),
         "landing_checkpoint_sha256":hashlib.sha256(args.landing_ckpt.read_bytes()).hexdigest() if args.landing_ckpt else None,
         "source_sha256":hashlib.sha256(args.source.read_bytes()).hexdigest(),
+        "warmstart_sha256":hashlib.sha256(args.warmstart.read_bytes()).hexdigest() if args.warmstart else None,
         "physics":f"Unmodified project make_env on {device}; only local design-process reset requests suppressed",
         "joint_acceptance":"Actual mechanical joint ranges at each physics step; soft limits retained as a separate regularizer",
         "metric_state_alignment":"Post-integration derived fields refreshed before each control-frame geometry measurement",
@@ -630,9 +633,8 @@ def main():
                 for e,report in enumerate(reports):
                     parameters=population[a+e].copy()
                     outcomes.append((report["cost"],parameters,report))
-                    complete=report["physical_candidate_passed"] or (args.phase=="takeoff" and report["takeoff_candidate_passed"])
-                    best_complete=best is not None and (best[2]["physical_candidate_passed"] or (args.phase=="takeoff" and best[2]["takeoff_candidate_passed"]))
-                    if best is None or (complete and not best_complete) or (complete==best_complete and report["cost"]<best[0]):
+                    preferred=best is None or candidate_priority(report,args.phase=='takeoff',args.preserve_feasible_core)<candidate_priority(best[2],args.phase=='takeoff',args.preserve_feasible_core)
+                    if preferred:
                         best=(report["cost"],parameters,report)
                         canonical_q=payload[0][:len(payload[3][e]),e].copy()
                         canonical_q[:,:3]-=origins[e]
@@ -643,12 +645,16 @@ def main():
                         (args.out/"best-frames.json").write_text(json.dumps(payload[3][e]))
                 if time.monotonic()-start>args.max_seconds:break
             outcomes.sort(key=lambda x:x[0])
-            elite=np.array([r[1] for r in outcomes[:max(2,len(outcomes)//(16 if args.local_refinement else 4))]])
+            core_pool=[r for r in outcomes if core_valid(r[2])] if args.preserve_feasible_core else []
+            elite_pool=core_pool or outcomes
+            elite=np.array([r[1] for r in elite_pool[:max(2,len(outcomes)//(16 if args.local_refinement else 4))]])
             mean=(.25*mean+.5*elite.mean(axis=0)+.25*best[1]) if args.local_refinement else .3*mean+.7*elite.mean(axis=0)
-            covariance=.7*covariance+.3*np.cov(elite,rowvar=False)+np.diag(covariance_floor**2)
+            empirical_covariance=np.cov(elite,rowvar=False) if len(elite)>1 else np.zeros_like(covariance)
+            covariance=.7*covariance+.3*empirical_covariance+np.diag(covariance_floor**2)
             record={"iteration":iteration,"evaluations":evaluations,"elapsed_s":time.monotonic()-start,**best[2]}
             record["iteration_elapsed_s"]=time.monotonic()-iteration_start
             record["device"]=str(device)
+            if args.preserve_feasible_core:record.update(core_valid_candidates=len(core_pool),elite_pool_size=len(elite_pool),best_core_valid=bool(core_valid(best[2])))
             if device.type=="cuda":
                 record["torch_peak_allocated_mib"]=torch.cuda.max_memory_allocated(device)/2**20
                 record["torch_peak_reserved_mib"]=torch.cuda.max_memory_reserved(device)/2**20

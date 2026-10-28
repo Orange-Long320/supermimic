@@ -25,3 +25,15 @@ def test_limits_match_independent_scalar_reference(device):
     actual=joint_limit_statistics(tensor(q),tensor(v),tensor(force),*[tensor(x) for x in [softlo,softhi,lo,hi,speed,effort]])
     assert actual.dtype==torch.float64
     np.testing.assert_allclose(actual.cpu().numpy(),expected,rtol=1e-12,atol=1e-12)
+
+
+def test_body_contact_cannot_buy_a_lower_core_preserving_score():
+    from copy import deepcopy
+    from supermimic.data.design_limits import candidate_priority
+    safe={'cost':100.,'physical_candidate_passed':False,'takeoff_candidate_passed':False,
+          'maxima':{'minimum_nonfoot_height':.02,'speed':.9,'effort':1.}}
+    contact=deepcopy(safe);contact['cost']=1.;contact['maxima']['minimum_nonfoot_height']=-.01
+    assert candidate_priority(safe,preserve_core=True)<candidate_priority(contact,preserve_core=True)
+    assert candidate_priority(contact)<candidate_priority(safe)
+    complete=deepcopy(safe);complete['cost']=200.;complete['physical_candidate_passed']=True
+    assert candidate_priority(complete,preserve_core=True)<candidate_priority(safe,preserve_core=True)
