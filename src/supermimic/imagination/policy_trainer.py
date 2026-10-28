@@ -57,9 +57,9 @@ class PolicyTrainer:
         feat = self.wm.spec.canonical(ro.states.reshape(H1 * n, -1)).reshape(H1, n, -1)
         return feat, ro.goals, ro.e_root
 
-    def update(self, buffer: ReplayBuffer, xi_norm_fn=None) -> dict[str, float]:
+    def update(self, buffer: ReplayBuffer, xi_norm_fn=None, env_mask=None) -> dict[str, float]:
         cfg = self.cfg
-        start = buffer.sample_starts(cfg.batch_size, cfg.history)
+        start = buffer.sample_starts(cfg.batch_size, cfg.history, env_mask=env_mask)
         xi_norm = self.wm.spec.normalize_xi(start.xi)
 
         # ---- actor: BPTT through the frozen world model ------------------------------------

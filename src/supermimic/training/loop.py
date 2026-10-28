@@ -30,6 +30,10 @@ from supermimic.world_model.world_model import WorldModel
 class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
+        if cfg.velocity.enabled:
+            cfg.velocity.validate()
+            if cfg.env.num_envs < 2 or cfg.policy_trainer.batch_size < 2:
+                raise ValueError("Joint velocity training needs at least two environments and batch entries")
         cfg.policy.goal_dim = cfg.env.future_frames * GOAL_FEAT_DIM + (9 if cfg.env.anchor_obs else 0)
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
         self.rank, local_rank, self.world = init_distributed()
@@ -43,6 +47,9 @@ class Trainer:
         torch.manual_seed(cfg.seed + 1000 * self.rank)
         self.device = cfg.device
         self.log_dir = Path(cfg.log_root) / cfg.run_name
+        if cfg.velocity.enabled and (self.log_dir / "config.json").exists():
+            if cfg.resume is None or cfg.resume.resolve().parent != self.log_dir.resolve():
+                raise FileExistsError(f"Choose a new velocity run directory: {self.log_dir}")
         self.log_dir.mkdir(parents=True, exist_ok=True)
         if self.is_main:
             (self.log_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2, default=str))
@@ -72,6 +79,7 @@ class Trainer:
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,
                 seed=cfg.seed + 1000 * self.rank,
+                velocity=cfg.velocity,
             ),
             device=self.device,
         )
@@ -85,12 +93,22 @@ class Trainer:
         fk = G1Kinematics(load_g1_model(), device=self.device)
         heads = AnalyticHeads(fk, TRACKED_BODIES, ANCHOR_BODY, ROOT_BODY, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         self.wm = WorldModel(cfg.world_model, heads, self.device)
-        self.policy = Policy(cfg.policy).to(self.device)
+        if cfg.velocity.enabled:
+            from supermimic.locomotion.policy import VelocityPolicy
+
+            self.policy = VelocityPolicy(cfg.policy, cfg.velocity).to(self.device)
+        else:
+            self.policy = Policy(cfg.policy).to(self.device)
         self.critic = Critic(cfg.critic, pcfg=cfg.policy).to(self.device)
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)
-        self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
+        if cfg.velocity.enabled:
+            from supermimic.locomotion.trainer import JointPolicyTrainer
+
+            self.policy_trainer = JointPolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer, cfg.velocity, cfg.critic, self.command.cfg.nominal_height, self.command.reference_velocity)
+        else:
+            self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
         n_params = lambda m: sum(p.numel() for p in m.parameters())  # noqa: E731
         if self.is_main:
             print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
@@ -102,10 +120,12 @@ class Trainer:
         self.iteration = 0
         self.num_updates = 0
         self._utd_acc = 0.0
-        if cfg.resume is not None and cfg.warmstart_world_model is not None:
-            raise ValueError("Choose full resume or world-model-only warmstart")
+        if sum(p is not None for p in (cfg.resume, cfg.warmstart_world_model, cfg.initialize_from)) > 1:
+            raise ValueError("Choose resume, initialization or world-model-only warmstart")
         if cfg.resume is not None:
             self.load(cfg.resume)
+        elif cfg.initialize_from is not None:
+            self.initialize(cfg.initialize_from)
         elif cfg.warmstart_world_model is not None:
             checkpoint = torch.load(cfg.warmstart_world_model, map_location=self.device, weights_only=False)
             if checkpoint["config"].get("robot", "g1") != cfg.robot:
@@ -134,6 +154,7 @@ class Trainer:
                 "bin_return": self.command.bin_return,
                 "bin_memory": self.command.bin_memory,
                 "config": asdict(self.cfg),
+                **({"velocity_training": self.policy_trainer.checkpoint_state()} if self.cfg.velocity.enabled else {}),
             },
             temporary,
         )
@@ -141,12 +162,18 @@ class Trainer:
 
     def load(self, path: Path) -> None:
         ck = torch.load(path, map_location=self.device, weights_only=False)
+        if ck["config"].get("robot", "g1") != self.cfg.robot:
+            raise ValueError("Checkpoint robot does not match")
+        if ck["config"].get("velocity", {}).get("enabled", False) != self.cfg.velocity.enabled:
+            raise ValueError("Interface mismatch; use initialize_from for a tracking checkpoint")
         self.wm.load_state_dict(ck["wm"])
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])
         self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
         self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
         self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
+        if self.cfg.velocity.enabled:
+            self.policy_trainer.load_checkpoint_state(ck["velocity_training"])
         source_data = ck["config"]["data"]
         same_library = str(source_data.get("npz_dir")) == str(self.cfg.data.npz_dir) and str(source_data.get("library")) == str(self.cfg.data.library)
         if same_library and self.command.bin_return.shape == ck["bin_return"].shape:
@@ -158,11 +185,35 @@ class Trainer:
         self.num_updates = ck["num_updates"]
         print(f"[INFO] resumed from {path} at iteration {self.iteration}")
 
+    def initialize(self, path: Path) -> None:
+        """Import compatible tracking weights, leaving optimizers/replay/iteration fresh."""
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        source = checkpoint["config"]
+        if source.get("robot", "g1") != self.cfg.robot:
+            raise ValueError("Initialization robot does not match")
+        if source.get("velocity", {}).get("enabled", False):
+            raise ValueError("initialize_from expects a tracking checkpoint; use resume for velocity")
+        for key in ("history", "latent_dim", "goal_dim"):
+            if source["policy"][key] != getattr(self.cfg.policy, key):
+                raise ValueError(f"Initialization policy mismatch: {key}")
+        if source["world_model"] != asdict(self.cfg.world_model):
+            raise ValueError("Initialization world-model configuration does not match")
+        self.wm.load_state_dict(checkpoint["wm"])
+        missing, unexpected = self.policy.load_state_dict(checkpoint["policy"], strict=False)
+        if unexpected or any(not key.startswith("encoders.velocity.") for key in missing):
+            raise ValueError(f"Unexpected initialization keys: missing={missing}, extra={unexpected}")
+        self.critic.load_state_dict(checkpoint["critic"])
+        print(f"[INFO] initialized tracking weights from {path}; fresh velocity encoder, optimizers and replay")
+
     # ------------------------------------------------------------------ main loop
 
     @torch.no_grad()
     def act(self, obs) -> torch.Tensor:
-        return self.policy(obs["policy"], obs["goal"])
+        tracking = self.policy(obs["policy"], obs["goal"])
+        if self.cfg.velocity.enabled:
+            velocity = self.policy.velocity_action(obs["policy"], self.command.velocity_command)
+            return torch.where(self.command.is_velocity[:, None], velocity, tracking)
+        return tracking
 
     def run(self) -> None:
         cfg = self.cfg
@@ -185,13 +236,22 @@ class Trainer:
             obs, rew, term, tout, extras = env.step(action)
             self.ep_reward_sum += rew
             self.ep_len += 1
+            if cfg.velocity.enabled:
+                mask = self.command.is_velocity
+                from supermimic.locomotion.task import measured_velocity
+
+                error = measured_velocity(self.recorder.state_io.read()) - self.command.velocity_command
+                if self.writer is not None and self.iteration % sch.log_interval == 0:
+                    self.writer.add_scalar("velocity/sim_linear_error", float(error[mask, :2].norm(dim=-1).mean()), self.iteration)
+                    self.writer.add_scalar("velocity/sim_yaw_error", float(error[mask, 2].abs().mean()), self.iteration)
             done = term | tout
             if done.any():
                 ids = done.nonzero().squeeze(-1)
                 lens = self.ep_len[ids]
                 norm_ret = self.ep_reward_sum[ids] / (self.max_step_reward * lens.clamp_min(1))
-                finished_returns.extend(norm_ret.tolist())
-                finished_lens.extend(lens.tolist())
+                tracking_done = ~self.command.is_velocity[ids] if cfg.velocity.enabled else torch.ones_like(ids, dtype=torch.bool)
+                finished_returns.extend(norm_ret[tracking_done].tolist())
+                finished_lens.extend(lens[tracking_done].tolist())
                 self.ep_reward_sum[ids] = 0.0
                 self.ep_len[ids] = 0.0
             torch.cuda.synchronize()

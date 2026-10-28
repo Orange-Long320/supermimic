@@ -74,7 +74,7 @@ class WorldModel(nn.Module):
     def enable_compile(self, mode: str | None = "default") -> None:
         self._loss_step_fn = torch.compile(self._loss_step, mode=None if mode == "default" else mode, dynamic=False) if mode else self._loss_step
 
-    def window_loss(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor, done: torch.Tensor, refs: list[ReferenceFrame]):
+    def window_loss(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor, done: torch.Tensor, refs: list[ReferenceFrame], termination_mask=None):
         """k-step autoregressive loss.
 
         states: (k+1, n, 71) logged states; a_exec: (k, n, 29); xi: (n, 33);
@@ -93,13 +93,14 @@ class WorldModel(nn.Module):
         for j in range(k):
             s, sq, bce, logits = step_fn(s, a_exec[j], xi, states[j + 1], done[j], refs[j].root_pos_w, refs[j].root_quat_w)
             total_state = total_state + sq.sum(-1).mean()
-            total_term = total_term + bce.mean()
+            weights = torch.ones_like(bce) if termination_mask is None else termination_mask[j].to(bce.dtype)
+            total_term = total_term + (bce * weights).sum() / weights.sum().clamp_min(1)
             with torch.no_grad():
                 nse = sq.mean(-1).mean()
                 if j == 0:
                     err_first = nse
                 err_last = nse
-                acc_num += ((logits > 0).float() == done[j]).float().mean()
+                acc_num += (((logits > 0).float() == done[j]).float() * weights).sum() / weights.sum().clamp_min(1)
         loss = total_state / k + self.cfg.term_loss_weight * total_term / k
         # Metrics stay on-device (detached tensors): a float() here would stall the CPU on the
         # forward pass every minibatch, which in data-parallel runs turns into lockstep waiting.

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from supermimic.imagination.policy_trainer import PolicyTrainerCfg
+from supermimic.locomotion.config import VelocityCfg
 from supermimic.policy.nets import CriticCfg, PolicyCfg
 from supermimic.robots.paths import lafan_npz_dir, robot_name
 from supermimic.world_model.wm_trainer import WMTrainerCfg
@@ -67,9 +68,11 @@ class TrainConfig:
     policy: PolicyCfg = field(default_factory=PolicyCfg)
     critic: CriticCfg = field(default_factory=CriticCfg)
     policy_trainer: PolicyTrainerCfg = field(default_factory=PolicyTrainerCfg)
+    velocity: VelocityCfg = field(default_factory=VelocityCfg)
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
     resume: Path | None = None
     warmstart_world_model: Path | None = None
+    initialize_from: Path | None = None  # learned tracking weights, fresh optimizers/curriculum
 
 
 def training_config(preset: str = "default") -> TrainConfig:

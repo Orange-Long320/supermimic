@@ -1,0 +1,144 @@
+"""Contracts that can silently break a speed interface while tracking still works."""
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from supermimic.kinematics.rotations import quat_from_rotvec, quat_from_yaw
+from supermimic.locomotion.config import VelocityCfg
+from supermimic.locomotion.policy import VelocityPolicy
+from supermimic.locomotion.task import fall_signals, measured_velocity, velocity_reward
+from supermimic.policy.nets import PolicyCfg
+from supermimic.robots.dimensions import NJ, NQ, OBS_DIM, STATE_DIM, XI_DIM
+
+
+def standing(n=2):
+    state = torch.zeros(n, STATE_DIM)
+    state[:, 2] = 0.8
+    state[:, 3] = 1
+    return state
+
+
+def test_velocity_coordinates_and_world_yaw_rate():
+    state = standing()
+    state[0, 3:7] = quat_from_yaw(torch.tensor(torch.pi / 2))
+    state[0, NQ + 1] = 1
+    state[1, 3:7] = quat_from_rotvec(torch.tensor([0., torch.pi / 2, 0.]))
+    state[1, NQ + 3] = 1  # body x points along -world z
+    result = measured_velocity(state)
+    torch.testing.assert_close(result[0], torch.tensor([1., 0., 0.]), atol=1e-6, rtol=0)
+    torch.testing.assert_close(result[1, 2], torch.tensor(-1.), atol=1e-6, rtol=0)
+
+
+def test_task_scales_fall_height_and_penalizes_zero_command_drift():
+    state = standing()
+    state[1, NQ] = 0.5
+    limits = torch.tensor([-2., 2.]).repeat(NJ, 1)
+    action = torch.zeros(2, NJ)
+    reward = velocity_reward(state, torch.zeros(2, 3), action, action, limits, 0.8, torch.zeros(NJ))
+    assert reward[0] > reward[1]
+    state[1, 2] = 0.4
+    hard, soft = fall_signals(state, 0.8, VelocityCfg())
+    assert hard.tolist() == [False, True]
+    assert soft[1] > soft[0]
+
+
+def test_frozen_decoder_preserves_encoder_gradients():
+    cfg = PolicyCfg(encoder_hidden=(16,), decoder_hidden=(16,))
+    policy = VelocityPolicy(cfg, VelocityCfg(encoder_hidden=(16,)))
+    before = {key: value.clone() for key, value in policy.decoder.state_dict().items()}
+    policy.decoder.requires_grad_(False)
+    observation = torch.randn(3, 10 * OBS_DIM)
+    action = policy.velocity_action(observation, torch.tensor([[0.3, 0., 0.2]]).repeat(3, 1))
+    action.square().sum().backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in policy.encoders["velocity"].parameters())
+    assert all(p.grad is None for p in policy.decoder.parameters())
+    assert all(p.grad is None for p in policy.encoders["motion"].parameters())
+    for key, value in before.items():
+        torch.testing.assert_close(policy.decoder.state_dict()[key], value)
+
+
+def test_velocity_replay_keeps_commands_and_masks_tracking_termination():
+    from supermimic.data.replay_buffer import ReplayBuffer
+
+    replay = ReplayBuffer(2, 16, STATE_DIM, NJ, XI_DIM, "cpu")
+    replay.enable_velocity()
+    replay.velocity_env_mask = torch.tensor([False, True])
+    for i in range(12):
+        replay.add(
+            torch.arange(2), standing(), torch.zeros(2, NJ), torch.zeros(2, NJ), torch.zeros(2, XI_DIM),
+            torch.zeros(2), torch.zeros(2), torch.full((2,), i), torch.zeros(2, dtype=torch.long),
+            torch.zeros(2, dtype=torch.bool), torch.full((2,), i == 0),
+            command=torch.tensor([[0., 0., 0.], [0.5, 0., 0.2]]), command_reference=torch.tensor([False, True]),
+        )
+    starts = replay.sample_starts(20, 3, env_mask=replay.velocity_env_mask)
+    torch.testing.assert_close(starts.command, torch.tensor([[0.5, 0., 0.2]]).repeat(20, 1))
+    assert starts.command_reference.all()
+    windows = replay.sample_windows(100, 3)
+    assert (~windows.termination_mask).any() and windows.termination_mask.any()
+    assert (windows.termination_mask == windows.termination_mask[:1]).all()
+
+
+def test_velocity_imagined_update_and_checkpoint_roundtrip():
+    from supermimic.data.replay_buffer import StartBatch
+    from supermimic.imagination.policy_trainer import PolicyTrainerCfg
+    from supermimic.locomotion.trainer import JointPolicyTrainer
+    from supermimic.policy.nets import Critic, CriticCfg
+    from supermimic.world_model.world_model import WorldModel, WorldModelCfg
+
+    policy_cfg = PolicyCfg(encoder_hidden=(16,), decoder_hidden=(16,))
+    velocity_cfg = VelocityCfg(encoder_hidden=(16,))
+    policy = VelocityPolicy(policy_cfg, velocity_cfg)
+    heads = SimpleNamespace(soft_limits=torch.tensor([-2., 2.]).repeat(NJ, 1), anchor_index=0)
+    wm = WorldModel(WorldModelCfg(hidden=(16,), term_hidden=(8,)), heads, "cpu")
+    critic_cfg = CriticCfg(hidden=(16,))
+    critic = Critic(critic_cfg, pcfg=policy_cfg)
+    n = 2
+    state = standing(n)
+    xi = torch.zeros(n, XI_DIM)
+    xi[:, 0] = 0.75
+
+    class Library:
+        default_joint_pos = torch.zeros(NJ)
+
+        def last_frame_of(self, frames):
+            return torch.ones_like(frames) * 20
+
+        def ref(self, frames):
+            count = frames.numel()
+            return SimpleNamespace(root_quat_w=state[:1, 3:7].repeat(count, 1), root_lin_vel_w=torch.zeros(count, 3), root_ang_vel_w=torch.zeros(count, 3))
+
+        def goal_window(self, frames, future):
+            return torch.zeros(frames.numel(), policy_cfg.goal_dim)
+
+    start = StartBatch(state, xi, torch.zeros(n, dtype=torch.long), torch.zeros(n, NJ), state[None].repeat(10, 1, 1), torch.zeros(10, n, NJ), torch.zeros(n, 3), torch.ones(n, dtype=torch.bool))
+    buffer = SimpleNamespace(velocity_env_mask=torch.tensor([True, True]), sample_starts=lambda *args, **kwargs: start)
+    cfg = PolicyTrainerCfg(batch_size=4, horizon=3, critic_epochs=1, critic_minibatches=1, compile=None, obs_noise=False)
+    trainer = JointPolicyTrainer(wm, policy, critic, Library(), cfg, velocity_cfg, critic_cfg, 0.8, torch.zeros(21, 3))
+    decoder = {k: v.clone() for k, v in policy.decoder.state_dict().items()}
+    metrics = trainer._velocity_update(buffer)
+    assert all(torch.isfinite(torch.tensor(value)) for value in metrics.values())
+    assert metrics["grad_norm"] > 0
+    for key, value in decoder.items():
+        torch.testing.assert_close(policy.decoder.state_dict()[key], value)
+    trainer.load_checkpoint_state(trainer.checkpoint_state())
+    assert all(p.requires_grad for p in wm.parameters())
+
+
+@pytest.mark.parametrize("config", [VelocityCfg(forward=(1., 2.)), VelocityCfg(fraction=1.), VelocityCfg(resample_seconds=0)])
+def test_invalid_velocity_settings_fail_early(config):
+    with pytest.raises(ValueError):
+        config.validate()
+
+
+def test_keyboard_release_lease_and_ramp():
+    from supermimic.locomotion.keyboard import CommandMailbox
+
+    mailbox = CommandMailbox(timeout=0.5)
+    mailbox.put((0.5, 0., 0.6), now=0.)
+    assert mailbox.read(0.1, now=0.1) == pytest.approx((0.1, 0., 0.15))
+    assert mailbox.read(1., now=0.2) == pytest.approx((0.5, 0., 0.6))
+    assert mailbox.read(1., now=0.8) == (0., 0., 0.)
+    with pytest.raises(ValueError):
+        mailbox.put((float("nan"), 0., 0.))

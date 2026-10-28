@@ -34,7 +34,13 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
     ck = torch.load(path, map_location=device, weights_only=False)
     pc = ck["config"]["policy"]
     pcfg = PolicyCfg(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in pc.items()})
-    policy = Policy(pcfg).to(device)
+    if ck["config"].get("velocity", {}).get("enabled", False):
+        from supermimic.locomotion.config import VelocityCfg
+        from supermimic.locomotion.policy import VelocityPolicy
+
+        policy = VelocityPolicy(pcfg, VelocityCfg(**ck["config"]["velocity"])).to(device)
+    else:
+        policy = Policy(pcfg).to(device)
     policy.load_state_dict(ck["policy"])
     policy.eval()
     return policy, ck["config"]

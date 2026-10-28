@@ -41,6 +41,10 @@ class ReplayRecorder(RecorderTerm):
         self.action_name = p.get("action_name", "joint_pos")
         n = env.num_envs
         self.buffer = ReplayBuffer(n, int(p["capacity"]), STATE_DIM, NJ, XI_DIM, env.device)
+        if p.get("velocity", False):
+            self.buffer.enable_velocity()
+            self.prev_command = torch.zeros(n, 3, device=env.device)
+            self.prev_command_reference = torch.zeros(n, dtype=torch.bool, device=env.device)
         self.prev_s = torch.zeros(n, STATE_DIM, device=env.device)
         self.prev_xi = torch.zeros(n, XI_DIM, device=env.device)
         self.prev_frame = torch.zeros(n, dtype=torch.long, device=env.device)
@@ -63,6 +67,10 @@ class ReplayRecorder(RecorderTerm):
         self.prev_xi[ids] = self.ctx.read()[ids]
         self.prev_frame[ids] = cmd.frame[ids]
         self.prev_clip[ids] = cmd.library.frame_clip[cmd.frame[ids]]
+        if self.buffer.command is not None:
+            self.buffer.velocity_env_mask = cmd.is_velocity
+            self.prev_command[ids] = cmd.velocity_command[ids]
+            self.prev_command_reference[ids] = cmd.command_from_reference[ids]
 
     def record_post_reset(self, env_ids: torch.Tensor) -> None:
         if not self.enabled:
@@ -84,6 +92,7 @@ class ReplayRecorder(RecorderTerm):
             clip=self.prev_clip[ids],
             terminal=torch.zeros_like(done_next, dtype=torch.bool),
             ep_start=self.ep_start[ids],
+            **({"command": self.prev_command[ids], "command_reference": self.prev_command_reference[ids]} if self.buffer.command is not None else {}),
         )
         self.ep_start[ids] = False
 
@@ -109,6 +118,7 @@ class ReplayRecorder(RecorderTerm):
             clip=cmd.library.frame_clip[cmd.frame[env_ids]],
             terminal=torch.ones(env_ids.numel(), dtype=torch.bool, device=env.device),
             ep_start=torch.zeros(env_ids.numel(), dtype=torch.bool, device=env.device),
+            **({"command": self.prev_command[env_ids], "command_reference": self.prev_command_reference[env_ids]} if self.buffer.command is not None else {}),
         )
         self.buffer.end_episode(env_ids)
 

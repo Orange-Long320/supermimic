@@ -39,6 +39,7 @@ from supermimic.envs.mdp import observations as sm_obs
 from supermimic.envs.mdp import terminations as sm_term
 from supermimic.envs.mdp.commands import MultiClipMotionCommandCfg
 from supermimic.robots.assets import get_robot_cfg
+from supermimic.locomotion.config import VelocityCfg
 
 class QuietSimulationCfg(SimulationCfg):
     """SimulationCfg that disables MuJoCo Warp's per-step overflow printf (a kernel build-time constant,
@@ -103,6 +104,7 @@ class SuperMimicEnvCfgArgs:
     anchor_obs: bool = False  # add BeyondMimic anchor-relative pose (9) to the goal group (plan D5 alt.)
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/evaluation/play.py)
     extra_command_kwargs: dict = field(default_factory=dict)
+    velocity: VelocityCfg | None = None
 
 
 def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
@@ -254,6 +256,10 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         episode_length_s=a.episode_length_s,
         seed=a.seed,
     )
+    if a.velocity is not None and a.velocity.enabled:
+        from supermimic.locomotion.env import configure_velocity_env
+
+        cfg = configure_velocity_env(cfg, a.velocity, cfg.scene.entities["robot"].init_state.pos[2])
     return cfg
 
 

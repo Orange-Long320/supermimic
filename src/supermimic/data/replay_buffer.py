@@ -24,6 +24,7 @@ class WindowBatch:
     reward: torch.Tensor  # (k, n)
     done: torch.Tensor  # (k, n) termination label of states 1..k
     frame: torch.Tensor  # (k, n) target frame of each transition
+    termination_mask: torch.Tensor | None = None  # exclude velocity-task labels from tracking head
 
 
 @dataclass
@@ -34,6 +35,8 @@ class StartBatch:
     prev_action: torch.Tensor  # (n, A) clean action of the previous step (0 at episode start)
     hist_states: torch.Tensor  # (hist, n, S) states s_{t-hist+1..t} (backfilled at episode start)
     hist_actions: torch.Tensor  # (hist, n, A) clean actions a_{t-hist..t-1} aligned with hist_states' obs
+    command: torch.Tensor | None = None
+    command_reference: torch.Tensor | None = None
 
 
 class ReplayBuffer:
@@ -58,11 +61,18 @@ class ReplayBuffer:
         self.ep_counter = torch.zeros(E, dtype=torch.long, device=self.device)
         self.total_rows = 0
         self._env_ar = torch.arange(E, device=self.device)
+        self.command = None
+        self.command_reference = None
+        self.velocity_env_mask = None
+
+    def enable_velocity(self):
+        self.command = torch.zeros(self.E, self.T, 3, device=self.device)
+        self.command_reference = torch.zeros(self.E, self.T, dtype=torch.bool, device=self.device)
 
     # ------------------------------------------------------------------ writes
 
     @torch.no_grad()
-    def add(self, env_ids, s, a, a_exec, xi, r, done, frame, clip, terminal, ep_start) -> None:
+    def add(self, env_ids, s, a, a_exec, xi, r, done, frame, clip, terminal, ep_start, command=None, command_reference=None) -> None:
         p = self.ptr[env_ids]
         self.s[env_ids, p] = s
         self.a[env_ids, p] = a
@@ -75,6 +85,11 @@ class ReplayBuffer:
         self.ep_id[env_ids, p] = self.ep_counter[env_ids]
         self.terminal[env_ids, p] = terminal
         self.ep_start[env_ids, p] = ep_start
+        if self.command is not None:
+            if command is None or command_reference is None:
+                raise ValueError("Velocity replay rows require their originating command")
+            self.command[env_ids, p] = command
+            self.command_reference[env_ids, p] = command_reference
         self.valid[env_ids, p] = True
         self.ptr[env_ids] = (p + 1) % self.T
         self.total_rows += int(env_ids.numel())
@@ -134,11 +149,14 @@ class ReplayBuffer:
             reward=self.r[ee[:-1], tt[:-1]],
             done=self.done[ee[1:], tt[1:]],
             frame=self.frame[ee[:-1], tt[:-1]],
+            termination_mask=None if self.velocity_env_mask is None else (~self.velocity_env_mask[e])[None].expand(k, -1),
         )
 
     @torch.no_grad()
-    def sample_starts(self, n: int, hist: int) -> StartBatch:
+    def sample_starts(self, n: int, hist: int, env_mask=None) -> StartBatch:
         mask = self.valid & ~self.terminal
+        if env_mask is not None:
+            mask &= env_mask[:, None]
         t_idx = torch.arange(self.T, device=self.device)[None, :]
         dist_to_ptr = (self.ptr[:, None] - t_idx - 1) % self.T
         mask &= dist_to_ptr < self.T - hist - 1  # keep history rows from being overwritten underneath
@@ -164,4 +182,6 @@ class ReplayBuffer:
             prev_action=hist_actions[-1],
             hist_states=hist_states,
             hist_actions=hist_actions,
+            command=None if self.command is None else self.command[e, t],
+            command_reference=None if self.command_reference is None else self.command_reference[e, t],
         )

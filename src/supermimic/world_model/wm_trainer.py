@@ -47,7 +47,7 @@ class WorldModelTrainer:
         # Only the root pose of the references is needed for the termination features.
         r = self.lib.ref(w.frame.reshape(-1))
         refs = [ReferenceFrame(None, None, None, None, r.root_pos_w[j * n : (j + 1) * n], r.root_quat_w[j * n : (j + 1) * n]) for j in range(k)]
-        return self.wm.window_loss(w.states, w.a_exec, w.xi, w.done, refs)
+        return self.wm.window_loss(w.states, w.a_exec, w.xi, w.done, refs, termination_mask=w.termination_mask)
 
     def update(self, buffer: ReplayBuffer) -> dict[str, float]:
         agg: dict[str, torch.Tensor] = {}
