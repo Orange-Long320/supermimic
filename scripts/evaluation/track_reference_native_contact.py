@@ -22,6 +22,8 @@ def main():
     p.add_argument('--start-frame',type=int,default=83)
     p.add_argument('--seconds',type=float,default=5.)
     p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--recover-planned-contacts',action='store_true',
+                   help='Keep planned planted-foot tasks during contact loss and add soft normal feedback')
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
     (args.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (args.out/'launch.json').write_text(json.dumps({'pid':os.getpid(),'command':[sys.executable,*sys.argv],
@@ -38,6 +40,7 @@ def main():
     feet={s:m.body('robot/'+s+'_ankle_roll_link').id for s in ['left','right']}
     controller=NativeContactController(m,eq,effort,speed,feet['left'])
     controller.integration_aware=True;controller.foot_task_weight=.1
+    controller.stabilize_support_normal=args.recover_planned_contacts
     controller.root_acceleration_weight=10.
     kp=m.actuator_gainprm[:,0].copy();kd=-m.actuator_biasprm[:,2].copy()
     cols=m.jnt_qposadr[m.actuator_trnid[:,0]];vcols=m.jnt_dofadr[m.actuator_trnid[:,0]]
@@ -79,8 +82,17 @@ def main():
         foot_jp,foot_jr=np.zeros((3,m.nv)),np.zeros((3,m.nv))
         mujoco.mj_jacBody(m,desired,foot_jp,foot_jr,body)
         controller.foot_velocity_ref=np.r_[foot_jp,foot_jr]@sample(v)
+        planned=set()
+        if args.recover_planned_contacts:
+            for x in feet.values():
+                for g in range(m.ngeom):
+                    if m.geom_bodyid[g]!=x or not(m.geom_contype[g] or m.geom_conaffinity[g]):continue
+                    k=m.geom_dataid[g];adr,nv=m.mesh_vertadr[k],m.mesh_vertnum[k]
+                    world=m.mesh_vert[adr:adr+nv]@desired.geom_xmat[g].reshape(3,3).T+desired.geom_xpos[g]
+                    if world[:,2].min()<.003:planned.add(x)
+        else:planned=contact_bodies
         controller.additional_support_feet=[(x,desired.xpos[x].copy(),Rotation.from_matrix(desired.xmat[x].reshape(3,3)))
-            for x in feet.values() if x!=body and x in contact_bodies]
+            for x in feet.values() if x!=body and x in planned]
         current=Rotation.from_quat(actual.qpos[[4,5,6,3]]);wanted=Rotation.from_quat(target[[4,5,6,3]])
         desired_omega=(current.inv()*wanted).apply(sample(v)[3:6])
         controller.root_acceleration_ref=sample(joint_acc)[3:6]+100*(current.inv()*wanted).as_rotvec()+20*(desired_omega-actual.qvel[3:6])
@@ -94,13 +106,22 @@ def main():
             if hasattr(controller,'failure_arrays'):np.savez(args.out/'failure-state.npz',**controller.failure_arrays)
             break
         actual.ctrl[:]=actual.qpos[cols]+(tau+kd*actual.qvel[vcols])/kp
-        controls.append(actual.ctrl.copy());mujoco.mj_step(m,actual);mujoco.mj_forward(m,actual)
+        mujoco.mj_forward(m,actual)
+        explicit_error=float(abs(actual.qacc-controller.last_explicit_acceleration).max())
+        previous_velocity=actual.qvel.copy()
+        controls.append(actual.ctrl.copy());mujoco.mj_step(m,actual)
+        integrated=(actual.qvel-previous_velocity)/m.opt.timestep
+        integrated_error=float(abs(integrated-controller.previous*20).max())
+        mujoco.mj_forward(m,actual)
         mujoco.mj_jacSubtreeCom(m,actual,jac,root)
         hard=float(np.maximum(np.maximum(lo-actual.qpos[7:],actual.qpos[7:]-hi),0).max())
         up=float(actual.xmat[root].reshape(3,3)[2,2])
         rows.append({'time_s':t+m.opt.timestep,'root_height_m':float(actual.qpos[2]),'root_up_z':up,
             'com_speed_m_s':float(np.linalg.norm(jac@actual.qvel)),'hard_violation_rad':hard,
-            'motor_ratio':float((abs(actual.actuator_force)/effort).max()),'solver_root_residual':report['equality_residual']})
+            'motor_ratio':float((abs(actual.actuator_force)/effort).max()),'solver_root_residual':report['equality_residual'],
+            'explicit_acceleration_error_max':explicit_error,'integrated_acceleration_error_max':integrated_error,
+            'desired_com_acceleration':report['desired_com_acceleration'],
+            'achieved_com_acceleration':report['achieved_com_acceleration']})
         states.append(np.r_[actual.qpos.copy(),actual.qvel.copy()])
         if step%100==0:print(json.dumps(rows[-1]),flush=True)
         if hard>.001 or actual.qpos[2]<.22 or up<.3:

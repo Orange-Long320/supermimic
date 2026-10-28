@@ -87,7 +87,10 @@ class NativeContactController(SingleSupportController):
             # Tangent/orientation stabilization is soft. The normal reaction is
             # determined by the simulator's compliant contact inverse, not a
             # fictitious rigid vertical acceleration constraint.
-            rows=[0,1,3,4,5]
+            # A planned planted foot may need a soft normal task to recover a
+            # briefly lost contact. Its reaction remains determined by native
+            # compliant inverse dynamics, never by a rigid normal constraint.
+            rows=list(range(6)) if getattr(self,'stabilize_support_normal',False) else [0,1,3,4,5]
             foot_weight=float(getattr(self,'foot_task_weight',.05))
             task=np.r_[task,foot[rows]*acc*foot_weight];target_task=np.r_[target_task,desired[rows]*foot_weight]
             for body,position_ref,rotation_ref in getattr(self,'additional_support_feet',[]):
