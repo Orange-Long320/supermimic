@@ -6,16 +6,19 @@ from scipy.optimize import least_squares
 
 def restore_pose(model,base,flat_targets,xy_targets,lower_act,upper_act,
                  penetration_tolerance=.0008,height_tolerance=.001,xy_tolerance=.001,max_nfev=120,
-                 surface_pairs=(),surface_gap_upper=.001):
+                 surface_pairs=(),surface_gap_upper=.001,robot_geometry=None,terrain_geometry=None,
+                 translation_domain=.5,rotation_domain=.6):
     base=np.asarray(base,dtype=float).copy();lower_act=np.asarray(lower_act);upper_act=np.asarray(upper_act)
     if base.shape!=(model.nq,) or len(lower_act)!=31 or model.nv not in (37,43):raise ValueError('Expected X2 pose layout')
     if not model.jnt_limited[1:32].all():raise ValueError('Expected explicit mechanical limits')
     if np.any(lower_act<model.jnt_range[1:32,0]-1e-12) or np.any(upper_act>model.jnt_range[1:32,1]+1e-12):raise ValueError('Restoration must not widen physical joint limits')
-    lower=np.r_[np.full(3,-.5),np.full(3,-.6),lower_act-base[7:38]]
-    upper=np.r_[np.full(3,.5),np.full(3,.6),upper_act-base[7:38]]
-    obstacles=[g for g in range(model.ngeom) if model.geom(g).name=='ground' or model.geom(g).name.startswith('multi_boxes_')]
-    robot=[g for g in range(model.ngeom) if g not in obstacles and (model.geom_contype[g] or model.geom_conaffinity[g])]
-    if not obstacles or not(flat_targets or surface_pairs):raise ValueError('Explicit terrain and source contact task required')
+    if min(translation_domain,rotation_domain)<=0:raise ValueError('Positive local pose domains required')
+    lower=np.r_[np.full(3,-translation_domain),np.full(3,-rotation_domain),lower_act-base[7:38]]
+    upper=np.r_[np.full(3,translation_domain),np.full(3,rotation_domain),upper_act-base[7:38]]
+    obstacles=list(terrain_geometry) if terrain_geometry is not None else [g for g in range(model.ngeom) if model.geom(g).name=='ground' or model.geom(g).name.startswith('multi_boxes_')]
+    robot=list(robot_geometry) if robot_geometry is not None else [g for g in range(model.ngeom) if g not in obstacles and (model.geom_contype[g] or model.geom_conaffinity[g])]
+    if any(not 0<=g<model.ngeom for g in robot+obstacles) or set(robot)&set(obstacles):raise ValueError('Invalid explicit geometry partition')
+    if not obstacles or not robot or (not(flat_targets or surface_pairs) and terrain_geometry is None):raise ValueError('Explicit terrain and source contact task required')
     if any(g not in robot or o not in obstacles for g,o in surface_pairs):raise ValueError('Surface targets must use original robot and terrain geometry')
     data=mujoco.MjData(model);velocity=np.zeros(model.nv);witness=np.zeros(6)
     def evaluate(delta,forward=False):
@@ -53,5 +56,5 @@ def restore_pose(model,base,flat_targets,xy_targets,lower_act,upper_act,
     return q,{'geometry_and_task_feasible':bool(feasible),'solver_success':bool(fit.success),'solver_status':int(fit.status),
         'nfev':int(fit.nfev),'cost':float(fit.cost),'metrics':metrics,
         'maximum_joint_change_rad':float(abs(q[7:38]-base[7:38]).max()),
-        'local_root_translation_domain_m':.5,'local_root_rotation_vector_component_domain_rad':.6,
+        'local_root_translation_domain_m':translation_domain,'local_root_rotation_vector_component_domain_rad':rotation_domain,
         'scope':'Offline feasible pose initialization only; no dynamics, velocity, continuity or control certificate'}

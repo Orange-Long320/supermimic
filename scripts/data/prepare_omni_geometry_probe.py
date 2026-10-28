@@ -1,0 +1,103 @@
+"""Collision-constrained dense resampling; still not a dynamics certificate.
+
+Retain source-confirmed same-surface contact proximity while correcting joint
+interpolation. Source files and native model are immutable. A short window is
+a diagnostic only, and full output still requires independent physical audits.
+"""
+import argparse
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--candidate',type=Path,required=True)
+    p.add_argument('--model',type=Path,required=True)
+    p.add_argument('--helper',type=Path,required=True)
+    p.add_argument('--start-frame',type=int,default=0,help='200 Hz diagnostic window start')
+    p.add_argument('--frames',type=int,default=0,help='0 for complete clip')
+    p.add_argument('--out',type=Path,required=True)
+    a=p.parse_args()
+    if a.out.exists() or min(a.start_frame,a.frames)<0:p.error('New output and nonnegative window required')
+    import mujoco
+    import numpy as np
+    from scipy.interpolate import PchipInterpolator
+    from scipy.spatial.transform import Rotation,Slerp
+    spec=importlib.util.spec_from_file_location('omni_resample_restore_snapshot',a.helper)
+    helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+    m=mujoco.MjModel.from_binary_path(str(a.model));d=mujoco.MjData(m)
+    if (m.nq,m.nv,m.nu)!=(38,37,31):raise ValueError('Expected original native X2 scene')
+    with np.load(a.candidate/'x2-reference.npz',allow_pickle=False) as z:
+        q=z['qpos'].copy();fps=float(np.asarray(z['fps']).reshape(-1)[0])
+    meta=json.loads((a.candidate/'result.json').read_text())
+    duration=(len(q)-1)/fps;steps=int(np.ceil(duration*50))*4
+    times=np.arange(len(q))/fps;query=np.linspace(0,duration,steps+1)
+    cols=np.r_[np.arange(3),np.arange(7,38)];dense=np.zeros((len(query),38))
+    dense[:,cols]=PchipInterpolator(times,q[:,cols],axis=0)(query)
+    dense[:,3:7]=Slerp(times,Rotation.from_quat(q[:,[4,5,6,3]]))(query).as_quat()[:,[3,0,1,2]]
+    end=min(len(dense),a.start_frame+a.frames) if a.frames else len(dense)
+    if a.start_frame>=end:raise ValueError('Empty source window')
+    mid=m.jnt_range[1:].mean(1);half=np.diff(m.jnt_range[1:],axis=1).ravel()*meta['joint_limit_factor']/2
+    lower=mid-half;upper=mid+half
+    if meta['wrist_reference_limit_deg']:
+        for j in range(31):
+            if 'wrist' in m.joint(j+1).name:
+                # Stay inside the already validated wrist task envelope.
+                lower[j]=max(lower[j],q[:,j+7].min()-1e-9)
+                upper[j]=min(upper[j],q[:,j+7].max()+1e-9)
+    root=int(m.jnt_bodyid[0])
+    robot=[g for g in range(m.ngeom) if m.body_rootid[m.geom_bodyid[g]]==root and (m.geom_contype[g] or m.geom_conaffinity[g])]
+    terrain=[g for g in range(m.ngeom) if m.body_rootid[m.geom_bodyid[g]]!=root and (m.geom_contype[g] or m.geom_conaffinity[g])]
+    pairs=[(g,o) for g in robot for o in terrain];witness=np.zeros(6)
+    source_contacts=[]
+    for pose in q:
+        d.qpos[:]=pose;mujoco.mj_forward(m,d);contacts={}
+        for g,o in pairs:
+            gap=float(mujoco.mj_geomDistance(m,d,g,o,.01,witness))
+            if abs(gap)<=.001 and abs(gap)>1e-10:
+                contacts[(g,o)]=(witness[:3]-witness[3:]).copy()/gap
+        source_contacts.append(contacts)
+    a.out.mkdir(parents=True)
+    (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
+    (a.out/'restore-as-run.py').write_bytes(a.helper.read_bytes())
+    rows=[];accepted=[]
+    for index in range(a.start_frame,end):
+        pose=dense[index].copy();source_index=min(int(np.searchsorted(times,query[index],side='right')-1),len(q)-2)
+        before=source_contacts[source_index];after=source_contacts[source_index+1]
+        contact_pairs=[pair for pair in before.keys()&after.keys() if before[pair]@after[pair]>.99]
+        d.qpos[:]=pose;mujoco.mj_forward(m,d)
+        distances=np.array([mujoco.mj_geomDistance(m,d,g,o,.02,witness) for g,o in pairs])
+        gaps=np.array([mujoco.mj_geomDistance(m,d,g,o,10.,witness) for g,o in contact_pairs])
+        info=None
+        if distances.min()<-.00085 or (len(gaps) and gaps.max()>.001):
+            pose,info=helper.restore_pose(m,pose,{}, {},lower,upper,surface_pairs=contact_pairs,
+                robot_geometry=robot,terrain_geometry=terrain,translation_domain=.02,rotation_domain=.05,max_nfev=60)
+            if not info['geometry_and_task_feasible']:
+                (a.out/'failure.json').write_text(json.dumps({'index':index,'restoration':info},indent=2))
+                np.savez_compressed(a.out/'failed-pose.npz',qpos=pose,original=dense[index])
+                raise RuntimeError(f'Geometry resampling rejected frame {index}')
+        d.qpos[:]=pose;mujoco.mj_forward(m,d)
+        penetration=max(0.,-min(float(mujoco.mj_geomDistance(m,d,g,o,.02,witness)) for g,o in pairs))
+        soft=float(np.maximum(np.maximum(lower-pose[7:],pose[7:]-upper),0).max())
+        if penetration>.001 or soft>1e-8:raise RuntimeError('Independent post-projection bound failed')
+        accepted.append(pose);rows.append({'index':index,'penetration_m':penetration,'contact_pairs':len(contact_pairs),
+            'maximum_joint_correction_rad':float(abs(pose[7:]-dense[index,7:]).max()),'restoration':info})
+        if index%100==0:print(json.dumps({k:v for k,v in rows[-1].items() if k!='restoration'}),flush=True)
+    accepted=np.asarray(accepted)
+    np.savez_compressed(a.out/'x2-reference.npz',qpos=accepted,fps=np.array([200.]),source_start_frame=a.start_frame)
+    complete=a.start_frame==0 and end==len(dense)
+    result={**meta,'frames':len(accepted),'fps':200.,'source_start_frame':a.start_frame,
+        'source_reference_sha256':hashlib.sha256((a.candidate/'x2-reference.npz').read_bytes()).hexdigest(),
+        'model_sha256':hashlib.sha256(a.model.read_bytes()).hexdigest(),'restoration_helper_sha256':hashlib.sha256(a.helper.read_bytes()).hexdigest(),
+        'uniform_time_scale':(steps/200.)/duration,'complete_source_clip':complete,
+        'max_environment_penetration_m':max(row['penetration_m'] for row in rows),
+        'maximum_joint_correction_rad':max(row['maximum_joint_correction_rad'] for row in rows),
+        'corrected_frames':sum(row['restoration'] is not None for row in rows),'rows':rows,
+        'policy_evaluation':False,'training_approved':False,'scope':__doc__}
+    (a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps({k:v for k,v in result.items() if k!='rows'},indent=2))
+
+
+if __name__=='__main__':main()
