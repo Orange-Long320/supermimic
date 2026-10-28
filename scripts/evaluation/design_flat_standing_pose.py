@@ -15,6 +15,7 @@ def main():
     p.add_argument('--out',type=Path,required=True)
     p.add_argument('--native-balance',action='store_true',help='Jointly polish contact loads while retaining near-level soles')
     p.add_argument('--symmetric-feet',action='store_true',help='Parallel feet with aligned toes and symmetric lateral placement')
+    p.add_argument('--soft-limits',action='store_true',help='Use the same 0.9 posture limits as training resets')
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));d=mujoco.MjData(m)
@@ -67,7 +68,13 @@ def main():
             targets[side]=(basis@current,rotation)
         com_target[:2]=centre[:2]
     joints=[m.joint('robot/'+s+'_'+j+'_joint').id for s in feet for j in ['hip_pitch','hip_roll','hip_yaw','knee','ankle_pitch','ankle_roll']]
-    columns=m.jnt_qposadr[joints];lo=m.jnt_range[joints,0]+.025;hi=m.jnt_range[joints,1]-.025
+    columns=m.jnt_qposadr[joints]
+    ranges=m.jnt_range[joints];centre=ranges.mean(axis=1)
+    if args.soft_limits:
+        from supermimic.robots.assets import get_robot_cfg
+        half=(ranges[:,1]-ranges[:,0])*get_robot_cfg().articulation.soft_joint_pos_limit_factor/2
+    else:half=(ranges[:,1]-ranges[:,0])/2
+    lo=centre-half+.025;hi=centre+half-.025
     lower=np.r_[q0[:2]-.3,.35,np.full(3,-.6),lo];upper=np.r_[q0[:2]+.3,.9,np.full(3,.6),hi]
     def pose(x):
         q=q0.copy();q[:3]=x[:3];q[3:7]=(Rotation.from_rotvec(x[3:6])*rotation0).as_quat()[[3,0,1,2]];q[columns]=x[6:]
@@ -108,6 +115,7 @@ def main():
           'root_force_residual':force[:6].tolist(),'root_force_residual_normalized':float(abs(force[:6]/np.r_[np.full(3,weight),np.full(3,weight*.7)]).max()),
           'geometry_fit_max_residual':float(abs(geometry_residual).max()),'foot_fit_max_residual':float(abs(geometry_residual[:12]).max()),
           'initial_sole_tilt_rad':tilts,'native_balance':args.native_balance,'balance_history':balance_history,
+          'soft_limits':args.soft_limits,
           'static_force_feasible':False,'strict_geometry_static_feasible':False,
           'heights':{},'approved_for_training':False}
     for side in ['left','right','nonfoot']:
