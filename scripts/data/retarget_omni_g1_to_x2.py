@@ -242,6 +242,29 @@ def main():
                 last_cost=cost
                 last_actual=actual
             final_merit,final,final_foot_error=self._constraint_merit(q,kwargs['frame_idx'])
+            if final_merit>allowed and restore_pose is not None and new_support and restoration_attempts==0:
+                # A new contact may keep making small SQP progress until its
+                # iteration budget ends. Use the same one-time feasibility
+                # restoration as an infeasible/stagnant contact transition.
+                restoration_attempts+=1;flat_targets={};xy_targets={};previous=mujoco.MjData(self.robot_model)
+                previous.qpos[:]=kwargs['q_t_last'];mujoco.mj_kinematics(self.robot_model,previous)
+                for name,body_name in self.foot_links.items():
+                    body=self.robot_model.body(body_name).id;target=self._is_foot_locked_in_window(name,kwargs['frame_idx'])
+                    if target is not None:flat_targets[body]=target
+                    side='l' if 'left' in name else 'r'
+                    if any(key.lower().startswith(side) and bool(value) for key,value in kwargs['foot_sticking'].items()):xy_targets[body]=previous.xpos[body,:2].copy()
+                recovered,info=restore_pose(self.robot_model,q,flat_targets,xy_targets,self.q_a_lb[7:38],self.q_a_ub[7:38],
+                    penetration_tolerance=self.penetration_tolerance,height_tolerance=self.foot_lock.tolerance,
+                    xy_tolerance=self.foot_sticking_tolerance,
+                    **({'surface_pairs':self.source_surface_pairs.get(self.surface_frame,[])} if a.source_foot_surface_lock else {}))
+                info.update(frame=kwargs['frame_idx'],iteration=iteration,trigger='contact_transition_iteration_budget')
+                (a.out/f'restoration-{kwargs["frame_idx"]:05d}.json').write_text(json.dumps(info,indent=2)+'\n')
+                np.savez_compressed(a.out/f'restoration-{kwargs["frame_idx"]:05d}.npz',qpos=recovered,original=q)
+                checked,penetration,height_error=self._constraint_merit(recovered,kwargs['frame_idx'])
+                if info['geometry_and_task_feasible'] and checked<=allowed:
+                    accepted_step=float(np.linalg.norm(recovered-q));q=recovered;self._plane_cuts=[]
+                    final_merit,final,final_foot_error=checked,penetration,height_error
+                    stopping_reason='contact_transition_feasibility_restored_after_budget'
             if final_merit>allowed:
                 np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q)
                 raise RuntimeError(f'Contact SQP did not converge at frame {kwargs["frame_idx"]}: violation {final_merit}m after {budget} iterations')
