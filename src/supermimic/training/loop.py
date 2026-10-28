@@ -34,6 +34,9 @@ class Trainer:
         if cfg.world_model.state_spec.box not in (None, cfg.env.box):
             raise ValueError("Environment and world model boxes differ")
         cfg.world_model.state_spec.box = cfg.env.box
+        if cfg.world_model.state_spec.terrain_manifest not in (None,cfg.env.terrain_manifest):
+            raise ValueError('Environment and world model terrain collections differ')
+        cfg.world_model.state_spec.terrain_manifest=cfg.env.terrain_manifest
         cfg.policy.goal_dim = cfg.env.future_frames * GOAL_FEAT_DIM + (9 if cfg.env.anchor_obs else 0) + (BOX_FEATURE_DIM if cfg.env.box else 0)
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
         self.rank, local_rank, self.world = init_distributed()

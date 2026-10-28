@@ -82,6 +82,27 @@ class FixedTerrainCollection:
                 friction=(.8,.005,.0001),rgba=(.35,.45,.6,1.))
 
 
+class TerrainFeatureEncoder:
+    """Two nearest fixed boxes in the heading frame for learned dynamics."""
+    dimension=18
+
+    def __init__(self,manifest,device,dtype):
+        import torch
+        boxes=FixedTerrainCollection(manifest).boxes
+        if len(boxes)<2:raise ValueError('Terrain features require at least two boxes')
+        self.centers=torch.tensor([b['center'] for b in boxes],device=device,dtype=dtype)
+        self.axes=torch.tensor([[row[0] for row in b['rotation_world']] for b in boxes],device=device,dtype=dtype)
+        self.halves=torch.tensor([b['half_size'] for b in boxes],device=device,dtype=dtype)
+
+    def __call__(self,position,quaternion):
+        import torch
+        from supermimic.kinematics.rotations import heading_quat,quat_apply_inverse
+        nearest=(position[...,None,:2]-self.centers[:,:2]).square().sum(-1).topk(2,largest=False).indices
+        heading=heading_quat(quaternion)[...,None,:].expand(*nearest.shape,4)
+        return torch.cat((quat_apply_inverse(heading,self.centers[nearest]-position[...,None,:]),
+            quat_apply_inverse(heading,self.axes[nearest]),self.halves[nearest]),dim=-1).flatten(-2)
+
+
 def box_features(root_pos, root_quat, box: FixedBox):
     """Centre offset, box +x axis in root heading frame, and half sizes (metres).
 

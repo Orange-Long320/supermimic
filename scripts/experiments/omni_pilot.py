@@ -19,6 +19,16 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def warmstart_terrain_module(module,state,first,base_feature_dim):
+    """Insert zero terrain columns without moving action/goal/xi weights."""
+    state=dict(state)
+    old=state[first];new=module.state_dict()[first].clone().zero_()
+    if new.shape[1]!=old.shape[1]+18:raise ValueError('Unexpected terrain input expansion')
+    new[:,:base_feature_dim]=old[:,:base_feature_dim]
+    new[:,base_feature_dim+18:]=old[:,base_feature_dim:]
+    state[first]=new;module.load_state_dict(state)
+
+
 def prepare(inputs,out):
     import mujoco
     import numpy as np
@@ -112,7 +122,13 @@ def train(a):
         if a.phase=='smoke':
             ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
             if ck['config'].get('robot')!='x2_ultra' or ck['config']['env'].get('box'):raise ValueError('Wrong warmstart robot/observation model')
-            for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]:module.load_state_dict(ck[key])
+            from supermimic.robots.dimensions import FEAT_DIM
+            for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]:
+                state=ck[key]
+                first={'wm':'dynamics.mlp.net.0.weight','critic':'mlp.net.0.weight'}.get(key)
+                if first:
+                    warmstart_terrain_module(module,state,first,FEAT_DIM)
+                else:module.load_state_dict(state)
             del ck
             print('Warmstart weights only; fresh optimizer, replay and sampler for new scenes',flush=True)
         record['status']='running';(a.out/'launch.json').write_text(json.dumps(record,indent=2,default=str))

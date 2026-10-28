@@ -24,6 +24,7 @@ from __future__ import annotations
 from supermimic.robots.dimensions import NJ, NQ, NV, STATE_DIM, FEAT_DIM, DELTA_DIM, XI_DIM, OBS_DIM, GOAL_FEAT_DIM, PROFILE, ROBOT
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from supermimic.envs.box_scene import BOX_FEATURE_DIM, FixedBox, box_features
 
 import torch
@@ -50,6 +51,7 @@ NJ = NJ
 class StateSpecCfg:
     dt: float = 0.02
     box: FixedBox | None = None
+    terrain_manifest: Path | None = None
     # Nominal error scales (D3) for [root pos m, root rotvec rad, root lin vel m/s, root ang vel rad/s, joint pos rad, joint vel rad/s].
     err_scale: tuple[float, ...] = (0.05, 0.1, 0.5, 1.0, 0.1, 2.0)
     # Output scales of the dynamics head for [dv_h, dw_b, dqd, dp_h, dth_b, dq].
@@ -71,7 +73,10 @@ class StateSpec:
     def __init__(self, cfg: StateSpecCfg, device, dtype=torch.float32):
         self.cfg = cfg
         self.dt = cfg.dt
-        self.feature_dim = FEAT_DIM + (BOX_FEATURE_DIM if cfg.box else 0)
+        from supermimic.envs.box_scene import TerrainFeatureEncoder
+        if cfg.box is not None and cfg.terrain_manifest is not None:raise ValueError('Conflicting terrain features')
+        self.terrain_encoder=TerrainFeatureEncoder(cfg.terrain_manifest,device,dtype) if cfg.terrain_manifest else None
+        self.feature_dim = FEAT_DIM + (BOX_FEATURE_DIM if cfg.box else 0) + (TerrainFeatureEncoder.dimension if self.terrain_encoder else 0)
         rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])  # noqa: E731
         self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
         self.out_scale = rep(cfg.out_scale, (3, 3, NJ, 3, 3, NJ)).to(device=device, dtype=dtype)
@@ -96,6 +101,8 @@ class StateSpec:
         feat = feat / self.in_scale
         if self.cfg.box is not None:
             feat = torch.cat((feat, box_features(p, q, self.cfg.box)), dim=-1)
+        if self.terrain_encoder is not None:
+            feat=torch.cat((feat,self.terrain_encoder(p,q)),dim=-1)
         return feat
 
     def normalize_xi(self, xi: torch.Tensor) -> torch.Tensor:
