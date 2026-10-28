@@ -68,7 +68,7 @@ def main():
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     trust=1.;initial=helper.measure(qs,coefficients);history=[];started=time.monotonic()
     record=dict(pid=os.getpid(),source_reference_sha256=sha(a.reference),frames50hz=[start,end],time_scale=1.,
-        phase='offline_feasibility_restoration' if a.restore_feasibility else 'strict_motor_linearization',
+        phase='offline_feasibility_restoration' if a.restore_feasibility else 'hard_floating_base_and_original_motor_caps' if a.hard_root_balance else 'strict_motor_linearization',
         root_balance_is_hard=a.hard_root_balance,effort_fraction_of_original_rating=a.effort_fraction,
         physical_effort_caps_unchanged=True,motor_violation_variables_are_not_actuator_forces=True,
         approved_for_training=False,actual_controller_execution_verified=False,scope=__doc__,initial=initial)
@@ -133,7 +133,7 @@ def main():
                         add(ii,dd,-required[j]/scale,-required[j]/scale)
                     elif a.restore_feasibility:
                         violation=motor_violation_offset+i*31+j-6
-                        # The cap stays .95 of the original motor rating.
+                        # The declared fraction never exceeds the original rating.
                         # Positive violation is an explicit unsatisfied offline
                         # constraint; it is never applied or called feasible.
                         add(ii+[violation],np.r_[dd,-1.],-np.inf,a.effort_fraction-required[j]/scale)
