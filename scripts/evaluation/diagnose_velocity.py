@@ -190,6 +190,15 @@ def main(early: Path, late: Path, out: Path, seconds: float = 12., device: str =
                             "velocity_bias": error.mean((0, 1)).tolist(), "velocity_rmse": error.square().mean((0, 1)).sqrt().tolist(),
                             "predicted_reward_rate": float(predicted_return.reshape(len(origins), n)[:, ids].mean() / horizon),
                             "native_reward_rate": float(native_return[:, ids].mean() / horizon)})
+                        if horizon == 32:
+                            for command_index in range(per_variant):
+                                column = variant * per_variant + command_index
+                                wm_checks.append({"model": "early" if index == 0 else "late", "policy_variant": name,
+                                    "horizon": horizon, "command": commands[command_index].tolist(),
+                                    "predicted_velocity": estimate[:, column].mean(0).tolist(),
+                                    "native_velocity": truth[:, column].mean(0).tolist(),
+                                    "predicted_reward_rate": float(predicted_return.reshape(len(origins), n)[:, column].mean() / horizon),
+                                    "native_reward_rate": float(native_return[:, column].mean() / horizon)})
         table = cmd.reference_velocity
         _, reference_valid = bounded_reference(table, torch.arange(len(table), device=device), vc)
         coverage = []
@@ -218,6 +227,9 @@ def main(early: Path, late: Path, out: Path, seconds: float = 12., device: str =
                   "observation_history_reconstruction_max_abs_error": float((reconstructed - observations_log[history_index]).abs().max()),
                   "command_sensitivity": sensitivity, "context_initial": initial_context[0].tolist()}
         out.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"states": state.cpu(), "actions": action.cpu(), "context": xi.cpu(),
+                    "commands": target.cpu(), "reward_rate": real_reward.cpu(), "active": active.cpu(),
+                    "variant_names": names}, out.with_suffix(".pt"))
         out.write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps({k: v for k, v in result.items() if k not in ("world_model_checks", "reference_coverage", "context_initial")}, indent=2))
     finally:
