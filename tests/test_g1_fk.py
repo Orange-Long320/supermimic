@@ -50,16 +50,20 @@ def _signed_quat_err(q, q_ref):
 
 
 @pytest.mark.parametrize("dtype,atol_pos,atol_vel", [(torch.float64, 1e-10, 1e-9), (torch.float32, 2e-5, 2e-4)])
-def test_fk_matches_mujoco(dtype, atol_pos, atol_vel):
+@pytest.mark.parametrize("nonzero_anchor", [False, True])
+def test_fk_matches_mujoco(dtype, atol_pos, atol_vel, nonzero_anchor):
     torch.backends.cuda.matmul.allow_tf32 = False
     model = load_g1_model()
+    if nonzero_anchor:
+        # Exercise the general hinge path as well as exact-zero URDF anchors.
+        model.jnt_pos[1] = [0.01, -0.02, 0.03]
     rng = np.random.default_rng(0)
     qpos, qvel = _random_state(model, rng, 64)
     pos_ref, quat_ref, lin_ref, ang_ref = _mujoco_reference(model, qpos, qvel)
 
     fk = G1Kinematics(model, device="cpu", dtype=dtype)
     out = fk(torch.as_tensor(qpos, dtype=dtype), torch.as_tensor(qvel, dtype=dtype))
-    assert out["pos"].shape == (64, 30, 3) and out["quat"].shape == (64, 30, 4)
+    assert out["pos"].shape == (64, model.nbody - 1, 3) and out["quat"].shape == (64, model.nbody - 1, 4)
     np.testing.assert_allclose(out["pos"].numpy(), pos_ref, atol=atol_pos)
     assert _signed_quat_err(out["quat"].numpy(), quat_ref) < atol_pos * 10
     np.testing.assert_allclose(out["ang_vel"].numpy(), ang_ref, atol=atol_vel)
@@ -93,6 +97,26 @@ def test_fk_is_differentiable():
     loss.backward()
     assert torch.isfinite(qp.grad).all() and torch.isfinite(qv.grad).all()
     assert qp.grad.abs().sum() > 0 and qv.grad.abs().sum() > 0
+
+
+def test_fk_position_gradient_matches_native_jacobians():
+    model = load_g1_model()
+    qpos, _ = _random_state(model, np.random.default_rng(19), 3)
+    rng = np.random.default_rng(20)
+    weights = rng.normal(size=(model.nbody - 1, 3))
+    qp = torch.tensor(qpos, dtype=torch.float64, requires_grad=True)
+    result = G1Kinematics(model, "cpu", torch.float64)(qp)
+    (result["pos"] * torch.tensor(weights)).sum().backward()
+    expected = np.zeros((len(qpos), model.nv - 6))
+    data = mujoco.MjData(model)
+    jac = np.zeros((3, model.nv))
+    for i, pose in enumerate(qpos):
+        data.qpos[:] = pose
+        mujoco.mj_forward(model, data)
+        for body in range(1, model.nbody):
+            mujoco.mj_jacBody(model, data, jac, None, body)
+            expected[i] += weights[body - 1] @ jac[:, 6:]
+    np.testing.assert_allclose(qp.grad[:, 7:].numpy(), expected, rtol=1e-9, atol=1e-9)
 
 
 def test_rotvec_round_trip():

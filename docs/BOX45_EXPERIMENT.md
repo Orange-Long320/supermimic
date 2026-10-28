@@ -338,3 +338,9 @@
 - 三家族组合prepare已退出0：dataset共1518帧（310/603/605），六个原箱体与对应动作同平移y-6/0/+6，terrain SHA67da6167d6f99ea123a76fb34788b71d0de16006896fea0a0c12beb22feb5437；各片段全组合场景最大穿透.869810/.849372/.942402mm、硬界0、50Hz速度比.368113/.432151/.391797。仍是探索批次，force_diagnostics_passed/complete_climb_verified/final_validation_approved均false。
 - 组合接口CPU复核interface-comparison.json通过：原两家族在新场景各平移+3m后，位姿误差<9e-16/速度差0，完整canonical特征最大差<6e-7/未来目标差<3e-8。weights-transfer-check.json验证WM/policy/critic在新18维地形接口下严格完整载入全部原张量且逐值相同/有限（feature93/goal729）。这些仅证明迁移接口，不代表新场景可静默full resume或实际控制通过。
 - 训练入口新增显式`--weights-only`仅允许capacity阶段：新场景必须显式保留同X2/无其他box或sole接口，完整载入匹配形状的三个模块，优化器/replay/计数器新建；普通resume仍要求同一地形内容。新地形pointer在构建新Trainer前显式写入，不篡改保存检查点。该选项尚未GPU容量验证，未启动三家族训练，当前GPU3运行入口8861a1d保持原样。
+
+## 零锚点运算消除（2026-10-29，checkpoint）
+
+- 两种编译后端均在本轮预算内未证明收益，暂不继续试后端。读取现有FK发现，每个关节均旋转零anchor向量两次，并计算一个零杠杆臂的叉乘。服务器真实X2模型为40 bodies/31 hinges，31个jnt_pos全部逐值等于0。对精确零情形可直接使用b_pos作为anchor并省略零杠杆项；非零anchor保留原通用路径，不改四元数/关节轴/机器人模型或浮点精度。
+- 新实现只在本地源码及独立验证副本，未覆盖GPU3训练包。服务器CPU独立测试`omni_zero_anchor_fk_20261029_r1/native-tests.log`已7通过/1GPU跳过/4.38秒：float64/32位置/姿态/速度与MuJoCo对照，原零与合成非零锚点均覆盖；新增所有hinge位置梯度与原生mj_jacBody独立对照；梯度有限和旋转回归通过。将旧G1专用硬编码30-body断言改为实际模型body数，使X2也被正确检查。shell最后cat的退出码不作pytest证据，以保存日志7passed摘要为准。
+- 复用配对探针增加显式--optimized-fk选项，在同一冻结真实replay/相同策略critic优化器/RNG下只比较旧FK与零锚点消除，不启用编译。拟GPU2单卡、2048env/512batch（使用已冻结的起步capacity检查点）、各8次更新、最多240秒墙钟/CPU2线程/65%Torch；先核对真实replay所有FK输出，再比较首次目标与梯度、8次后权重差及预热中位时间。未实测前不声称提速，当前GPU3包仍3bc46dc，模型/限制/数据不变。

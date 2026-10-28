@@ -89,6 +89,10 @@ class G1Kinematics:
                 jnt_axis[i] = model.jnt_axis[j]
                 qpos0[i] = model.qpos0[l.qpos_adr]
         self.jnt_pos = t(jnt_pos)
+        # URDF hinges usually sit at their body origin. Test exact zeros once;
+        # rotating these anchors and propagating a zero lever arm adds many
+        # GPU launches without changing positions, velocities or derivatives.
+        self.zero_anchor = tuple(bool(np.all(p == 0.0)) for p in jnt_pos)
         self.jnt_axis = t(jnt_axis)
         self.qpos0 = t(qpos0)
         # Hinge bookkeeping in body order (skip root / fixed bodies).
@@ -140,17 +144,21 @@ class G1Kinematics:
             b_pos = pp + quat_apply(pq, self.body_pos[i].expand(*batch, 3))
             b_quat = quat_mul(pq, self.body_quat[i].expand(*batch, 4))
             if l.joint_type == mujoco.mjtJoint.mjJNT_HINGE:
-                anchor = b_pos + quat_apply(b_quat, self.jnt_pos[i].expand(*batch, 3))
+                zero_anchor = self.zero_anchor[i]
+                anchor = b_pos if zero_anchor else b_pos + quat_apply(b_quat, self.jnt_pos[i].expand(*batch, 3))
                 axis_w = quat_apply(b_quat, self.jnt_axis[i].expand(*batch, 3))
                 angle = qpos[..., l.qpos_adr] - self.qpos0[i]
                 q_loc = quat_from_angle_axis(angle, self.jnt_axis[i].expand(*batch, 3))
                 b_quat = quat_mul(b_quat, q_loc)
-                b_pos = anchor - quat_apply(b_quat, self.jnt_pos[i].expand(*batch, 3))
+                if not zero_anchor:
+                    b_pos = anchor - quat_apply(b_quat, self.jnt_pos[i].expand(*batch, 3))
                 if compute_vel:
                     qd = qvel[..., l.dof_adr].unsqueeze(-1)
                     w_joint = axis_w * qd
                     ang[i] = ang[p] + w_joint
-                    lin[i] = lin[p] + torch.cross(ang[p], b_pos - pp, dim=-1) + torch.cross(w_joint, b_pos - anchor, dim=-1)
+                    lin[i] = lin[p] + torch.cross(ang[p], b_pos - pp, dim=-1)
+                    if not zero_anchor:
+                        lin[i] = lin[i] + torch.cross(w_joint, b_pos - anchor, dim=-1)
             else:  # fixed body
                 if compute_vel:
                     ang[i] = ang[p]
