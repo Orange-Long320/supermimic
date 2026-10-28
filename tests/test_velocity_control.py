@@ -144,6 +144,35 @@ def test_keyboard_release_lease_and_ramp():
         mailbox.put((float("nan"), 0., 0.))
 
 
+def test_browser_keyboard_transport():
+    from http.client import HTTPConnection
+
+    from supermimic.locomotion.keyboard import CommandMailbox, start_keyboard_server
+
+    mailbox = CommandMailbox()
+    server = start_keyboard_server(mailbox, 0, 0.5, 0.4)
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert b"keys.has('w')?0.5" in response.read()
+        connection.request("POST", "/command", body="[0.5, 0, -0.4]", headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        assert response.status == 204
+        response.read()
+        assert mailbox.target == (0.5, 0., -0.4)
+        connection.request("POST", "/command", body='["NaN", 0, 0]')
+        response = connection.getresponse()
+        assert response.status == 400
+        response.read()
+        assert mailbox.target == (0.5, 0., -0.4)
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+
+
 def test_tracking_termination_head_excludes_velocity_labels():
     from supermimic.world_model.heads import ReferenceFrame
     from supermimic.world_model.world_model import WorldModel, WorldModelCfg
