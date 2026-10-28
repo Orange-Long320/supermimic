@@ -30,6 +30,7 @@ def main():
     p.add_argument('--frames',type=int,default=5)
     p.add_argument('--penetration-target-m',type=float,default=.0008,help='IK target tighter than the independent 1mm collision gate')
     p.add_argument('--source-flat-foot-lock',action='store_true',help='Pin sole marker heights only during source-confirmed flat support')
+    p.add_argument('--collision-backtracking',action='store_true',help='Check actual collision distance before accepting each SQP step')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
     if a.out.exists() or a.frames<2 or not 0<a.penetration_target_m<.001:p.error('New output, at least two frames, and a positive IK penetration target below 1mm required')
@@ -40,6 +41,39 @@ def main():
     from holosoma_retargeting.src.utils import extract_foot_sticking_sequence_velocity
     from holosoma_retargeting.config_types.retargeter import FootLockConfig
     class X2Retargeter(InteractionMeshRetargeter):
+        def _maximum_environment_penetration(self,q):
+            m=self.robot_model;d=self.robot_data;d.qpos[:]=q;mujoco.mj_forward(m,d)
+            obstacles=[g for g in range(m.ngeom) if m.geom(g).name=='ground' or m.geom(g).name.startswith('multi_boxes_')]
+            robot=[g for g in range(m.ngeom) if g not in obstacles and (m.geom_contype[g] or m.geom_conaffinity[g])]
+            witness=np.zeros(6)
+            return max(0.,max(-float(mujoco.mj_geomDistance(m,d,g,o,.02,witness)) for g in robot for o in obstacles))
+
+        def iterate(self,**kwargs):
+            if not a.collision_backtracking:return super().iterate(**kwargs)
+            if a.source_flat_foot_lock:raise ValueError('Backtracking with new foot-lock equalities requires a separate constraint merit; do not silently combine')
+            q=kwargs.pop('q_n').copy();budget=kwargs.pop('n_iter')*3;last_cost=np.inf;backtracks=0
+            allowed=self.penetration_tolerance+5e-5
+            for iteration in range(budget):
+                before=self._maximum_environment_penetration(q)
+                proposed,cost=self.solve_single_iteration(q_a_n_last=q[self.q_a_indices],**kwargs)
+                accepted=None
+                for reduction in range(15):
+                    alpha=2.**(-reduction);trial=q+alpha*(proposed-q);mujoco.mj_normalizeQuat(self.robot_model,trial)
+                    penetration=self._maximum_environment_penetration(trial)
+                    if penetration<=allowed or penetration<before-1e-8:
+                        accepted=trial;backtracks+=reduction;break
+                if accepted is None:raise RuntimeError(f'No collision-merit descent at frame {kwargs["frame_idx"]}; penetration={before}')
+                q=accepted
+                if reduction==0 and np.isclose(cost,last_cost) and penetration<=allowed:break
+                last_cost=cost
+            final=self._maximum_environment_penetration(q)
+            if final>allowed:
+                np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q)
+                raise RuntimeError(f'Collision SQP did not converge at frame {kwargs["frame_idx"]}: {final}m after {budget} iterations')
+            if not hasattr(self,'backtracking_records'):self.backtracking_records=[]
+            self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'maximum_penetration_m':final})
+            return q,cost
+
         def _build_transform_qdot_to_qvel_fast(self, use_world_omega=True):
             # Retain the upstream default quaternion formula, checked below
             # against native FK differences. Avoid tuple membership between
@@ -165,6 +199,7 @@ def main():
     if derivative_error>=1e-6:raise ValueError(f'Independent X2 Jacobian check failed: {derivative_error}')
     sticking=extract_foot_sticking_sequence_velocity(landmarks,demo_names,['LeftToeBase','RightToeBase'])
     retargeter.retarget_motion(landmarks,objects,objects,anchors,anchors,sticking,q_a_init=seed,original=True,dest_res_path=str(a.out/'upstream-result.npz'))
+    if a.collision_backtracking:(a.out/'collision-backtracking.json').write_text(json.dumps(retargeter.backtracking_records,indent=2)+'\n')
     with np.load(a.out/'upstream-result.npz',allow_pickle=False) as z:result=z['qpos'].copy()
     if not np.isfinite(result).all():raise ValueError('Non-finite result')
     quaternion_error=float(abs(np.linalg.norm(result[:,3:7],axis=1)-1).max())
@@ -185,6 +220,7 @@ def main():
         'maximum_root_quaternion_norm_error':quaternion_error,'ik_penetration_target_m':a.penetration_target_m,
         'jacobian_max_absolute_error':derivative_error,'max_actuated_joint_range_rad':float(np.ptp(result[:,7:38],axis=0).max()),
         'source_foot_landmarks':'Heel/toe sole surface points from paired G1 spheres; upstream ankle marker is not a heel',
+        'collision_backtracking':a.collision_backtracking,
         'source_model_sha256':meta['source_sha256'],'policy_evaluation':False,'training_approved':False,
         'scope':'Bounded OmniRetarget custom-data smoke only; not full climbing, inverse-dynamics feasibility or policy execution.'}
     (a.out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2),flush=True)
