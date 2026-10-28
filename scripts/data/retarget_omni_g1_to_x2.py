@@ -28,12 +28,14 @@ def main():
     p.add_argument('--equilibrium',type=Path,required=True)
     p.add_argument('--motion',required=True)
     p.add_argument('--frames',type=int,default=5)
+    p.add_argument('--start-frame',type=int,default=0,help='Source window start; nonzero entries are diagnostic segments, not complete climbs')
+    p.add_argument('--wrist-reference-limit-deg',type=float,default=15.,help='Optional task bound around neutral wrists; 0 uses unchanged mechanical limits and a weak neutral prior')
     p.add_argument('--penetration-target-m',type=float,default=.0008,help='IK target tighter than the independent 1mm collision gate')
     p.add_argument('--source-flat-foot-lock',action='store_true',help='Pin sole marker heights only during source-confirmed flat support')
     p.add_argument('--collision-backtracking',action='store_true',help='Check actual collision distance before accepting each SQP step')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
-    if a.out.exists() or a.frames<2 or not 0<a.penetration_target_m<.001:p.error('New output, at least two frames, and a positive IK penetration target below 1mm required')
+    if a.out.exists() or a.frames<2 or a.start_frame<0 or not 0<=a.wrist_reference_limit_deg<=180 or not 0<a.penetration_target_m<.001:p.error('New output, valid source window/wrist task bound and a positive IK penetration target below 1mm required')
     import mujoco
     import numpy as np
     from scipy.spatial.transform import Rotation
@@ -106,7 +108,11 @@ def main():
             lap=calculate_laplacian_coordinates(np.vstack([points,kwargs['obj_pts_local']]),kwargs['adj_list'])
             tracking=self.laplacian_weights*float(np.square(lap-kwargs['target_laplacian']).sum())
             smooth=self.smooth_weight*float(np.square(q[self.q_a_indices]-kwargs['q_t_last'][self.q_a_indices]).sum())
-            return tracking+smooth+float(np.sum(self.Q_diag*np.square(q[self.q_a_indices])))
+            nominal=0.
+            if kwargs.get('q_a_nominal') is not None and kwargs.get('w_nominal_tracking',0)>0:
+                idx=np.asarray(self.track_nominal_indices,dtype=int)
+                nominal=kwargs['w_nominal_tracking']*float(np.square(q[self.q_a_indices][idx]-kwargs['q_a_nominal'][idx]).sum())
+            return tracking+smooth+nominal+float(np.sum(self.Q_diag*np.square(q[self.q_a_indices])))
 
         def _constraint_merit(self,q,frame):
             penetration=self._maximum_environment_penetration(q);foot_error=0.
@@ -133,8 +139,12 @@ def main():
                         solve_kwargs=dict(kwargs)
                         # The initial feasibility fallback may drop the trust
                         # region only for the first initialization step.
-                        solve_kwargs['init_t']=(kwargs.get('init_t',False) or new_support) and iteration==0
-                        proposed,cost=self.solve_single_iteration(q_a_n_last=q[self.q_a_indices],**solve_kwargs)
+                        solve_kwargs['init_t']=(kwargs.get('init_t',False) and iteration==0) or (new_support and before>allowed)
+                        try:proposed,cost=self.solve_single_iteration(q_a_n_last=q[self.q_a_indices],**solve_kwargs)
+                        except RuntimeError as error:
+                            np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q)
+                            (a.out/'solver-failure.json').write_text(json.dumps({'frame':kwargs['frame_idx'],'iteration':iteration,'constraint_merit_m':before,'trust_step':self.step_size,'source_support_transition':new_support,'initial_feasibility_fallback_enabled':solve_kwargs['init_t'],'error':str(error)},indent=2)+'\n')
+                            raise
                         for reduction in range(15):
                             alpha=2.**(-reduction);trial=q+alpha*(proposed-q);mujoco.mj_normalizeQuat(self.robot_model,trial)
                             merit,penetration,foot_error=self._constraint_merit(trial,kwargs['frame_idx'])
@@ -159,8 +169,12 @@ def main():
                 np.savez_compressed(a.out/f'failed-frame-{kwargs["frame_idx"]}.npz',qpos=q)
                 raise RuntimeError(f'Contact SQP did not converge at frame {kwargs["frame_idx"]}: violation {final_merit}m after {budget} iterations')
             if not hasattr(self,'backtracking_records'):self.backtracking_records=[]
+            if not hasattr(self,'_accepted_poses'):self._accepted_poses=[]
+            self._accepted_poses.append(q[:38].copy())
             self.backtracking_records.append({'frame':kwargs['frame_idx'],'iterations':iteration+1,'backtracks':backtracks,'plane_witness_cuts':len(self._plane_cuts),'maximum_penetration_m':final,'maximum_locked_sole_height_error_m':final_foot_error,'actual_tracking_cost':actual,'accepted_step_norm':accepted_step,'stopping_reason':stopping_reason})
-            if kwargs['frame_idx']%30==0:(a.out/'collision-backtracking-progress.json').write_text(json.dumps(self.backtracking_records,indent=2)+'\n')
+            if kwargs['frame_idx']%30==0:
+                (a.out/'collision-backtracking-progress.json').write_text(json.dumps(self.backtracking_records,indent=2)+'\n')
+                np.savez_compressed(a.out/f'accepted-prefix-{kwargs["frame_idx"]:05d}.npz',qpos=np.asarray(self._accepted_poses),fps=30.,source_start_frame=a.start_frame,source_motion=a.motion)
             return q,cost
 
         def _build_transform_qdot_to_qvel_fast(self, use_world_omega=True):
@@ -182,11 +196,23 @@ def main():
     source_mapping=literal_assignment(upstream/'data_type.py','JOINTS_MAPPINGS')[('mocap','g1')]
     mapping=meta['mocap_joint_mapping'];demo_names=list(mapping);scale=1.30/1.32
     with zipfile.ZipFile(a.source/'robot-terrain.zip') as archive:
-        with np.load(io.BytesIO(archive.read(a.motion)),allow_pickle=False) as z:poses=z['qpos'][:a.frames].copy();fps=float(np.asarray(z['fps']).reshape(-1)[0])
+        with np.load(io.BytesIO(archive.read(a.motion)),allow_pickle=False) as z:poses=z['qpos'][a.start_frame:a.start_frame+a.frames].copy();fps=float(np.asarray(z['fps']).reshape(-1)[0])
+    if len(poses)<2:raise ValueError('Source window contains fewer than two frames')
     if fps!=30:raise ValueError('The upstream core currently writes 30Hz; explicit resampling is needed for other sources')
     g1=mujoco.MjModel.from_binary_path(str(a.source_audit/'source-g1.mjb'));gd=mujoco.MjData(g1)
     source_columns=[int(g1.jnt_qposadr[g1.joint(n).id]) for n in source_names]
     ids=[g1.body(source_mapping[n]).id for n in demo_names];landmarks=[];source_soles=[]
+    source_hand_centers={}
+    if meta.get('hand_centroid_markers'):
+        from scipy.spatial import ConvexHull
+        for name in ('LeftHandMiddle3','RightHandMiddle3'):
+            body=g1.body(source_mapping[name]).id
+            geoms=[g for g in range(g1.ngeom) if int(g1.geom_bodyid[g])==body and g1.geom_contype[g]]
+            if len(geoms)!=1 or int(g1.geom_type[geoms[0]])!=int(mujoco.mjtGeom.mjGEOM_MESH):raise ValueError('Expected pinned G1 hand collision mesh')
+            g=geoms[0];mesh=int(g1.geom_dataid[g]);adr,count=g1.mesh_vertadr[mesh],g1.mesh_vertnum[mesh]
+            vertices=g1.mesh_vert[adr:adr+count]@Rotation.from_quat(g1.geom_quat[g][[1,2,3,0]]).as_matrix().T+g1.geom_pos[g]
+            origin=vertices.mean(0);triangles=vertices[ConvexHull(vertices).simplices];volumes=abs(np.linalg.det(triangles-origin))/6
+            source_hand_centers[name]=(body,(((triangles.sum(1)+origin)/4)*volumes[:,None]).sum(0)/volumes.sum())
     sole_bodies=[[g1.body(f'{side}_ankle_roll_sphere_{k}_link').id for k in range(1,5)] for side in ('left','right')]
     sole_radii=[]
     for bodies in sole_bodies:
@@ -199,6 +225,7 @@ def main():
     for pose in poses:
         gd.qpos[:3]=pose[4:7];gd.qpos[3:7]=pose[:4];gd.qpos[source_columns]=pose[7:];mujoco.mj_kinematics(g1,gd)
         points=gd.xpos[ids].copy()
+        for name,(body,offset) in source_hand_centers.items():points[demo_names.index(name)]+=gd.xmat[body].reshape(3,3)@offset
         # The upstream human-mocap "Foot" maps to an ankle marker, whereas
         # our X2 "Foot" is a sole heel. Reusing those semantic labels would
         # force the X2 heel upward and leave only toe-edge support. Construct
@@ -239,12 +266,15 @@ def main():
     seed=np.load(a.equilibrium,allow_pickle=False)['qpos'].copy()
     if seed.shape!=(38,):raise ValueError('X2 seed dimensions differ')
     seed[:2]=poses[0,4:6]*scale;seed[3:7]=poses[0,:4]
+    wrist_indices=[]
     for name in meta['joint_names']:
         if 'wrist' not in name:continue
-        address=int(model.jnt_qposadr[model.joint(name).id]);lower[address]=max(lower[address],seed[address]-np.radians(15));upper[address]=min(upper[address],seed[address]+np.radians(15))
+        address=int(model.jnt_qposadr[model.joint(name).id]);wrist_indices.append(address)
+        if a.wrist_reference_limit_deg:
+            lower[address]=max(lower[address],seed[address]-np.radians(a.wrist_reference_limit_deg));upper[address]=min(upper[address],seed[address]+np.radians(a.wrist_reference_limit_deg))
     constants=SimpleNamespace(ROBOT_URDF_FILE=str(a.x2_model/'x2.urdf'),OBJECT_NAME='multi_boxes',SCENE_XML_FILE=str(scene),ROBOT_DOF=31,
         FOOT_STICKING_LINKS=meta['foot_sticking_links'],DEMO_JOINTS=demo_names,JOINTS_MAPPING=mapping,
-        MANUAL_LB={str(i):float(v) for i,v in enumerate(lower)},MANUAL_UB={str(i):float(v) for i,v in enumerate(upper)},MANUAL_COST={},NOMINAL_TRACKING_INDICES=np.array([],dtype=int))
+        MANUAL_LB={str(i):float(v) for i,v in enumerate(lower)},MANUAL_UB={str(i):float(v) for i,v in enumerate(upper)},MANUAL_COST={},NOMINAL_TRACKING_INDICES=np.array(wrist_indices if a.wrist_reference_limit_deg==0 else [],dtype=int))
     windows={'left':[],'right':[]}
     if a.source_flat_foot_lock:
         for side in range(2):
@@ -262,7 +292,7 @@ def main():
                     start=end
     (a.out/'source-flat-support.json').write_text(json.dumps({'enabled':a.source_flat_foot_lock,'windows':windows,'source_sphere_bottom_tolerance_m':.003,'x2_marker_height_offset_m':.0005},indent=2)+'\n')
     retargeter=X2Retargeter(constants,object_urdf_path=None,visualize=False,debug=False,penetration_tolerance=a.penetration_target_m,
-        foot_lock=FootLockConfig(enable=a.source_flat_foot_lock,windows=windows,tolerance=.001))
+        foot_lock=FootLockConfig(enable=a.source_flat_foot_lock,windows=windows,tolerance=.001),w_nominal_tracking_init=.05 if a.wrist_reference_limit_deg==0 else 5.)
     # Complete qpos-address bounds avoid the upstream named-free-joint indexing
     # assumption; every actuated range is checked against the actual X2 model.
     np.testing.assert_array_equal(retargeter.q_a_lb,lower);np.testing.assert_array_equal(retargeter.q_a_ub,upper)
@@ -287,7 +317,8 @@ def main():
     (a.out/'jacobian-check.json').write_text(json.dumps({'max_absolute_error':derivative_error,'columns':38,'bodies':len(mapping),'epsilon':epsilon,'passed':derivative_error<1e-6},indent=2)+'\n')
     if derivative_error>=1e-6:raise ValueError(f'Independent X2 Jacobian check failed: {derivative_error}')
     sticking=extract_foot_sticking_sequence_velocity(landmarks,demo_names,['LeftToeBase','RightToeBase'])
-    retargeter.retarget_motion(landmarks,objects,objects,anchors,anchors,sticking,q_a_init=seed,original=True,dest_res_path=str(a.out/'upstream-result.npz'))
+    nominal=np.tile(np.r_[seed,objects[0]],(len(poses),1)) if a.wrist_reference_limit_deg==0 else None
+    retargeter.retarget_motion(landmarks,objects,objects,anchors,anchors,sticking,q_a_init=seed,q_nominal_list=nominal,original=True,dest_res_path=str(a.out/'upstream-result.npz'))
     if a.collision_backtracking:(a.out/'collision-backtracking.json').write_text(json.dumps(retargeter.backtracking_records,indent=2)+'\n')
     with np.load(a.out/'upstream-result.npz',allow_pickle=False) as z:result=z['qpos'].copy()
     if not np.isfinite(result).all():raise ValueError('Non-finite result')
@@ -304,12 +335,13 @@ def main():
         for g in robot_geoms:
             for obstacle in obstacles:penetration=max(penetration,-float(mujoco.mj_geomDistance(model,data,g,obstacle,.02,witness)))
     np.savez_compressed(a.out/'x2-reference.npz',qpos=result[:,:38],fps=fps)
-    report={'source_motion':a.motion,'frames':len(result),'fps':fps,'uniform_source_scene_scale':scale,'scene_boxes':target_boxes,
+    report={'source_motion':a.motion,'source_start_frame':a.start_frame,'frames':len(result),'fps':fps,'uniform_source_scene_scale':scale,'scene_boxes':target_boxes,
         'hard_joint_violation_rad':hard,'max_environment_penetration_m':penetration,'bounds_match_x2_model':True,
         'maximum_root_quaternion_norm_error':quaternion_error,'ik_penetration_target_m':a.penetration_target_m,
         'jacobian_max_absolute_error':derivative_error,'max_actuated_joint_range_rad':float(np.ptp(result[:,7:38],axis=0).max()),
         'source_foot_landmarks':'Heel/toe sole surface points from paired G1 spheres; upstream ankle marker is not a heel',
         'collision_backtracking':a.collision_backtracking,
+        'wrist_reference_limit_deg':a.wrist_reference_limit_deg,'paired_hand_collision_centroids':bool(source_hand_centers),
         'source_model_sha256':meta['source_sha256'],'policy_evaluation':False,'training_approved':False,
         'scope':'Bounded OmniRetarget custom-data smoke only; not full climbing, inverse-dynamics feasibility or policy execution.'}
     (a.out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2),flush=True)
