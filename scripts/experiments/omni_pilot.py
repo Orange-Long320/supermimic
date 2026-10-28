@@ -71,6 +71,7 @@ def prepare(inputs,out,include_task_variants=False):
             if (sha(reference_path)!=exported['source_reference_sha256']
                 or not exported.get('resampling_velocity',{}).get('passed')
                 or exported['resampling_velocity']['maximum_dense_joint_velocity_ratio']>1.
+                or exported['resampling_geometry']['model_sha256']!=scene['model_sha256']
                 or not exported['resampling_geometry']['passed']):
                 raise ValueError('Task dataset requires bound dense geometry and velocity export evidence')
         with np.load(source/'reference-qpos.npz',allow_pickle=False) as z:q=z['qpos'].copy();v=z['qvel'].copy()

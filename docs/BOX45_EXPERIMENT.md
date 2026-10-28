@@ -356,3 +356,6 @@
 - 既有重采样模式新增明确traverse/return类型及原父参考路径；完整落地任务必须覆盖原源最后一帧。新prepare仅显式--include-task-variants可接纳源0完整任务前缀，校核不可变完整父源hash/原native模型/场景/0.9界/完整区间及密集速度与几何证据，计数仍按独立源家族；末2秒须参考静止、rootup≥.9、两完整物理足位于正确箱顶或较低落地面。此为参考运动学门槛，不冒充真实受力或策略成功；新选项尚待服务器验证。
 - 后续训练可显式--mixed-start-fraction .5复用原forced_frame hook：一半环境按家族均衡固定源0起步，另一半用既有return sampler覆盖攀爬/箱顶保持/落地。记录固定env/clip/frame分配文件及CLI，强制起步与其他采样分别记录；训练中箱顶初始化只用于学习，绝不能作为完整成功证据。实际评测仍一律源0/连续执行/无后续重置。新场景先--weights-only capacity新建优化器/回放/计数器，普通full resume同场景要求不变。新选项尚未GPU验证。
 - 为真实手撑验收新增可选--record-contact-forces，调用已核对安装版mujoco_warp.contact_force API读取执行引擎的真实接触wrench/geom/点/法线，保存在contacts-actual.npz；不按目标或原生重建猜测手部承重。校核所有机器人接触力之和与真实qfrc_constraint根平移3分量误差，记录hash与preintegration力/postintegration位姿的时间对齐。默认关闭保持旧采集行为；新提取尚待0.1秒测量预飞，不放宽任何实际物理门槛。
+
+- 新真实接触提取预飞`omni_contact_record_preflight_20261029_r1/capture`已在GPU2执行0.1秒/20物理步退出0，读取引擎actual contact wrench成功；机器人接触力合计与真实根平移qfrc_constraint最大差0.00062561N，原1mN读数核对通过，外力0/重置0，policy_alone=true。只验证测量，不是动作成功。为长序列的大接触冲量，后续同时记录绝对与相对浮点读数误差（每步1mN或1e-5相对容差）；仅测量一致性，不改物理力矩/接触上限。原预飞原始数据/报告不覆盖。
+- 任务数据prepare再校核导出几何proof的native model SHA与任务scene绑定，避免源hash正确但碰撞模型错配。准备部署本轮严格任务变体验证，所有新选项仍须实际回归后才用于训练。

@@ -98,7 +98,7 @@ def main():
         np.savez(args.out/'initial-state.npz',state=np.r_[initial_q,initial_v][None],qpos=initial_q,qvel=initial_v)
         prefix_actions=None;prefix_details=None;prefix_errors=[];observation_trace=[]
         residual_actions=None;residual_details=None
-        contact_offsets=[0];contact_geoms=[];contact_wrenches=[];contact_points=[];contact_normals=[];contact_errors=[]
+        contact_offsets=[0];contact_geoms=[];contact_wrenches=[];contact_points=[];contact_normals=[];contact_errors=[];contact_relative_errors=[]
         if args.record_contact_forces:
             import warp as wp
             import mujoco_warp as mjwarp
@@ -156,7 +156,9 @@ def main():
                 if np.any(geoms<0) or np.any(geoms>=model.ngeom):raise RuntimeError('Unsupported flexible contact geometry')
                 sign=robot_geometry[geoms[:,1]].astype(float)-robot_geometry[geoms[:,0]].astype(float)
                 total=(wrench[:,:3]*sign[:,None]).sum(axis=0)
-                contact_errors.append(float(abs(total-constraint_forces[-1][:3]).max()))
+                error=float(abs(total-constraint_forces[-1][:3]).max())
+                contact_errors.append(error)
+                contact_relative_errors.append(error/max(1.,float(abs(total).max()),float(abs(constraint_forces[-1][:3]).max())))
                 contact_offsets.append(contact_offsets[-1]+count)
                 contact_geoms.append(geoms);contact_wrenches.append(wrench);contact_points.append(points);contact_normals.append(normals)
             # Use a separate native data object: Warp geometry caches precede
@@ -232,7 +234,9 @@ def main():
             'reference_frame_count':int(cmd.library.clip_len[0]),
             'actual_contact_forces_recorded':args.record_contact_forces,
             'contact_force_root_translation_maximum_error_n':max(contact_errors) if contact_errors else None,
-            'contact_force_balance_verified':bool(contact_errors and max(contact_errors)<=1e-3),
+            'contact_force_root_translation_maximum_relative_error':max(contact_relative_errors) if contact_relative_errors else None,
+            'contact_force_balance_verified':bool(contact_errors and all(e<=1e-3 or r<=1e-5 for e,r in zip(contact_errors,contact_relative_errors))),
+            'contact_measurement_roundoff_tolerance':{'absolute_n':1e-3,'relative':1e-5,'scope':'Readout consistency only; physical force limits remain unchanged'},
             'contact_trace_sha256':hashlib.sha256((args.out/'contacts-actual.npz').read_bytes()).hexdigest() if args.record_contact_forces else None,
             'contact_force_state_alignment':'Engine preintegration contact solution; pose trajectory stores the following postintegration state',
             'metric_columns':['com_z','com_vz','H_x','H_y','H_z','com_speed','root_angular_speed',
