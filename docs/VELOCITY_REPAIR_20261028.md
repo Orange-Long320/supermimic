@@ -29,8 +29,12 @@ A/B 固定方案：均恢复原试训最终第 1500 步检查点及优化器，s
 - 在各自新采集轨迹上，以同一组起点比较 1/8/32 步实际动作重放。vx RMSE：旧版 0.00710/0.02221/0.31276 m/s，修复版 0.00693/0.02194/0.31592 m/s。WM 权重仍是原最终检查点；修复采样器没有解决长视野模型误差。
 - 32 步末旧版真实平均 vx=0.02242、预测=0.29169；修复版真实=0.02305、预测=0.29635 m/s。不能将本次采样验证记为世界模型可靠性通过。
 
-## 有界训练 A/B（待启动）
+## 有界训练 A/B（运行中）
 
 仅用于检验采样修复贡献，已知长视野误差仍大，不进入长训。完整启动脚本位于 `/home/2025-Long.xh/SSD/supermimic-velocity-sampler-ab-20261028-r1.sh`，每支运行目录将保存副本、源码 SHA256、环境、数据 SHA256、输入权重 SHA256、会话 PID、GPU、显存曲线及评测。
 
-预定目录 `logs/x2_velocity_sampler_ab_old_20261028_r1` 和 `logs/x2_velocity_sampler_ab_fixed_20261028_r1`，均相对专用数据根目录。GPU0 的其他用户任务已避开，启动前再次检查 GPU1/2。
+运行目录 `logs/x2_velocity_sampler_ab_old_20261028_r1` 和 `logs/x2_velocity_sampler_ab_fixed_20261028_r1`，均相对专用数据根目录。2026-10-28 21:18:34（Asia/Shanghai）启动；启动前 GPU1/2 空闲，GPU0 为其他用户任务，未干预。
+
+- 旧版：GPU1，tmux `velocity-sampler-ab-old`，shell PID 936902，训练 PID 936956。
+- 修复版：GPU2，tmux `velocity-sampler-ab-fixed`，shell PID 936906，训练 PID 936955。
+- 两支均已核实恢复至第 1500 步；当前尚无最终策略评测。启动前记录回档点 `53dabc9`，部署训练源码 `7b1f7fc`，基线差异如上。服务器 Git 备份 `SSD/supermimic-velocity-repair-pretrain.bundle`。
