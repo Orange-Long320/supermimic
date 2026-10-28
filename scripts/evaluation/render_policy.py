@@ -22,6 +22,7 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--npz-dir", type=Path)
     p.add_argument("--no-label", action="store_true", help="For ffmpeg builds without drawtext")
+    p.add_argument("--no-reference", action="store_true", help="Show only the physical policy robot")
     p.add_argument(
         "--continue-after-failure", action="store_true",
         help="Diagnostic only: suppress resets and continue the policy after failure; hold the last reference pose at clip end.",
@@ -106,7 +107,7 @@ def main():
         except ImportError as error:
             raise RuntimeError("Install ffmpeg or imageio-ffmpeg to record video") from error
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    label = "Solid = policy (physics)   Cyan ghost = reference"
+    label = "Policy (physics)" if args.no_reference else "Solid = policy (physics)   Cyan ghost = reference"
     if args.continue_after_failure:
         label += " | DIAGNOSTIC: resets suppressed"
     label_args = (
@@ -210,7 +211,7 @@ def main():
                         ghost_scene,
                     )
                     scene = renderer.scene
-                    for i in range(ghost_scene.ngeom):
+                    for i in range(0 if args.no_reference else ghost_scene.ngeom):
                         src = ghost_scene.geoms[i]
                         if (
                             src.objtype != mujoco.mjtObj.mjOBJ_GEOM
@@ -286,13 +287,18 @@ def main():
                 "end_reason": end_reason,
                 "reference_after_clip_end": "hold_final_pose" if args.continue_after_failure else "stop_recording",
                 "mean_step_reward": sum(rewards) / max(1, len(rewards)),
-                "render_mode": "reference_ghost_overlay",
+                "render_mode": "policy_only" if args.no_reference else "reference_ghost_overlay",
                 "camera": {
                     "distance": args.distance, "azimuth": args.azimuth, "elevation": -15,
                 },
-                "reference_rgba": ghost_rgba.tolist(),
+                "reference_rgba": None if args.no_reference else ghost_rgba.tolist(),
+                "reference_visible": not args.no_reference,
                 "reference_alignment": "Original world coordinates plus environment origin; no per-frame pose alignment or translation offset.",
-                "note": "Solid robot: closed-loop physical policy. Cyan translucent robot: kinematic reference, visual only and absent from physics contacts. One shared scene and camera. This video covers one excerpt, not the full benchmark.",
+                "note": (
+                    "Closed-loop physical policy only; kinematic reference overlay hidden. Same camera framing as the overlay version."
+                    if args.no_reference else
+                    "Solid robot: closed-loop physical policy. Cyan translucent robot: kinematic reference, visual only and absent from physics contacts. One shared scene and camera. This video covers one excerpt, not the full benchmark."
+                ),
             },
             indent=2,
         )
