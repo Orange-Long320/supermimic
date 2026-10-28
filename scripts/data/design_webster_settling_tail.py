@@ -31,7 +31,12 @@ def main():
     from supermimic.robots.dimensions import PROFILE
     model=load_g1_model();data=mujoco.MjData(model)
     with np.load(args.source) as z:source={k:z[k].copy() for k in z.files}
-    with np.load(args.standing_trajectory) as z:end=z['state'][-1,:model.nq].copy()
+    with np.load(args.standing_trajectory) as z:
+        if 'qpos' in z:
+            standing=z['qpos'].copy()
+        else:
+            standing=z['state'][-1,:model.nq].copy()
+    if standing.shape != (model.nq,):raise ValueError('Standing pose has the wrong shape')
     fps=float(source['fps'].reshape(-1)[0]);root=source['body_names'].tolist().index(model.body(int(model.jnt_bodyid[0])).name)
     low,high=model.jnt_range[1:].T
     limits=np.array([PROFILE['velocity_limit'][n] for n in PROFILE['joint_names']])
@@ -48,6 +53,10 @@ def main():
     for frame in args.start_frames:
         if not 0<=frame<len(source['joint_pos']):raise ValueError('Start frame outside source')
         initial=np.r_[source['body_pos_w'][frame,root],source['body_quat_w'][frame,root],source['joint_pos'][frame]].astype(float)
+        end=standing.copy()
+        # A global horizontal translation preserves the standing geometry while
+        # avoiding an arbitrary displacement inherited from its calibration run.
+        end[:2]=initial[:2]
         rotation=Rotation.from_quat(initial[[4,5,6,3]])
         velocity=np.r_[source['body_lin_vel_w'][frame,root],rotation.inv().apply(source['body_ang_vel_w'][frame,root]),source['joint_vel'][frame]]
         delta=np.zeros(model.nv);mujoco.mj_differentiatePos(model,delta,1.,initial,end)
