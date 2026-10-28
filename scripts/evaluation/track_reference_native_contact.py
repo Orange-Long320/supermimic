@@ -30,6 +30,7 @@ def main():
     p.add_argument('--entry-root-velocity',type=float,nargs=6,default=[0.]*6,
                    help='Initial-only free-root velocity perturbation: world xyz then local angular xyz')
     p.add_argument('--entry-root-z-offset',type=float,default=0.,help='Recorded initial-only root height offset for contact initialization')
+    p.add_argument('--support-surface-heights',type=float,nargs='+',help='Explicit horizontal support heights for planned contact recovery')
     p.add_argument('--hard-grounded-com',action='store_true',help='Require the primary COM task when ground contact exists; reject physically infeasible requests')
     p.add_argument('--joint-task-weight',type=float,default=.01,help='Posture task priority; design-controller default is weak, reference tracking may require stronger posture control')
     args=p.parse_args();args.out.mkdir(parents=True,exist_ok=False)
@@ -113,7 +114,11 @@ def main():
                         adr,nv=m.mesh_vertadr[k],m.mesh_vertnum[k];vertices=m.mesh_vert[adr:adr+nv]
                     else:raise ValueError('Unsupported planned foot geometry')
                     world=vertices@desired.geom_xmat[g].reshape(3,3).T+desired.geom_xpos[g]
-                    if world[:,2].min()<.003:planned.add(x)
+                    height=float(world[:,2].min())
+                    if args.support_surface_heights is None:
+                        if height<.003:planned.add(x)
+                    elif min(abs(height-h) for h in args.support_surface_heights)<.003:
+                        planned.add(x)
         else:planned=contact_bodies
         controller.additional_support_feet=[(x,desired.xpos[x].copy(),Rotation.from_matrix(desired.xmat[x].reshape(3,3)))
             for x in feet.values() if x!=body and x in planned]
