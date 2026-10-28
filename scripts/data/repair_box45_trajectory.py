@@ -24,6 +24,9 @@ def main():
     p.add_argument('--foot-margin',type=float,default=0.0)
     p.add_argument('--free-torso',action='store_true',help='Optimize root orientation and waist joints for COM balance')
     p.add_argument('--natural-swing',action='store_true',help='Advance up to the box edge during lift instead of lifting vertically in place')
+    p.add_argument('--standing-endpoint',type=Path,help='Checked box-top equilibrium; align only its horizontal foot-hull centre')
+    p.add_argument('--constraint-rounds',type=int,default=1,help='Augmented-Lagrangian rounds for native clearance constraints')
+    p.add_argument('--static-balance',action='store_true',help='Constrain COM projection inside planned support polygon with 5mm margin')
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
     from supermimic.robots.paths import select_robot
@@ -35,6 +38,7 @@ def main():
     from scipy.optimize import least_squares
     from scipy.sparse import lil_matrix
     from scipy.spatial.transform import Rotation
+    from scipy.spatial import ConvexHull
     from supermimic.robots.assets import get_spec
     from supermimic.envs.box_scene import FixedBox
     from supermimic.data.physics_motion import differentiate_qpos,export_qpos_motion
@@ -69,6 +73,26 @@ def main():
         targets.append([(d.xpos[b].copy(),d.xmat[b].reshape(3,3).copy()) for b in bodies])
         com.append(d.subtree_com[root].copy())
     com=gaussian_filter1d(np.array(com),2,axis=0,mode='nearest')
+    standing=None;end_blend=np.zeros(n)
+    if a.standing_endpoint:
+        standing=np.load(a.standing_endpoint)['qpos'].copy()
+        if standing.shape!=(m.nq,):raise ValueError('Standing dimension differs')
+        def hull_center(q):
+            d.qpos[:]=q;mujoco.mj_kinematics(m,d);points=[]
+            for g in geoms:
+                if not m.geom(g).name.startswith('foot_'):continue
+                mesh=m.geom_dataid[g];adr,count=m.mesh_vertadr[mesh],m.mesh_vertnum[mesh]
+                points.extend(m.mesh_vert[adr:adr+count]@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])
+            points=np.asarray(points);return (points[:,:2].min(0)+points[:,:2].max(0))/2
+        standing[:2]+=hull_center(original[end])-hull_center(standing)
+        end_blend=np.clip((times-(times[-1]-1.4))/1.4,0,1)
+        end_blend=end_blend**3*(10+end_blend*(-15+6*end_blend))
+        d.qpos[:]=standing;mujoco.mj_kinematics(m,d);mujoco.mj_comPos(m,d)
+        endpoint_feet=[(d.xpos[b].copy(),d.xmat[b].reshape(3,3).copy()) for b in bodies]
+        for i,w in enumerate(end_blend):
+            for j,(ep,er) in enumerate(endpoint_feet):
+                tp,tr=targets[i][j];delta=(Rotation.from_matrix(tr).inv()*Rotation.from_matrix(er)).as_rotvec()
+                targets[i][j]=(tp+(ep-tp)*w,(Rotation.from_matrix(tr)*Rotation.from_rotvec(delta*w)).as_matrix())
     if a.natural_swing:
         timing=json.loads((Path(__file__).resolve().parents[2]/'configs/video/box45-contacts.json').read_text())
         scale=json.loads((a.source.parent/'fit.json').read_text())['time_scale']
@@ -126,18 +150,59 @@ def main():
             else:point=right+((right+left_top)/2-right)*ease((t-ld)/1.)
             com[i,:2]=point
         com_weight=500.
+    balance_normals=[];balance_offsets=[];max_faces=0
+    if a.static_balance:
+        if not a.support_centred:raise ValueError('Static balance requires explicit support phases')
+        foot_local={b:[] for b in bodies}
+        d.qpos[:]=original[0];mujoco.mj_kinematics(m,d)
+        for g in geoms:
+            b=int(m.geom_bodyid[g])
+            if b not in foot_local or not m.geom(g).name.startswith('foot_'):continue
+            mesh=m.geom_dataid[g]
+            if m.geom_type[g]==mujoco.mjtGeom.mjGEOM_BOX:
+                local=np.array([(x,y,z) for x in (-1,1) for y in (-1,1) for z in (-1,1)])*m.geom_size[g]
+            else:
+                adr,count=m.mesh_vertadr[mesh],m.mesh_vertnum[mesh];local=m.mesh_vert[adr:adr+count]
+            world=local@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g]
+            foot_local[b].extend((world-d.xpos[b])@d.xmat[b].reshape(3,3))
+        for i,t in enumerate(times):
+            points=[]
+            for j,(side,b) in enumerate(zip(('left','right'),bodies)):
+                lift,land=[timing[side][k]*scale for k in ('lift_seconds','land_seconds')]
+                if lift<t<land:continue
+                position,rotation=targets[i][j]
+                world=np.asarray(foot_local[b])@rotation.T+position
+                inside=(world[:,0]>=box.front_x)&(world[:,0]<=box.front_x+box.depth)&(abs(world[:,1]-box.center_y)<=box.width/2)
+                mask=((~inside)&(abs(world[:,2])<.012))|(inside&(abs(world[:,2]-box.height)<.012))
+                points.extend(world[mask,:2])
+            hull=ConvexHull(np.asarray(points))
+            balance_normals.append(hull.equations[:,:2]);balance_offsets.append(hull.equations[:,2])
+            max_faces=max(max_faces,len(hull.equations))
+        width+=max_faces
     smooth=gaussian_filter1d(original[:end+1,7:],fps*.15,axis=0,mode='nearest')
     rotation=Rotation.from_quat(original[:end+1,[4,5,6,3]])
     reference_rotation=rotation[0]
     rotvec=gaussian_filter1d((reference_rotation.inv()*rotation).as_rotvec(),fps*.15,axis=0,mode='nearest')
     base=original[indices].copy();base[:,7:]=smooth[indices]
     base[:,3:7]=(reference_rotation*Rotation.from_rotvec(rotvec[indices])).as_quat()[:,[3,0,1,2]]
+    if standing is not None:
+        base[:,7:]+=end_blend[:,None]*(standing[7:]-base[:,7:])
+        rbase=Rotation.from_quat(base[:,[4,5,6,3]])
+        correction=(rbase.inv()*Rotation.from_quat(standing[[4,5,6,3]])).as_rotvec()
+        base[:,3:7]=(rbase*Rotation.from_rotvec(correction*end_blend[:,None])).as_quat()[:,[3,0,1,2]]
     initial=np.c_[original[indices,:3],np.zeros((n,nr)),original[indices][:,qcols]]
     reference=gaussian_filter1d(initial,2,axis=0,mode='nearest')
+    if standing is not None:
+        reference[:,:3]+=end_blend[:,None]*(standing[:3]-reference[:,:3])
+        reference[:,3+nr:]+=end_blend[:,None]*(standing[qcols]-reference[:,3+nr:])
     joint_ids=np.array([m.joint(s).id for s in leg_names])
     ranges=m.jnt_range[joint_ids];mid=ranges.mean(1);radius=np.diff(ranges,axis=1)[:,0]*.9/2
     low=np.tile(np.r_[[-.5,-.7,.25],np.full(nr,-.6),mid-radius+1e-6],(n,1))
     high=np.tile(np.r_[[1.5,.7,1.7],np.full(nr,.6),mid+radius-1e-6],(n,1))
+    if standing is not None:
+        endpoint=np.r_[standing[:3],np.zeros(nr),standing[qcols]]
+        if np.any(endpoint<low[-1]) or np.any(endpoint>high[-1]):raise ValueError('Standing outside optimization bounds')
+        low[-1]=endpoint-1e-9;high[-1]=endpoint+1e-9
     posture_scale=np.r_[np.full(3,5.),np.full(nr,5.),np.full(len(qcols),.25)]
     acceleration_scale=np.r_[np.full(3,1.),np.full(nr,.2),np.full(len(qcols),.08)]/dt**2
     boundary_scale=np.r_[np.full(3,10.),np.ones(nv-3)]/dt
@@ -147,11 +212,12 @@ def main():
     (a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     (a.out/'launch.json').write_text(json.dumps({'argv':[sys.executable,*sys.argv],'pid':os.getpid(),'source_sha256':hashlib.sha256(a.source.read_bytes()).hexdigest()},indent=2)+'\n')
     cache={};calls=0
+    penalty=1500.**2;lagrange=np.zeros((n,2*len(geoms)+max_faces));constraint_history=[]
 
     def evaluate(flat):
         nonlocal calls
         if 'x' in cache and np.array_equal(flat,cache['x']):return cache['r'],cache['j']
-        x=flat.reshape(n,nv);r=np.zeros(total);jac=lil_matrix((total,n*nv))
+        x=flat.reshape(n,nv);r=np.zeros(total);jac=lil_matrix((total,n*nv));violations=np.zeros_like(lagrange)
         for i in range(n):
             row=i*width;cols=slice(i*nv,(i+1)*nv)
             q=base[i].copy();q[:3]=x[i,:3];q[qcols]=x[i,3+nr:]
@@ -181,17 +247,32 @@ def main():
             mujoco.mj_jacSubtreeCom(m,d,jp,root)
             r[row:row+2]=(d.subtree_com[root,:2]-com[i,:2])*com_weight
             jac[row:row+2,cols]=jp[:2]@mapping*com_weight;row+=2
+            com_jac=jp[:2]@mapping
+            collision_column=0
             for g in geoms:
                 is_foot=m.geom(g).name.startswith('foot_')
-                for obstacle,margin in [(box_id,a.foot_margin if is_foot else .006),(floor_id,max(.001,a.foot_margin) if is_foot else .006)]:
+                foot_margin=a.foot_margin*(1-end_blend[i])-.001*end_blend[i] if standing is not None else a.foot_margin
+                for obstacle,margin in [(box_id,foot_margin if is_foot else .006),(floor_id,max(.001,foot_margin) if is_foot and standing is None else foot_margin if is_foot else .006)]:
                     dist=mujoco.mj_geomDistance(m,d,g,obstacle,.05,witness)
-                    if dist<margin:
-                        r[row]=(margin-dist)*1500
+                    gap=margin-dist;violations[i,collision_column]=gap
+                    shifted=gap+lagrange[i,collision_column]/penalty
+                    if shifted>0:
+                        r[row]=shifted*np.sqrt(penalty)
                         if abs(dist)>1e-9:
                             normal=(witness[3:]-witness[:3])/dist
                             mujoco.mj_jac(m,d,jp,jr,witness[:3],int(m.geom_bodyid[g]))
-                            jac[row,cols]=(normal@jp@mapping)*1500
-                    row+=1
+                            jac[row,cols]=(normal@jp@mapping)*np.sqrt(penalty)
+                    row+=1;collision_column+=1
+            for k in range(max_faces):
+                if k<len(balance_normals[i]):
+                    normal=balance_normals[i][k]
+                    gap=float(normal@d.subtree_com[root,:2]+balance_offsets[i][k]+.005)
+                    shifted=gap+lagrange[i,collision_column]/penalty
+                    violations[i,collision_column]=gap
+                    if shifted>0:
+                        r[row]=shifted*np.sqrt(penalty);jac[row,cols]=normal@com_jac*np.sqrt(penalty)
+                else:violations[i,collision_column]=-1.
+                row+=1;collision_column+=1
             assert row==(i+1)*width
         row=n*width
         for i in range(1,n-1):
@@ -205,10 +286,11 @@ def main():
             jac[row:row+nv,slice(last*nv,(last+1)*nv)]=np.diag(boundary_scale);row+=nv
         calls+=1
         if calls%5==0:print(f'evaluation={calls} cost={np.dot(r,r)/2:.6f} max_residual={abs(r).max():.6f}',flush=True)
-        cache.update(x=flat.copy(),r=r,j=jac.tocsr())
+        cache.update(x=flat.copy(),r=r,j=jac.tocsr(),violations=violations)
         return r,cache['j']
 
-    start=np.clip(initial,low+1e-8,high-1e-8).ravel()
+    epsilon=np.minimum(1e-8,(high-low)/4)
+    start=np.clip(initial,low+epsilon,high-epsilon).ravel()
     if a.resume:
         saved=np.load(a.resume)
         if 'x' in saved:
@@ -222,7 +304,7 @@ def main():
             start=np.c_[prior[:,:3],delta,prior[:,qcols]].ravel()
         if prior_hash!=hashlib.sha256(a.source.read_bytes()).hexdigest():raise ValueError('Resume source differs')
         if start.shape!=initial.ravel().shape:raise ValueError('Resume dimension differs')
-        projected=np.clip(start,low.ravel()+1e-8,high.ravel()-1e-8)
+        projected=np.clip(start,(low+epsilon).ravel(),(high-epsilon).ravel())
         (a.out/'resume-projection.json').write_text(json.dumps({'maximum_initial_guess_projection':float(abs(projected-start).max()),'note':'Initial guess only; final trajectory is optimized under bounds and independently audited'},indent=2)+'\n')
         start=projected
     if a.check_jacobian:
@@ -237,10 +319,19 @@ def main():
         (a.out/'jacobian-check.json').write_text(json.dumps(report,indent=2)+'\n');print(report)
         if not report['passed']:raise SystemExit('Jacobian check failed')
         return
-    result=least_squares(lambda x:evaluate(x)[0],start,jac=lambda x:evaluate(x)[1],bounds=(low.ravel(),high.ravel()),max_nfev=a.max_nfev,ftol=1e-6,xtol=1e-6,gtol=1e-6,verbose=1,tr_solver='lsmr',x_scale='jac')
+    for outer in range(a.constraint_rounds):
+        result=least_squares(lambda x:evaluate(x)[0],start,jac=lambda x:evaluate(x)[1],bounds=(low.ravel(),high.ravel()),max_nfev=a.max_nfev,ftol=1e-6,xtol=1e-6,gtol=1e-6,verbose=1,tr_solver='lsmr',x_scale='jac')
+        evaluate(result.x);gap=cache['violations'].copy()
+        violation=float(max(0,gap.max()))
+        constraint_history.append({'round':outer,'maximum_clearance_violation_m':violation,'cost':result.cost,'nfev':result.nfev})
+        print('constraint_round',constraint_history[-1],flush=True)
+        if violation<.0005:break
+        lagrange=np.maximum(0,lagrange+penalty*gap);penalty*=10
+        start=result.x.copy();cache.clear()
     solved=result.x.reshape(n,nv);knots=base.copy();knots[:,:3]=solved[:,:3];knots[:,qcols]=solved[:,3+nr:]
     if nr:knots[:,3:7]=(Rotation.from_quat(base[:,[4,5,6,3]])*Rotation.from_rotvec(solved[:,3:6])).as_quat()[:,[3,0,1,2]]
     np.savez_compressed(a.out/'solver-knots.npz',x=result.x,indices=indices,source_sha256=hashlib.sha256(a.source.read_bytes()).hexdigest())
+    if standing is not None:np.savez(a.out/'standing-target.npz',qpos=standing,source_sha256=hashlib.sha256(a.standing_endpoint.read_bytes()).hexdigest())
     dense_times=np.arange(end+1)/fps
     bc=([(1,np.zeros(m.nq-4)),(2,np.zeros(m.nq-4))],[(1,np.zeros(m.nq-4)),(2,np.zeros(m.nq-4))])
     scalars=np.c_[knots[:,:3],knots[:,7:]]
@@ -254,7 +345,7 @@ def main():
     velocity=differentiate_qpos(m,q,fps)
     np.savez_compressed(a.out/'aligned-diagnostic.npz',qpos=q,fps=fps,box_center=center,box_half_size=half)
     export_qpos_motion(m,q,a.out/'motion-fk.npz',fps,qvel=velocity,source=a.source)
-    report={'cost':result.cost,'optimality':result.optimality,'nfev':result.nfev,'solver_success':bool(result.success),'frames':len(q),'peak_root_acceleration_m_s2':float(np.linalg.norm(np.diff(q[:,:3],n=2,axis=0)*fps**2,axis=1).max()),'peak_joint_acceleration_rad_s2':float(abs(np.diff(q[:,7:],n=2,axis=0)*fps**2).max()),'box':{'front_x':box.front_x,'center_y':box.center_y,'depth':box.depth,'width':box.width,'height':box.height,'friction':box.friction},'training_approved':False}
+    report={'cost':result.cost,'optimality':result.optimality,'nfev':result.nfev,'solver_success':bool(result.success),'constraint_history':constraint_history,'frames':len(q),'peak_root_acceleration_m_s2':float(np.linalg.norm(np.diff(q[:,:3],n=2,axis=0)*fps**2,axis=1).max()),'peak_joint_acceleration_rad_s2':float(abs(np.diff(q[:,7:],n=2,axis=0)*fps**2).max()),'box':{'front_x':box.front_x,'center_y':box.center_y,'depth':box.depth,'width':box.width,'height':box.height,'friction':box.friction},'training_approved':False}
     (a.out/'repair.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
 
 
