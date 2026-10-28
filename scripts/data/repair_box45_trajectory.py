@@ -19,6 +19,9 @@ def main():
     p.add_argument('--max-nfev',type=int,default=60)
     p.add_argument('--check-jacobian',action='store_true')
     p.add_argument('--resume',type=Path,help='Continue the same source/objective from saved solver knots')
+    p.add_argument('--support-centred',action='store_true',help='Replace inherited COM drift with support-phase centres')
+    p.add_argument('--knot-stride',type=int,default=5)
+    p.add_argument('--foot-margin',type=float,default=0.0)
     a=p.parse_args()
     if a.out.exists():p.error('output exists')
     from supermimic.robots.paths import select_robot
@@ -41,8 +44,9 @@ def main():
     # the repeated tail is restored after a C2 stationary endpoint is formed.
     end=len(original)-round(3*fps)-1
     if end<20:raise ValueError('Expected moving segment plus declared 3s hold')
-    indices=np.unique(np.r_[np.arange(0,end+1,5),end]).astype(int)
-    times=indices/fps;n=len(indices);dt=5/fps
+    if a.knot_stride<1 or a.foot_margin<0:raise ValueError('Invalid knot stride or foot margin')
+    indices=np.unique(np.r_[np.arange(0,end+1,a.knot_stride),end]).astype(int)
+    times=indices/fps;n=len(indices);dt=a.knot_stride/fps
     if not np.allclose(np.diff(times),dt):raise ValueError('Moving endpoint must fall on 10Hz knot grid')
     spec=get_spec();box.add_to_spec(spec)
     spec.worldbody.add_geom(name='repair_floor',type=mujoco.mjtGeom.mjGEOM_PLANE,size=(0,0,.05),contype=1,conaffinity=1)
@@ -61,6 +65,34 @@ def main():
         targets.append([(d.xpos[b].copy(),d.xmat[b].reshape(3,3).copy()) for b in bodies])
         com.append(d.subtree_com[root].copy())
     com=gaussian_filter1d(np.array(com),2,axis=0,mode='nearest')
+    com_weight=40.
+    if a.support_centred:
+        def sole_center(frame,side):
+            d.qpos[:]=original[frame];mujoco.mj_kinematics(m,d);points=[]
+            for g in geoms:
+                if not m.geom(g).name.startswith('foot_') or side not in m.body(int(m.geom_bodyid[g])).name:continue
+                mesh=m.geom_dataid[g]
+                if m.geom_type[g]==mujoco.mjtGeom.mjGEOM_BOX:
+                    local=np.array([(x,y,z) for x in (-1,1) for y in (-1,1) for z in (-1,1)])*m.geom_size[g]
+                else:
+                    adr,count=m.mesh_vertadr[mesh],m.mesh_vertnum[mesh];local=m.mesh_vert[adr:adr+count]
+                points.extend(local@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])
+            points=np.asarray(points);near=points[points[:,2]<points[:,2].min()+.012]
+            return (near[:,:2].min(0)+near[:,:2].max(0))/2
+        left=sole_center(0,'left');right_ground=sole_center(0,'right')
+        right=sole_center(end,'right');left_top=sole_center(end,'left')
+        timing=json.loads((Path(__file__).resolve().parents[2]/'configs/video/box45-contacts.json').read_text())
+        scale=json.loads((a.source.parent/'fit.json').read_text())['time_scale']
+        rl,rd,ll,ld=[timing[s][k]*scale for s,k in [('right','lift_seconds'),('right','land_seconds'),('left','lift_seconds'),('left','land_seconds')]]
+        ease=lambda u:(lambda t:t**3*(10+t*(-15+6*t)))(np.clip(u,0,1))
+        for i,t in enumerate(times):
+            if t<rl:point=(left+right_ground)/2+(left-(left+right_ground)/2)*ease(t/(rl*.9))
+            elif t<rd:point=left
+            elif t<ll:point=left+(right-left)*ease((t-rd)/(ll-rd))
+            elif t<ld:point=right
+            else:point=right+((right+left_top)/2-right)*ease((t-ld)/1.)
+            com[i,:2]=point
+        com_weight=500.
     smooth=gaussian_filter1d(original[:end+1,7:],fps*.15,axis=0,mode='nearest')
     rotation=Rotation.from_quat(original[:end+1,[4,5,6,3]])
     reference_rotation=rotation[0]
@@ -105,11 +137,11 @@ def main():
                 r[row:row+3]=error*100
                 jac[row:row+3,cols]=inverse@target_r.T@jr[:,vcols]*100;row+=3
             mujoco.mj_jacSubtreeCom(m,d,jp,root)
-            r[row:row+2]=(d.subtree_com[root,:2]-com[i,:2])*40
-            jac[row:row+2,cols]=jp[:2,vcols]*40;row+=2
+            r[row:row+2]=(d.subtree_com[root,:2]-com[i,:2])*com_weight
+            jac[row:row+2,cols]=jp[:2,vcols]*com_weight;row+=2
             for g in geoms:
                 is_foot=m.geom(g).name.startswith('foot_')
-                for obstacle,margin in [(box_id,0.0 if is_foot else .006),(floor_id,.001 if is_foot else .006)]:
+                for obstacle,margin in [(box_id,a.foot_margin if is_foot else .006),(floor_id,max(.001,a.foot_margin) if is_foot else .006)]:
                     dist=mujoco.mj_geomDistance(m,d,g,obstacle,.05,witness)
                     if dist<margin:
                         r[row]=(margin-dist)*1500
