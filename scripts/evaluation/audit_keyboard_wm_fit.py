@@ -1,4 +1,4 @@
-"""Server-only controlled audit: fixed actor, held-out dynamics, unchanged k=8/H=32.
+"""Server-only controlled audit: fixed actor and held-out dynamics predictions.
 
 Compare motion-only and mixed-interface dynamics refits from one checkpoint.
 This diagnoses fit/coverage; it does not update or certify a deployed controller.
@@ -48,8 +48,11 @@ def main():
     from supermimic.locomotion.task import measured_velocity
     from supermimic.world_model.state_spec import StateSpecCfg
     from supermimic.world_model.world_model import WorldModel, WorldModelCfg
+    from mjlab.utils.torch import configure_torch_backends
 
     torch.set_num_threads(2)
+    # make_env configures TF32. Offline-window runs must use the same backend.
+    configure_torch_backends()
     torch.cuda.set_per_process_memory_fraction(.65, 0)
     policy, saved = load_policy_from_checkpoint(a.checkpoint, 'cuda:0')
     policy.requires_grad_(False)
@@ -62,7 +65,8 @@ def main():
                       later_checkpoint=str(a.later_checkpoint), later_sha256=digest(a.later_checkpoint),
                       manifest_sha256=digest(a.dataset / 'manifest.json'),
                       saved_iteration=ck['iteration'], saved_updates=ck['num_updates'],
-                      protocol='Fixed actor. Separate seed 0/7 simulator runs; DR, reset/observation/action noise enabled. No reset-crossing windows. Refit only dynamics on 8-step state loss; held-out 1/8/32-step evaluation. No policy/critic/termination updates.',
+                      matmul_precision=torch.backends.cuda.matmul.fp32_precision,
+                      protocol=f'Fixed actor. Separate seed 0/7 simulator runs; DR, reset/observation/action noise enabled. No reset-crossing windows. Refit only dynamics on {a.fit_window}-step state loss; held-out 1/8/32-step evaluation. No policy/critic/termination updates.',
                       fit_steps=a.fit_steps, fit_batch=a.batch_size, fit_window=a.fit_window,
                       fit_lr=saved['wm_trainer']['lr'])
     (a.out / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
