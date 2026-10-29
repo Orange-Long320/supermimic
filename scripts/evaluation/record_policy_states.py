@@ -28,6 +28,7 @@ def main():
     p.add_argument('--hold-last-reference',action='store_true',help='Ignore clip-end timeout and hold its last reference state; original physical failures still stop capture')
     p.add_argument('--record-observations',action='store_true')
     p.add_argument('--record-contact-forces',action='store_true',help='Record actual engine contact wrenches with the installed MuJoCo-Warp extraction API')
+    p.add_argument('--record-solver-jacobian',action='store_true',help='Read-only diagnostic: save actual solver root Jacobian rows/forces to investigate contact-force readout differences')
     p.add_argument('--clip-servo-targets',action='store_true',help='Diagnostic only: clamp proposed motor position targets to original hard joint ranges; not policy-alone execution')
     p.add_argument('--residual-commands',type=Path,help='Explicit 50 Hz additive action proposal; marks capture as hybrid control')
     p.add_argument('--prefix-trace',type=Path,help='Directory containing recorded 50 Hz actions and initial native state')
@@ -36,6 +37,7 @@ def main():
     p.add_argument('--prefix-joints',nargs='+',help='Only replace these named joints; default is all joints')
     args=p.parse_args()
     if args.seconds<=0 or args.start_frame<0:p.error('Invalid duration or start frame')
+    if args.record_solver_jacobian and not args.record_contact_forces:p.error('Solver trace requires actual contact-force recording')
     if args.prefix_trace and (args.prefix_until<=0 or args.prefix_blend<0):p.error('Prefix needs positive duration and nonnegative blending')
     if not args.prefix_trace and (args.prefix_until or args.prefix_joints):p.error('Prefix options require a recorded trace')
     if args.residual_commands and (args.prefix_trace or args.start_frame):p.error('Residual proposals require frame zero and no recorded prefix')
@@ -99,6 +101,31 @@ def main():
         prefix_actions=None;prefix_details=None;prefix_errors=[];observation_trace=[]
         residual_actions=None;residual_details=None
         contact_offsets=[0];contact_geoms=[];contact_wrenches=[];contact_points=[];contact_normals=[];contact_errors=[];contact_relative_errors=[]
+        solver_offsets=[0];solver_jacobians=[];solver_forces=[];solver_types=[];solver_ids=[]
+        solver_contact_addresses=[];solver_contact_dims=[];solver_contact_adhesion=[];solver_layouts=set()
+        def read_solver_root_rows():
+            # Decode the installed public Data fields, including both supported
+            # dense and sparse layouts. Never refresh or modify the simulator.
+            if raw_data.nefc.shape[0]!=1:raise ValueError('Solver trace requires one actual world')
+            number=int(raw_data.nefc.numpy()[0]);raw=raw_data.efc.J.numpy()
+            if not 0<=number<=raw_data.efc.force.shape[1]:raise ValueError('Invalid active constraint count')
+            if raw_data.efc.J_rownnz.shape[1]==0:
+                if raw.shape[0]!=1 or raw.shape[1]<number or raw.shape[2]<3:raise ValueError('Unexpected dense solver Jacobian layout')
+                root_jac=raw[0,:number,:3].copy();solver_layouts.add('dense')
+            else:
+                counts=raw_data.efc.J_rownnz.numpy()[0,:number]
+                addresses=raw_data.efc.J_rowadr.numpy()[0,:number]
+                columns=raw_data.efc.J_colind.numpy()[0,0];values=raw[0,0]
+                root_jac=np.zeros((number,3),dtype=values.dtype);solver_layouts.add('sparse')
+                for row,(address,count) in enumerate(zip(addresses,counts)):
+                    address,count=int(address),int(count)
+                    if address<0 or count<0 or address+count>min(len(columns),len(values)):raise ValueError('Invalid sparse solver row')
+                    cols=columns[address:address+count];vals=values[address:address+count]
+                    mask=(cols>=0)&(cols<3);np.add.at(root_jac[row],cols[mask],vals[mask])
+            solver_offsets.append(solver_offsets[-1]+number);solver_jacobians.append(root_jac)
+            solver_forces.append(raw_data.efc.force.numpy()[0,:number].copy())
+            solver_types.append(raw_data.efc.type.numpy()[0,:number].copy())
+            solver_ids.append(raw_data.efc.id.numpy()[0,:number].copy())
         if args.record_contact_forces:
             import warp as wp
             import mujoco_warp as mjwarp
@@ -161,6 +188,11 @@ def main():
                 contact_relative_errors.append(error/max(1.,float(abs(total).max()),float(abs(constraint_forces[-1][:3]).max())))
                 contact_offsets.append(contact_offsets[-1]+count)
                 contact_geoms.append(geoms);contact_wrenches.append(wrench);contact_points.append(points);contact_normals.append(normals)
+                if args.record_solver_jacobian:
+                    read_solver_root_rows()
+                    solver_contact_addresses.append(raw_data.contact.efc_address.numpy()[:count].copy())
+                    solver_contact_dims.append(raw_data.contact.dim.numpy()[:count].copy())
+                    solver_contact_adhesion.append(raw_data.contact.adhesion.numpy()[:count].copy())
             # Use a separate native data object: Warp geometry caches precede
             # integration, and measurement must not refresh the executing sim.
             measured_data.qpos[:]=q;measured_data.qvel[:]=v;mujoco.mj_forward(model,measured_data)
@@ -215,6 +247,12 @@ def main():
                 geom=np.concatenate(contact_geoms),force_torque_on_geom2_world=np.concatenate(contact_wrenches),
                 position_world=np.concatenate(contact_points),normal_geom1_to_geom2_world=np.concatenate(contact_normals),
                 fps=np.array([1/model.opt.timestep]))
+        if args.record_solver_jacobian:
+            np.savez_compressed(args.out/'solver-jacobian-actual.npz',row_offsets=np.array(solver_offsets,dtype=np.int64),
+                root_translation_jacobian=np.concatenate(solver_jacobians),constraint_force=np.concatenate(solver_forces),
+                constraint_type=np.concatenate(solver_types),constraint_object_id=np.concatenate(solver_ids),
+                contact_efc_addresses=np.concatenate(solver_contact_addresses),contact_dimension=np.concatenate(solver_contact_dims),
+                contact_adhesion=np.concatenate(solver_contact_adhesion),fps=np.array([1/model.opt.timestep]))
         a=np.array(physics)
         report={'checkpoint_sha256':checkpoint_sha,'source_sha256':hashlib.sha256(args.source.read_bytes()).hexdigest(),
             'start_reference_frame':args.start_frame,'physics_steps':len(physics),'actions':len(actions),
@@ -238,6 +276,8 @@ def main():
             'contact_force_balance_verified':bool(contact_errors and all(e<=1e-3 or r<=1e-5 for e,r in zip(contact_errors,contact_relative_errors))),
             'contact_measurement_roundoff_tolerance':{'absolute_n':1e-3,'relative':1e-5,'scope':'Readout consistency only; physical force limits remain unchanged'},
             'contact_trace_sha256':hashlib.sha256((args.out/'contacts-actual.npz').read_bytes()).hexdigest() if args.record_contact_forces else None,
+            'solver_jacobian_trace_sha256':hashlib.sha256((args.out/'solver-jacobian-actual.npz').read_bytes()).hexdigest() if args.record_solver_jacobian else None,
+            'solver_jacobian_layouts':sorted(solver_layouts),
             'contact_force_state_alignment':'Engine preintegration contact solution; pose trajectory stores the following postintegration state',
             'metric_columns':['com_z','com_vz','H_x','H_y','H_z','com_speed','root_angular_speed',
                 'left_foot_min','right_foot_min','nonfoot_min','root_pitch','root_up_z',
