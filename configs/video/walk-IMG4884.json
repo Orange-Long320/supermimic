@@ -1,0 +1,11 @@
+{
+  "status": "pending recovery",
+  "role": "selected walking reference replaces previous walking choice; preserve other gait references",
+  "source": "IMG_4884.MOV",
+  "sha256": "a267654397480ad740605db9e73de4dddf6e183e1e6eb2b39e36e275b0c9dca7",
+  "duration_s": 4.1,
+  "run": "walk_IMG4884_20261029_r1",
+  "gpu": 3,
+  "review": "Standing preparation then approaches camera with bent-elbow arm swing; final frame partially crops lower legs.",
+  "training_validated": false
+}
