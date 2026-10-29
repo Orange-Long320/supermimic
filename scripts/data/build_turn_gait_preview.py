@@ -41,12 +41,12 @@ def main():
     if progress[-1] < .1: raise ValueError('source has insufficient walking travel')
     u = progress / progress[-1]
     yaw = np.deg2rad(a.angle_deg) * (3*u*u - 2*u*u*u)
-    turn = Rotation.from_euler('z', yaw)
+    turn = Rotation.from_euler('z', yaw[:,None])
     original_quat = quat.copy()
     quat = (turn * Rotation.from_quat(quat[:,[1,2,3,0]])).as_quat()[:,[3,0,1,2]]
     backward = pos.copy()
     delta = np.diff(pos,axis=0)
-    delta[:,:2] = Rotation.from_euler('z',(yaw[1:]+yaw[:-1])/2).apply(delta)[:,:2]
+    delta[:,:2] = Rotation.from_euler('z',((yaw[1:]+yaw[:-1])/2)[:,None]).apply(delta)[:,:2]
     backward[1:] = pos[0] + np.cumsum(delta,axis=0)
     feet = [model.body(f'{s}_ankle_roll_link').id for s in ('left','right')]
     original = src['body_pos_w'][:, [names.index(model.body(i).name) for i in feet]].astype(float)

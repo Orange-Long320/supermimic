@@ -1,0 +1,53 @@
+{
+  "method": "curved root path, smooth yaw and source-height stance anchors, bounded leg IK; source frame order retained",
+  "source": "/home/2025-Long.xh/HHD/data/supermimic/data/video/walk_IMG4884_20261029_r1/x2_reference/IMG_4884.npz",
+  "source_sha256": "8e7813254aa415246ef1a895bdc89350e2b1c134dab73114e7da55fa8f07dd63",
+  "frames": 204,
+  "fps": 50.0,
+  "duration_s": 4.06,
+  "forward_displacement_m": 0.912649872452603,
+  "turn_angle_deg": 60.0,
+  "stance_runs": [
+    [
+      [
+        131,
+        159
+      ],
+      [
+        184,
+        204
+      ]
+    ],
+    [
+      [
+        105,
+        120
+      ],
+      [
+        126,
+        133
+      ],
+      [
+        156,
+        193
+      ]
+    ]
+  ],
+  "endpoint_displacement_m": [
+    -0.3445585612593171,
+    0.7697989584084827,
+    -0.07762544528141524
+  ],
+  "max_foot_target_error_m": 0.00043678386148158165,
+  "max_floor_lift_m": 0.004443474854082776,
+  "max_joint_limit_violation_rad": 4.0193176271685616e-06,
+  "arms_unchanged": true,
+  "physics_validated": false,
+  "training_approved": false,
+  "status": "synthetic left turn preview complete; not policy validated",
+  "run": "turn_IMG4884_20261029_r2",
+  "video_frames": 204,
+  "video_fps": 50,
+  "video_duration_s": 4.08,
+  "review": "3fps contact sheet reviewed: standing preparation, preserved arm swing, stepping and continuous leftward heading change. Source ankle-height stance estimates are heuristic, not annotated contacts."
+}
