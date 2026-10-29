@@ -99,11 +99,12 @@ def main():
                     dq=state[:,NQ+6:]
                     reward=(1-12*err[:,0].square()-8*err[:,1].square()-4*err[:,2].square()
                         -.005*dq.square().mean(-1)-.01*(action-previous).square().sum(-1)
-                        -stop*(.5*dq[:,arms].square().mean(-1)+.03*dq.square().mean(-1))
+                        -stop*(2*dq[:,arms].square().mean(-1)+.05*dq.square().mean(-1)
+                            +.1*(state[:,7:NQ][:,arms]-cmd.robot.data.default_joint_pos[:,arms]).square().mean(-1))
                         -10*term.float())
                     # No bootstrap through any reset. Timeouts are logged separately;
                     # the reset observation is never treated as a continuation.
-                    batch.append((x.clone(),c,z,lp,v,reward,done,term,tout,speed))
+                    batch.append((x.clone(),c,z,lp,v,reward,done,term.clone(),tout.clone(),speed))
                     x=nxt['policy'];previous=action;phase_age+=1
                     phase_age[done]=150
                 tail=val(x,goal)
