@@ -249,7 +249,16 @@
     "extra_three_hour_start_epoch": 1793247607.4269378,
     "extra_three_hour_expected_end_epoch": 1793258407.4269378,
     "previous_dual_final_checkpoint_sha256": "036d5b92340901a13c6fff4d7d2ec7484797750bb181901000198baa3534dad1",
-    "previous_dual_all_tasks_passed": false
+    "previous_dual_all_tasks_passed": false,
+    "latest_actual_policy_preview": {
+      "iteration": 9600,
+      "checkpoint_sha256": "21580ecab7b414fbb553413fb911bc6c0c0d83894d8b6017fe6aa4bd6eaad896",
+      "run": "omni_dual8192_extra3h_20261029_r1/checkpoint-preview-9600",
+      "box_stand_clip_no_termination": true,
+      "step_up_down_failure_seconds": 4.14,
+      "vault_failure_seconds": 5.72,
+      "complete_task_verified": false
+    }
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
