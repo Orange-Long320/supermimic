@@ -99,7 +99,7 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
                     stop_speed_sum += measured[:, :2].norm(dim=-1) * valid
                     stop_count += valid
                 if step % 10 == 0:
-                    records.append({"time_s": elapsed + env.step_dt, "command": used_command.cpu().tolist(), "velocity": measured.cpu().tolist(), "root_position": physical_state[:,:3].cpu().tolist(), "root_quaternion": physical_state[:,3:7].cpu().tolist(), "active": (failed_at < 0).cpu().tolist()})
+                    records.append({"time_s": elapsed + env.step_dt, "command": used_command.cpu().tolist(), "velocity": measured.cpu().tolist(), "arm_joint_positions": physical_state[:,7:NQ][:,arm_ids].cpu().tolist(), "root_position": physical_state[:,:3].cpu().tolist(), "root_quaternion": physical_state[:,3:7].cpu().tolist(), "active": (failed_at < 0).cpu().tolist()})
                 done = (terminated | timeout).nonzero().squeeze(-1)
                 if done.numel():
                     # Failed trials remain failed. Reset only to let the vector
