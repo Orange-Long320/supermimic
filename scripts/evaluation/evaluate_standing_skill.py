@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, teacher_still_arms: bool = False, extended_stop: bool = False, standing_only: bool = False, disable_standing_feedback: bool = False):
+def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, teacher_still_arms: bool = False, extended_stop: bool = False, standing_only: bool = False, disable_standing_feedback: bool = False, disable_moving_feedback: bool = False):
     import json
     from dataclasses import asdict
 
@@ -76,7 +76,7 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
                 mailbox.put(target, now=elapsed)
                 cmd.set_manual_command(mailbox.read(env.step_dt, now=elapsed))
                 used_command = cmd.velocity_command.clone()
-                action = standing_action(policy,observations["policy"],used_command,context,disable_standing_feedback)
+                action = standing_action(policy,observations["policy"],used_command,context,disable_standing_feedback,disable_moving_feedback)
                 if teacher_still_arms and target == (0., 0., 0.):
                     action[:, arm_ids] = 0.
                 observations, _, terminated, timeout, _ = env.step(action)
@@ -110,7 +110,7 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
                     observations, _ = env.reset(env_ids=done)
                     context.reset(done)
         result = {
-            "teacher_action_override": teacher_still_arms, "standing_feedback_disabled":disable_standing_feedback,
+            "teacher_action_override": teacher_still_arms, "standing_feedback_disabled":disable_standing_feedback, "moving_feedback_disabled":disable_moving_feedback,
             "arm_joint_names": arm_names,
             "action_joint_names": action_joint_names,
             "stop_arm_metrics": {str(k):dict(joint_velocity_rms_rad_s=torch.sqrt(v["square"]/v["count"].clamp_min(1)).cpu().tolist(),mean_joint_range_rad=(v["maximum"]-v["minimum"]).mean(-1).cpu().tolist(),samples=v["count"].cpu().tolist()) for k,v in arm_stats.items()},

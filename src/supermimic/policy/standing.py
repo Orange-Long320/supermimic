@@ -1,4 +1,4 @@
-"""Learned near-zero-command action residual; moving core stays immutable."""
+"""Task-state inputs for retained standing and locomotion experts."""
 import types
 import copy
 import torch
@@ -30,25 +30,45 @@ class StandingSkill(nn.Module):
             command=torch.zeros(len(obs),3,device=obs.device,dtype=obs.dtype)
             if not self.feedback_dim:return self.decoder(self.encoder(obs,command),obs)
             if feedback is None or feedback.shape!=(len(obs),self.feedback_dim):raise ValueError('Standing policy requires six task-state observations')
-            h=torch.cat((obs*self.encoder.obs_scale,command/self.encoder.command_scale),-1)
-            for i,layer in enumerate(self.encoder.mlp.net):
-                h=layer(h)
-                if i==0:h=h+torch.nn.functional.linear(feedback*self.feedback_scale,self.feedback_weight)
-            return self.decoder(torch.tanh(h),obs)
+            latent=task_latent(self.encoder,obs,command,feedback,self.feedback_weight,self.feedback_scale)
+            return self.decoder(latent,obs)
         correction=self.max_residual*torch.tanh(self.net(obs*self.obs_scale))
         return self.baseline_action+correction if self.mode=="standalone" else correction
     def gate(self,command):return (1-command.square().sum(-1)/self.radius**2).clamp(0,1)
 
-def velocity_action(self,observations,command,standing_feedback=None):
-    base=self.decoder(self.encoders['velocity'](observations,command),observations)
-    gate=self.standing_skill.gate(command)[:,None]
-    if self.standing_skill.feedback_dim and not (gate>0).any():return base
-    standing=self.standing_skill(observations,standing_feedback)
-    return (1-gate)*base+gate*standing if self.standing_skill.mode in ('standalone','expert') else base+gate*standing
+def task_latent(encoder,observations,command,feedback,weight,scale):
+    h=torch.cat((observations*encoder.obs_scale,command/encoder.command_scale),-1)
+    for i,layer in enumerate(encoder.mlp.net):
+        h=layer(h)
+        if i==0:h=h+torch.nn.functional.linear(feedback*scale,weight)
+    return torch.tanh(h)
 
-def attach_standing_skill(policy,radius=.1,max_residual=.5,mode="residual",baseline_action=None,feedback_dim=0):
+
+def add_velocity_feedback(policy):
+    if hasattr(policy,'velocity_feedback_weight'):raise ValueError('Movement feedback already attached')
+    if not policy.standing_skill.feedback_dim:raise ValueError('Standing task context required')
+    encoder=policy.encoders['velocity']
+    policy.register_parameter('velocity_feedback_weight',nn.Parameter(torch.zeros(encoder.mlp.net[0].out_features,6,device=next(policy.parameters()).device)))
+
+
+def velocity_action(self,observations,command,standing_feedback=None,disable_standing_feedback=False,disable_moving_feedback=False):
+    skill=self.standing_skill;gate=skill.gate(command)[:,None]
+    feedback=torch.zeros_like(standing_feedback) if disable_standing_feedback and standing_feedback is not None else standing_feedback
+    if skill.feedback_dim and (gate==1).all():return skill(observations,feedback)
+    if hasattr(self,'velocity_feedback_weight') and not disable_moving_feedback:
+        if standing_feedback is None:raise ValueError('Movement policy requires task-state feedback')
+        error=torch.cat((standing_feedback[:,:3]-command,standing_feedback[:,3:]),-1)
+        latent=task_latent(self.encoders['velocity'],observations,command,error,self.velocity_feedback_weight,skill.feedback_scale)
+        base=self.decoder(latent,observations)
+    else:base=self.decoder(self.encoders['velocity'](observations,command),observations)
+    if skill.feedback_dim and not (gate>0).any():return base
+    standing=skill(observations,feedback)
+    return (1-gate)*base+gate*standing if skill.mode in ('standalone','expert') else base+gate*standing
+
+def attach_standing_skill(policy,radius=.1,max_residual=.5,mode="residual",baseline_action=None,feedback_dim=0,moving_feedback=False):
     if not hasattr(policy,'velocity_action'):raise ValueError('Velocity policy required')
     policy.standing_skill=StandingSkill(policy.encoders['velocity'].obs_scale,radius,max_residual,mode,baseline_action,policy.encoders['velocity'],policy.decoder,feedback_dim).to(next(policy.parameters()).device)
+    if moving_feedback:add_velocity_feedback(policy)
     policy.velocity_action=types.MethodType(velocity_action,policy)
     return policy
 
@@ -79,11 +99,10 @@ class StandingContext:
         return torch.cat((measured_velocity(state),position,heading),-1)
 
 
-def standing_action(policy,observations,command,context=None,disable_feedback=False):
+def standing_action(policy,observations,command,context=None,disable_feedback=False,disable_moving_feedback=False):
     skill=getattr(policy,'standing_skill',None)
     if skill is not None and skill.feedback_dim:
         if context is None:raise ValueError('No standing task-state context supplied')
         feedback=context.features(command)
-        if disable_feedback:feedback=torch.zeros_like(feedback)
-        return policy.velocity_action(observations,command,feedback)
+        return policy.velocity_action(observations,command,feedback,disable_standing_feedback=disable_feedback,disable_moving_feedback=disable_moving_feedback)
     return policy.velocity_action(observations,command)
