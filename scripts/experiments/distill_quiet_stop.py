@@ -56,7 +56,7 @@ def main():
   c=torch.zeros(n,3,device='cuda');c[n//2:3*n//4,0]=.3;c[3*n//4:,0]=-.2
   return c
  valx=val[torch.randint(len(val),(2048,),device='cuda')];valc=queries(2048);valz=label(valx,valc)
- history=[];started=time.monotonic();best=None;best_score=float('inf')
+ history=[];started=time.monotonic();best=None;best_step=None;best_score=float('inf')
  for step in range(a.updates):
   xx=train[torch.randint(len(train),(1024,),device='cuda')];c=queries(1024);target=label(xx,c)
   pred=student(xx,c);loss=(pred-target).square().mean()+5*(policy.decoder(pred,xx)-policy.decoder(target,xx)).square().mean()
@@ -66,12 +66,12 @@ def main():
     vz=student(valx,valc);ve=(vz-valz).square().mean(-1);ae=(policy.decoder(vz,valx)-policy.decoder(valz,valx)).square().mean(-1)
     result=dict(step=step+1,stop_latent_mse=float(ve[:1024].mean()),move_latent_mse=float(ve[1024:].mean()),stop_action_rmse=float(ae[:1024].mean().sqrt()),move_action_rmse=float(ae[1024:].mean().sqrt()))
    history.append(result);print(json.dumps(result),flush=True)
-   if float(ae.mean())<best_score:best_score=float(ae.mean());best=copy.deepcopy(student.state_dict())
+   if float(ae.mean())<best_score:best_score=float(ae.mean());best=copy.deepcopy(student.state_dict());best_step=step+1
  student.load_state_dict(best)
  ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
  for k,v in policy.state_dict().items():
   if not k.startswith('encoders.velocity.'):assert torch.equal(v.cpu(),ck['policy'][k]),k
  ck['policy']={k:v.cpu() for k,v in policy.state_dict().items()};ck.pop('velocity_training',None)
- meta=dict(source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),stop_sha256=hashlib.sha256(a.stop_teacher.read_bytes()).hexdigest(),updates=a.updates,teacher_failures=0,teacher_seconds=27,train_envs=48,validation_envs=16,history=history,seconds=time.monotonic()-started,scope='Single encoder and unchanged decoder; physical acceptance required; not resumable.')
+ meta=dict(source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),stop_sha256=hashlib.sha256(a.stop_teacher.read_bytes()).hexdigest(),updates=a.updates,selected_step=best_step,teacher_failures=0,teacher_seconds=27,train_envs=48,validation_envs=16,history=history,seconds=time.monotonic()-started,scope='Single encoder and unchanged decoder; physical acceptance required; not resumable.')
  ck['quiet_stop_distillation']=meta;torch.save(ck,a.out/'candidate.pt');(a.out/'report.json').write_text(json.dumps(meta,indent=2)+'\n')
 if __name__=='__main__':main()

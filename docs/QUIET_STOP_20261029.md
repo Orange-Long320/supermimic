@@ -1,4 +1,4 @@
-# 停止摆臂修复记录
+# 停止摆臂修复（指定启停流程已验证）
 
 ## 已验证根因及基线
 
@@ -20,10 +20,38 @@
 
 额外的decoder可达性诊断 `logs/quiet_latent_probe_20261029_r1`（sm-quiet-latent-probe，已结束）：固定实际停止历史，优化latent使手臂action接近其时间均值并保留其他action，arm action RMSE由0.0913降至0.00910，其他关节action误差0.00281。说明现有decoder可表达更安静的手臂目标；这只是可达性检查，不是物理验收或部署权重。
 
-## 正在合并停止与移动能力
+## 已完成停止与移动能力合并
 
 `distill_quiet_stop.py`先在64环境采集27秒训练教师连续轨迹：移动时使用原验证移动教师，零速时使用240轮安静停止教师；教师切换只用于训练采集和标签，不作为部署逻辑。采集失败立即保留记录并拒绝蒸馏。
 
 随后在相同历史上，均衡查询0、+0.3、-0.2，分别监督停止/移动latent和action；训练48环境历史，整环境留出16环境历史检查拟合。最终仍为一个velocity encoder加原decoder，不增加运行时教师、动作覆盖或额外控制器。
 
-本轮 `logs/quiet_stop_distill_20261029_r1`，GPU1，tmux sm-quiet-stop-distill，PID1879120，4000次更新；完整argv见launch.json。当前最终物理验收待执行，拟合损失不等于成功。所有目录相对服务器 `/home/2025-Long.xh/HHD/data/supermimic`。
+本轮 `logs/quiet_stop_distill_20261029_r1`，GPU1，tmux sm-quiet-stop-distill，PID1879120，4000次更新；完整argv见launch.json。4000次更新已完成，权重按留出action误差选择；最终验收结果见下文，拟合损失不替代物理验证。所有目录相对服务器 `/home/2025-Long.xh/HHD/data/supermimic`。
+
+## 最终物理验收
+
+最终为单一velocity encoder加原共享decoder；无运行时教师切换、无手臂动作覆盖、无强制清零、无PD/接触参数变更。decoder及motion encoder与原backward_validated源逐项torch.equal确认未变。`teacher_action_override=false`，实际actuator顺序检查通过。
+
+权重 `logs/quiet_stop_distill_20261029_r1/quiet_stop_verified.pt`，SHA256 `62954a3ef021122584e470a9cee07b4e09632bed70c6d5139deb53f964753622`，与该目录train/candidate.pt字节相同。原移动源权重SHA256 `5c720b00790c52ae3f60eeb9fdc9146e20d7e692ee8053a4c3c618568b36eff9`；安静停止教师为quiet_stop_20261029_r1/train/candidate_240.pt，链路记录在train/report.json与权重元数据。旧优化器不可直接resume。
+
+27秒流程：0–3秒零速，3–10秒前进+0.3m/s，10–15秒停止，15–22秒后退-0.2m/s，22–27秒停止。每段去首1秒；arm RMS和摆幅按每个实际物理步聚合，不只按视频采样。肩/肘/腕共14关节，未删掉失败或选择幸存者。
+
+| 项目 | 原模型seed0 | 修复seed0 | 修复seed7 |
+| --- | --- | --- | --- |
+| 初始停止arm速度RMS，rad/s | 0.618 | 0.0551 | 0.0543 |
+| 前进后停止arm速度RMS，rad/s | 0.754 | 0.0741 | 0.0708 |
+| 后退后停止arm速度RMS，rad/s | 0.634 | 0.0885 | 0.0823 |
+| 停止平均平面速度，m/s | 0.119 | 0.0432 | 0.0442 |
+| 前进vx均值，m/s | 原验证约+0.327 | +0.3131 | +0.3516 |
+| 后退vx均值，m/s | 原验证约-0.206 | -0.2516 | -0.2288 |
+| 全程无首次失败、无重置 | 8/8 | 8/8 | 8/8 |
+
+停止手臂平均关节摆幅由约0.27–0.30rad降到0.054–0.080rad。明显周期摆臂得到抑制，保留原抬臂姿态及小幅平衡调整；不声称数学意义上的完全静止或自然垂手。
+
+额外42秒连续测试（seed0、8环境）保留相同前进/后退流程，后退后的最后停止持续20秒。8/8无失败或重置，最后停止段arm RMS均值0.0747rad/s，23–42秒平均平面速度0.0442m/s；最后7秒约0.0408m/s，未再次恢复持续大幅摆臂。输出eval_extended.json，GPU3，PID1881574、会话sm-quiet-stop-extended。27秒两种子评测GPU3/1、PID1880182/1880186，启动记录均在最终目录。
+
+边界：前进仍有约-0.18至-0.19rad/s偏航，停止有平衡微动；左右转、小跑、更大速度与扰动未纳入本轮回归，不宣称整套键盘策略完成验收。之前独立停止训练的速度回归未采用，最终合并权重通过了正/负方向复测。
+
+## 录像与交付
+
+`logs/quiet_stop_video_20261029_r1/quiet-stop.mp4`，同SHA最终权重、seed0、模拟2环境展示env0，25秒连续前进/停止/后退/停止，无重置、无提前失败，625帧、25fps、1280×720。PID1881578、会话sm-quiet-stop-video，完整argv与as-run.py同目录。已查看1/6/12/18/21/24秒关键帧，ffprobe核验时长与帧数；保留全部停止阶段，未挑选种子或剪辑隐藏摆动。本地副本outputs/quiet_stop_video_20261029_r1/。所有本轮任务均已结束。
