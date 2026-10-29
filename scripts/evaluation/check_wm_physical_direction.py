@@ -138,6 +138,8 @@ def main():
                  model_improvement=(predicted_baseline-predicted_final).tolist(),
                  physical_improvement=(baseline-actual_error).tolist(),
                  max_action_change=float((plan.detach()-actions).abs().max()))
+        torch.save(dict(actions=plan.detach(),physical_states=states2,initial=start2,xi=xi2),
+                   a.out/('plan-'+row['sha256'][:12]+'.pt'))
         report['models'].append(row)
         (a.out/'result.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(row),flush=True)
