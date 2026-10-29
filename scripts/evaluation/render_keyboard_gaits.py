@@ -19,6 +19,7 @@ def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: 
     from supermimic.envs import SuperMimicEnvCfgArgs, make_env_cfg
     from supermimic.envs.mdp.motion_library import discover_npz
     from supermimic.eval.benchmark import load_policy_from_checkpoint
+    from supermimic.policy.standing import StandingContext,standing_action
     from supermimic.locomotion.config import VelocityCfg
     from supermimic.locomotion.keyboard import CommandMailbox
     from supermimic.locomotion.task import measured_velocity
@@ -53,6 +54,7 @@ def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: 
     command.is_velocity[:] = True
     command.force_standing_reset = True
     command.set_manual_command((0., 0., 0.))
+    context=StandingContext(command,env)
     schedule = [
         (0., "STAND", (0.,0.,0.)), (3., "FORWARD", (.3,0.,0.)),
         (10., "STOP", (0.,0.,0.)), (15., "BACK", (-.2,0.,0.)),
@@ -64,6 +66,7 @@ def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: 
     if standing_only:
         schedule=schedule[:1]
     duration, width, height, fps = seconds, 1280, 720, 25
+    context=StandingContext(command,env)
     schedule = [item for item in schedule if item[0] < duration]
     model = env.sim.mj_model
     model.vis.global_.offwidth = max(width, model.vis.global_.offwidth)
@@ -101,7 +104,7 @@ def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: 
                 mailbox.put(target, now=elapsed)
                 command.set_manual_command(mailbox.read(env.step_dt, now=elapsed))
                 used = command.velocity_command.clone()
-                action = policy.velocity_action(observations["policy"], used)
+                action = standing_action(policy,observations["policy"],used,context)
                 if not torch.isfinite(action).all():
                     end_reason = "nonfinite_action"
                     break
