@@ -1,5 +1,5 @@
 {
-  "status": "pending recovery",
+  "status": "complete: selected walking reference, preview reviewed; policy unvalidated",
   "role": "selected walking reference replaces previous walking choice; preserve other gait references",
   "source": "IMG_4884.MOV",
   "sha256": "a267654397480ad740605db9e73de4dddf6e183e1e6eb2b39e36e275b0c9dca7",
@@ -7,5 +7,23 @@
   "run": "walk_IMG4884_20261029_r1",
   "gpu": 3,
   "review": "Standing preparation then approaches camera with bent-elbow arm swing; final frame partially crops lower legs.",
-  "training_validated": false
+  "training_validated": false,
+  "result": {
+    "max_residual_root_lift_m": 4.12984110994153e-06,
+    "repaired_frames": 9,
+    "max_joint_repair_rad": 0.0872003119937369,
+    "minimum_repaired_sole_m": 0.0,
+    "clip": "IMG_4884",
+    "frames": 204,
+    "duration_s": 4.06,
+    "root_height_offset_m": 0.03081071243795557,
+    "joint_limit_violation_rad": 3.966593569160182e-06,
+    "joint_velocity_p99": 3.683149615790023,
+    "run": "/home/2025-Long.xh/HHD/data/supermimic/logs/walk_IMG4884_20261029_r1",
+    "source_sha256": "a267654397480ad740605db9e73de4dddf6e183e1e6eb2b39e36e275b0c9dca7",
+    "npz_sha256": "8e7813254aa415246ef1a895bdc89350e2b1c134dab73114e7da55fa8f07dd63",
+    "role": "selected walking reference",
+    "policy_validated": false
+  },
+  "server_reference": "/home/2025-Long.xh/HHD/data/supermimic/data/video/walk_IMG4884_20261029_r1/x2_reference/IMG_4884.npz"
 }

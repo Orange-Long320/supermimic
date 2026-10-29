@@ -1,0 +1,12 @@
+{
+  "scope": "reference selection only; no running policy or training input changed",
+  "walking": {
+    "source": "IMG_4884.MOV",
+    "config": "configs/video/walk-IMG4884.json",
+    "npz": "/home/2025-Long.xh/HHD/data/supermimic/data/video/walk_IMG4884_20261029_r1/x2_reference/IMG_4884.npz"
+  },
+  "other_gait_references": {
+    "config": "configs/video/gait-IMG4880-4883.json",
+    "status": "preserved; walking choice superseded by IMG_4884; other direction labels remain unverified"
+  }
+}
