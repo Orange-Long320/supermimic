@@ -193,14 +193,14 @@
     "batch4096_capacity_peak_mib": 24049,
     "batch4096_capacity_loop_seconds": 16.437980591785163,
     "current_formal_training_batch_size": 2048,
-    "current_formal_training_pid": 1471347,
-    "current_formal_training_run": "omni_latest_reference_batch2048_3h_20261029_r1",
-    "current_remaining_formal_training_seconds_at_start": 10800,
+    "current_formal_training_pid": 1626576,
+    "current_formal_training_run": "omni_dual8192_continuation_20261029_r2",
+    "current_remaining_formal_training_seconds_at_start": 357.3,
     "practical_reference_review": "omni_practical_reference_gate_20261029_r1/review.json",
     "practical_reference_contact_regression": "omni_practical_reference_gate_20261029_r1/selective-contact-regression.json",
     "practical_reference_input_accepted": true,
     "finite_solver_discrete_dynamics": "omni_practical_reference_gate_20261029_r1/discrete-dynamics/report.json",
-    "current_formal_training_status": "latest_reference2048_formal_3h_running",
+    "current_formal_training_status": "dual8192_capacity_passed_formal_running",
     "latest_reference2048_run": "omni_latest_reference_batch2048_3h_20261029_r1",
     "latest_reference2048_driver_pid": 1468591,
     "latest_reference2048_capacity_pid": 1468614,
@@ -210,12 +210,33 @@
     "latest_reference2048_equivalence_proof": "omni_latest_reference_batch2048_3h_20261029_r1/dataset-rebind/equivalence.json",
     "latest_reference2048_formal_budget_seconds": 10800,
     "latest_reference2048_short_tests_counted_in_budget": false,
-    "latest_reference2048_status": "capacity_passed_formal_running",
+    "latest_reference2048_status": "superseded_by_user_dual8192_total_batch2048",
     "latest_reference2048_capacity_peak_mib": 17659,
     "latest_reference2048_capacity_new_updates": 24,
     "latest_reference2048_capacity_checkpoint_sha256": "acdd6e7d5b881ed1901da2d6f4b4a53ac4001b0ff2b1b3df7765bbbc91b6dc2b",
     "latest_reference2048_formal_start_epoch": 1793236553.366828,
-    "latest_reference2048_formal_training_pid": 1471347
+    "latest_reference2048_formal_training_pid": 1471347,
+    "dual8192_driver_pid": 1624576,
+    "dual8192_rank_pids": [
+      1626649,
+      1626650
+    ],
+    "dual8192_gpus": [
+      0,
+      2
+    ],
+    "dual8192_total_envs": 8192,
+    "dual8192_envs_per_rank": 4096,
+    "dual8192_batch_per_rank": 1024,
+    "dual8192_total_batch": 2048,
+    "dual8192_capacity_peak_mib": [
+      22762,
+      22763
+    ],
+    "dual8192_capacity_new_updates": 24,
+    "dual8192_capacity_checkpoint_sha256": "7352133a13d97644d09306a9b6b3208fe2e10a04533f5511d90fc89044149a99",
+    "dual8192_actual_lr": 0.0002,
+    "dual8192_deadline_epoch": 1793247353.366828
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
