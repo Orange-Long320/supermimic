@@ -24,6 +24,7 @@ def main():
     p.add_argument('--package-commit',required=True)
     p.add_argument('--num-envs',type=int,default=2048)
     p.add_argument('--batch-size',type=int,default=512)
+    p.add_argument('--source-world-size',type=int,default=1,help='Normalize checkpoint LR before the existing trainer applies its world-size scaling')
     a=p.parse_args()
     if not 0<a.minutes<=180 or a.num_envs<1 or a.batch_size<1:p.error('Bounded three-hour run required')
     rank,local,world=int(os.environ['RANK']),int(os.environ['LOCAL_RANK']),int(os.environ['WORLD_SIZE'])
@@ -57,6 +58,12 @@ def main():
             if is_dataclass(current):restore(current,v)
             else:setattr(obj,k,tuple(v) if isinstance(current,tuple) else v)
     cfg=TrainConfig();restore(cfg,ck['config'])
+    incoming_world=2 if a.phase=='optimize' else a.source_world_size
+    if incoming_world not in [1,2]:raise ValueError('Explicit known checkpoint world size required')
+    cfg.wm_trainer.lr/=incoming_world**.5
+    cfg.policy_trainer.lr/=incoming_world**.5
+    cfg.policy_trainer.critic_lr/=incoming_world**.5
+    base_learning_rates={'wm':cfg.wm_trainer.lr,'policy':cfg.policy_trainer.lr,'critic':cfg.policy_trainer.critic_lr}
     if cfg.robot!='x2_ultra' or cfg.env.box is not None or cfg.env.sole_profile is not None:raise ValueError('Unchanged X2 terrain interface required')
     if not cfg.env.terrain_manifest or Path(cfg.env.terrain_manifest).read_bytes()!=Path(manifest['terrain']).read_bytes():
         raise ValueError('Full continuation must use the same terrain')
@@ -87,10 +94,19 @@ def main():
         'pid':os.getpid(),'source_commit':a.source_commit,'package_commit':a.package_commit,
         'initial_checkpoint_sha256':sha(a.checkpoint),'initial_iteration':initial_iteration,'initial_updates':initial_updates,
         'terrain_sha256':manifest['terrain_sha256'],'num_envs_per_rank':a.num_envs,'batch_size_per_rank':a.batch_size,
+        'incoming_checkpoint_world_size':incoming_world,'base_learning_rates':base_learning_rates,
         'cpu_affinity':sorted(os.sched_getaffinity(0)),'authorization':'User: two GPUs, three hours, about12GiB per GPU',
         'scope':__doc__,'final_validation_approved':False}
     def save():record_path.write_text(json.dumps(record,indent=2,default=str))
     trainer=None;started=time.monotonic()
+    def parameter_hashes():
+        result={}
+        for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]:
+            digest=hashlib.sha256()
+            for name,tensor in module.named_parameters():
+                digest.update(name.encode());digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+            result[key]=digest.hexdigest()
+        return result
     try:
         trainer=Trainer(cfg)
         count=round(cfg.env.num_envs*.5)
@@ -101,11 +117,13 @@ def main():
         record.update(status='running',configuration=asdict(cfg),pinned_start_environments=count,
             return_sampling_environments=cfg.env.num_envs-count,
             distributed_backend=torch.distributed.get_backend(),
+            initial_parameter_hashes=parameter_hashes(),
             initial_parameter_checksums={key:float(sum(t.detach().double().sum() for t in module.parameters()))
                 for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]})
         save();trainer.run()
         record.update(status='completed',iteration=trainer.iteration,updates=trainer.num_updates,
             new_updates=trainer.num_updates-initial_updates,
+            final_parameter_hashes=parameter_hashes(),
             final_parameter_checksums={key:float(sum(t.detach().double().sum() for t in module.parameters()))
                 for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]})
         if rank==0:
