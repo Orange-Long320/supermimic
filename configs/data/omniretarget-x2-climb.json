@@ -91,7 +91,7 @@
     {
       "motion": "robot-terrain/climb_11_z_scale_0.8.npz",
       "category": "higher hand-support candidate; source top/rise 0.563596m; X2 about 0.55506m",
-      "status": "Complete458-source-frame geometry candidate exists, but combined preparation rejected speed: dense200Hz knee31.347rad/s versus original30, ratio1.044899. Raw30Hz IK knee jumps0.765rad at source379\u2192380 while G1 source is smooth. Excluded from training batch; continuity repair pending, no final physics approval.",
+      "status": "Complete458-source-frame geometry candidate exists, but combined preparation rejected speed: dense200Hz knee31.347rad/s versus original30, ratio1.044899. Raw30Hz IK knee jumps0.765rad at source379→380 while G1 source is smooth. Excluded from training batch; continuity repair pending, no final physics approval.",
       "prior_diagnostic_variant": "robot-terrain/climb_11_z_scale_1.2.npz",
       "wrist_reference_limit_deg": 0.0
     },
@@ -149,7 +149,13 @@
     "zero_contact_mechanics_regression": "omni_flight_audit_regression_20261029_r1/mechanics/report.json",
     "native_compliance_and_dense_check": "omni_dense_dynamics_20261029_r1",
     "corrected_dense_reference_passed": false,
-    "actual_contact_long_trace_consistency": "Failed strict readout consistency by0.0054-0.0242N; investigate raw solver Jacobian/forces and float32 reductions, no physical limit relaxation"
+    "actual_contact_long_trace_consistency": "Failed strict readout consistency by0.0054-0.0242N; investigate raw solver Jacobian/forces and float32 reductions, no physical limit relaxation",
+    "native_lower_entry_hold": "omni_native_reset09_hold_20261029_r1/acceptance-summary.json",
+    "native_lower_entry_hold_scope": "Two-second actual lower-entry hold only; hard caps and1mm pass; all-state0.9 soft excess3.174e-7rad recorded; not climbing or policy success",
+    "raw_solver_contact_readout": "omni_solver_force_readout_20261029_r1/force-readout-analysis.json",
+    "installed_solver_cache_path": "omni_solver_force_readout_20261029_r1/installed-solver-evidence.json",
+    "native_hard_com_diagnostic": "omni_native_hardcom_diagnostic_20261029_r1/trace/result.json",
+    "native_hard_com_diagnostic_scope": "Rejected at0.025s with iteration limit; no proof of global infeasibility, no training approval"
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
