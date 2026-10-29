@@ -9,12 +9,16 @@ def main():
  p.add_argument('--reference',type=Path,required=True)
  p.add_argument('--resume-state',action='store_true')
  p.add_argument('--sigma',type=float,default=.08)
+ p.add_argument('--sigma-final',type=float)
+ p.add_argument('--sigma-anneal-iterations',type=int,default=400)
  p.add_argument('--num-envs',type=int,default=1024)
  p.add_argument('--yaw-cost',type=float,default=40.)
  p.add_argument('--move-teacher',type=Path)
  p.add_argument('--standing-pose',type=Path)
  p.add_argument('--hours',type=float,default=1.)
- a=p.parse_args();a.out.mkdir(exist_ok=False)
+ a=p.parse_args()
+ if a.sigma<=0 or (a.sigma_final is not None and not 0<a.sigma_final<=a.sigma) or a.sigma_anneal_iterations<=0:p.error('Exploration scales must be positive and may only decrease')
+ a.out.mkdir(exist_ok=False)
  import torch
  from torch import nn
  from supermimic.eval.benchmark import load_policy_from_checkpoint
@@ -60,7 +64,7 @@ def main():
   state=cmd.state_io.read()
   return torch.cat((xx*actor.obs_scale,10*measured_velocity(state),state[:,2:3],(env.episode_length_buf*env.step_dt/16)[:,None],state[:,:2]-anchor_xy,torch.atan2(torch.sin(heading_yaw(state[:,3:7])-anchor_yaw),torch.cos(heading_yaw(state[:,3:7])-anchor_yaw))[:,None],goal,(stop_age/16)[:,None]),-1)
  def group_kl(new,old,command):
-  rows=(new-old).square().sum(-1)/(2*a.sigma*a.sigma);moving=command.square().sum(-1)>=.01
+  rows=(new-old).square().sum(-1)/(2*sigma*sigma);moving=command.square().sum(-1)>=.01
   return max(float(rows[m].mean()) for m in [moving,~moving] if m.any())
  sigma=a.sigma;trace=[];beg=time.monotonic();total_falls=total_timeouts=0;parent_iterations=0
  if a.resume_state:
@@ -69,6 +73,9 @@ def main():
   print(json.dumps(dict(resumed_training_state=True,parent_iterations=parent_iterations,simulation_state='fresh original initialization')),flush=True)
  try:
   for it in range(a.iterations):
+   if a.sigma_final is not None:
+    fraction=min(it/a.sigma_anneal_iterations,1.)
+    sigma=a.sigma+(a.sigma_final-a.sigma)*fraction
    batch=[]
    with torch.no_grad():
     for step in range(32):
@@ -148,6 +155,7 @@ def main():
    total_falls+=int(torch.stack([b[7] for b in batch]).sum());total_timeouts+=int(torch.stack([b[8] for b in batch]).sum())
    if it%5==0:
     row=dict(moving_prior_mean=prior_sum/max(prior_updates,1),moving_prior_valid_fraction=prior_valid_count/max(prior_total,1),moving_fraction=float((oldgoal.square().sum(-1)>=.01).float().mean()),simulation_age_mean=float(env.episode_length_buf.float().mean()*env.step_dt),moving_feedback_weight_norm=float(policy.velocity_feedback_weight.detach().norm()),feedback_weight_norm=float(actor.feedback_weight.detach().norm()),total_falls=total_falls,total_timeouts=total_timeouts,cuda_peak_allocated_mib=torch.cuda.max_memory_allocated()/1024**2,reference_action_rmse=float((actor(refhistory,torch.zeros(1,6,device=refhistory.device))-refaction).detach().square().mean().sqrt()),iteration=it,seconds=time.monotonic()-beg,arm_velocity_rms=float(arm_motion.mean().sqrt()),actor_kl_max=max(actor_kls,default=0),actor_lr=opt.param_groups[0]['lr'],accepted_actor_steps=accepted_steps,reward=float(torch.stack([b[4] for b in batch]).mean()),vx=float(speed[:,0].mean()),falls=int(torch.stack([b[7] for b in batch]).sum()),timeouts=int(torch.stack([b[8] for b in batch]).sum()))
+    row['exploration_sigma']=sigma
     trace.append(row);print(json.dumps(row),flush=True)
    if (it+1)%20==0:
     ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
@@ -161,6 +169,7 @@ def main():
     ck['control_feedback']=dict(movement_velocity_feedback='measured_minus_target',motion_prior_weight=10.,motion_prior_tracking_validity=[.05,.05,.08],physical_cycle='50% hold; 25% stand3-move7-stop6; 25% stand3-move4-switch4-stop5',only_new_input_projections_trained=True,directed_command_pairs=len(pairs))
     ck['standing_feedback']=dict(inputs=['vx_heading','vy_heading','world_yaw_rate','stop_dx_heading','stop_dy_heading','stop_heading_error'],trainable=['standing_skill.feedback_weight','velocity_feedback_weight'],standing_base_frozen=True,simulation_state_feedback=True)
     ck['standing_ppo_state']=dict(actor_optimizer=opt.state_dict(),value=value.state_dict(),value_optimizer=vopt.state_dict(),sigma=sigma,privileged_value=True)
+    ck['control_feedback']['exploration_schedule']=dict(initial_sigma=a.sigma,final_sigma=a.sigma_final,anneal_iterations=a.sigma_anneal_iterations,completed_local_iterations=it+1)
     with torch.no_grad():
      base_stand=actor.decoder(actor.encoder(x,torch.zeros(len(x),3,device=x.device)),x)
      assert torch.equal(base_stand,actor(x,torch.zeros(len(x),6,device=x.device)))
