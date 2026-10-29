@@ -184,12 +184,18 @@
     "batch1024_previous_training_seconds": 477.20760011672974,
     "batch1024_capacity_peak_mib": 13759,
     "batch4096_run": "omni_single_three_hour_batch4096_20261029_r1",
-    "batch4096_status": "capacity_running_with_1024_fallback",
+    "batch4096_status": "capacity_failed_cuda_oom_fallback1024_formal_running",
     "batch4096_driver_pid": 1460292,
     "batch4096_capacity_pid": 1460312,
     "batch4096_initial_checkpoint_sha256": "9540e1a4665d23ff3e9e59b84991f8881b27a81c5638cce11e5a25a4573b95c5",
     "batch4096_previous_training_seconds": 750.1814742707647,
-    "batch4096_memory_budget_mib": 22000
+    "batch4096_memory_budget_mib": 22000,
+    "batch4096_capacity_peak_mib": 24049,
+    "batch4096_capacity_loop_seconds": 16.437980591785163,
+    "current_formal_training_batch_size": 1024,
+    "current_formal_training_pid": 1460731,
+    "current_formal_training_run": "omni_single_three_hour_batch4096_20261029_r1",
+    "current_remaining_formal_training_seconds_at_start": 10033.38054513745
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,

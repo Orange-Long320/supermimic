@@ -2,7 +2,8 @@
 
 Each GPU owns its simulator/replay; both ranks update one synchronized policy.
 Source-start and return sampling remain50/50. No robot physics or acceptance
-thresholds change. User authorized two GPUs for three hours at about12GiB each.
+thresholds change. User authorized single-GPU continuation and larger-batch
+capacity trials within the original three-hour budget.
 """
 import argparse
 from dataclasses import asdict, is_dataclass
@@ -97,7 +98,7 @@ def main():
         'terrain_sha256':manifest['terrain_sha256'],'num_envs_per_rank':a.num_envs,'batch_size_per_rank':a.batch_size,
         'torch_memory_fraction':a.torch_memory_fraction,
         'incoming_checkpoint_world_size':incoming_world,'base_learning_rates':base_learning_rates,
-        'cpu_affinity':sorted(os.sched_getaffinity(0)),'authorization':'User: single GPU three-hour continuation; latest instruction permits higher VRAM and batch1024',
+        'cpu_affinity':sorted(os.sched_getaffinity(0)),'authorization':'User: single GPU three-hour continuation; permits higher VRAM and requested larger-batch trials with measured fallback',
         'scope':__doc__,'final_validation_approved':False}
     def save():record_path.write_text(json.dumps(record,indent=2,default=str))
     trainer=None;started=time.monotonic();training_started=None
