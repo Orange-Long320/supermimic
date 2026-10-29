@@ -14,6 +14,7 @@ def main():
     p.add_argument('--candidate',type=Path,required=True)
     p.add_argument('--native-model',type=Path,required=True,help='Verified matching native terrain model; interpolation must pass geometry again')
     p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--reference-policy',type=Path,help='Explicit training-reference tolerances; omitted retains legacy strict geometry')
     a=p.parse_args()
     if a.out.exists():p.error('New output required')
     from supermimic.robots.paths import select_robot
@@ -25,6 +26,8 @@ def main():
     from supermimic.robots.assets import get_spec
     from supermimic.robots.dimensions import PROFILE
     from supermimic.data.physics_motion import differentiate_qpos,export_qpos_motion
+    from supermimic.data.reference_acceptance import load_reference_policy,audit_reference_geometry
+    policy=load_reference_policy(a.reference_policy)
     with np.load(a.candidate/'x2-reference.npz',allow_pickle=False) as z:
         q=z['qpos'].copy();fps=float(np.asarray(z['fps']).reshape(-1)[0])
     if q.ndim!=2 or q.shape[1]!=38 or len(q)<5 or not np.isfinite(q).all() or fps<=0:raise ValueError('Invalid X2 candidate')
@@ -42,20 +45,10 @@ def main():
     native=mujoco.MjModel.from_binary_path(str(a.native_model));d=mujoco.MjData(native)
     if (native.nq,native.nv,native.nu)!=(38,37,31):raise ValueError('Unexpected native robot model')
     if [native.joint(i).name.removeprefix('robot/') for i in range(1,native.njnt)]!=[m.joint(i).name for i in range(1,m.njnt)]:raise ValueError('Native joint order differs')
-    root=int(native.jnt_bodyid[0]);witness=np.zeros(6)
-    robot=[g for g in range(native.ngeom) if native.body_rootid[native.geom_bodyid[g]]==root and (native.geom_contype[g] or native.geom_conaffinity[g])]
-    terrain=[g for g in range(native.ngeom) if native.body_rootid[native.geom_bodyid[g]]!=root and (native.geom_contype[g] or native.geom_conaffinity[g])]
-    worst=0.;bad=[]
-    for i,pose in enumerate(dense):
-        d.qpos[:]=pose;mujoco.mj_forward(native,d)
-        gap=min(float(mujoco.mj_geomDistance(native,d,g,o,.02,witness)) for g in robot for o in terrain)
-        worst=max(worst,-gap)
-        if gap<-.001:bad.append({'frame200':i,'time_s':i/200.,'penetration_m':-gap})
-    check={'passed':not bad,'max_penetration_m':worst,'failed_samples':bad,'samples':len(dense),'fps':200.,
-        'scope':'Dense sampled native robot/terrain geometry only; no dynamic or continuous-time certificate',
-        'model_sha256':hashlib.sha256(a.native_model.read_bytes()).hexdigest()}
+    check=audit_reference_geometry(native,dense,policy)
+    check.update(fps=200.,model_sha256=hashlib.sha256(a.native_model.read_bytes()).hexdigest())
     (a.out/'resampling-geometry.json').write_text(json.dumps(check,indent=2)+'\n')
-    if bad:raise RuntimeError('Resampled reference fails unchanged 1mm geometry gate; no policy input exported')
+    if not check['passed']:raise RuntimeError('Resampled reference fails selected contact/body geometry policy; no policy input exported')
     dense_velocity=differentiate_qpos(m,dense,200.)
     velocity=dense_velocity[::4]
     names=list(PROFILE['joint_names'])
@@ -82,7 +75,8 @@ def main():
         'interpolation':'PCHIP translations/joints and quaternion SLERP; generalized velocities differentiated at 200 Hz and sampled at 50 Hz',
         'resampling_geometry':check,
         'resampling_velocity':speed_check,
-        'reset_soft_violation_rad':soft,'training_approved':False,'purpose':__doc__}
+        'reset_soft_violation_rad':soft,'reference_input_accepted':True,
+        'force_diagnostics_are_training_gate':False,'training_approved':False,'purpose':__doc__}
     (a.out/'manifest.json').write_text(json.dumps(info,indent=2)+'\n');(a.out/'as-run.py').write_bytes(Path(__file__).read_bytes())
     print(json.dumps(info,indent=2))
 

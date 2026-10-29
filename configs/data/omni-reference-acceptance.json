@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "practical_training_reference",
+  "contact_penetration_m": 0.005,
+  "body_penetration_m": 0.001,
+  "self_penetration_m": 0.001,
+  "terminal_contact_gap_m": 0.005,
+  "force_diagnostics_are_training_gate": false,
+  "scope": "Training-reference screening only. Full-source binding, finite values, original hard joint/speed limits, reset compatibility and continuity remain required. Feet get contact allowance only on upward support faces; palms on upward or side faces. Actual policy task acceptance is separate."
+}

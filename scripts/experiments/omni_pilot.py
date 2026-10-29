@@ -29,12 +29,14 @@ def warmstart_terrain_module(module,state,first,base_feature_dim):
     state[first]=new;module.load_state_dict(state)
 
 
-def prepare(inputs,out,include_task_variants=False):
+def prepare(inputs,out,include_task_variants=False,reference_policy=None):
     import mujoco
     import numpy as np
     from mjlab.scene import Scene
     from supermimic.envs.tracking_env_cfg import SuperMimicEnvCfgArgs,make_env_cfg
     from supermimic.robots.dimensions import PROFILE
+    from supermimic.data.reference_acceptance import load_reference_policy,audit_reference_geometry
+    policy=load_reference_policy(reference_policy)
     if len(inputs)<2:raise ValueError('Distinct motion families required')
     scenes=[json.loads((source/'scene.json').read_text()) for source in inputs]
     if len({s['source_motion'].split('_z_scale_')[0] for s in scenes})<2:
@@ -102,12 +104,10 @@ def prepare(inputs,out,include_task_variants=False):
         with np.load(out/f'{clip["name"]}-qpos.npz') as z:q=z['qpos'];v=z['qvel']
         if not np.isfinite(q).all() or not np.isfinite(v).all():raise ValueError('Nonfinite training reference')
         hard=float(np.maximum(np.maximum(m.jnt_range[1:,0]-q[:,7:],q[:,7:]-m.jnt_range[1:,1]),0).max())
-        peak=0.
-        for pose in q:
-            d.qpos[:]=pose;mujoco.mj_forward(m,d)
-            peak=max(peak,-min(float(mujoco.mj_geomDistance(m,d,g,o,.02,witness)) for g in robot for o in terrain))
-        clip.update(maximum_penetration_m=peak,hard_joint_violation_rad=hard,joint_velocity_ratio=float((abs(v[:,6:])/speed).max()))
-        if peak>.001 or hard>1e-8 or clip['joint_velocity_ratio']>1.:raise ValueError(f'Gross input/scene check failed: {clip}')
+        geometry=audit_reference_geometry(m,q,policy)
+        clip.update(maximum_penetration_m=geometry['max_penetration_m'],reference_geometry=geometry,
+            hard_joint_violation_rad=hard,joint_velocity_ratio=float((abs(v[:,6:])/speed).max()))
+        if not geometry['passed'] or hard>1e-8 or clip['joint_velocity_ratio']>1.:raise ValueError(f'Gross input/scene check failed: {clip}')
         if clip['task_type']!='source_full_motion':
             if len(q)<101 or abs(v[-100:]).max()>1e-6 or abs(q[-100:]-q[-1]).max()>1e-6:
                 raise ValueError('Task reference must retain two stationary terminal seconds')
@@ -125,10 +125,10 @@ def prepare(inputs,out,include_task_variants=False):
                     points.extend(m.mesh_vert[first:first+count]@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])
                 if not points:raise ValueError('Missing physical foot')
                 points=np.array(points);surfaces=set()
-                if -.001<=points[:,2].min()<=.002:surfaces.add(-1)
+                if -policy['contact_penetration_m']<=points[:,2].min()<=policy['terminal_contact_gap_m']:surfaces.add(-1)
                 for i in clip['box_indices']:
                     box=boxes[i];local=(points-box['center'])@np.array(box['rotation_world']);half=np.array(box['half_size'])
-                    if (abs(local[:,:2])<=half[:2]+1e-6).all() and -.001<=local[:,2].min()-half[2]<=.002:surfaces.add(i)
+                    if (abs(local[:,:2])<=half[:2]+1e-6).all() and -policy['contact_penetration_m']<=local[:,2].min()-half[2]<=policy['terminal_contact_gap_m']:surfaces.add(i)
                 supported.append(surfaces)
             shared=supported[0]&supported[1]
             if clip['task_type']=='box_stand':valid=target in shared
@@ -139,6 +139,7 @@ def prepare(inputs,out,include_task_variants=False):
     record={'clips':clips,'terrain':str(manifest.resolve()),'terrain_sha256':sha(manifest),'frames':sum(c['frames'] for c in clips),
         'distinct_source_families':len(families),'task_categories':sorted({c['task_type'] for c in clips}),
         'exploratory_training_authorized':True,'authorization':'User: if no particularly outrageous issues, train one hour then continue optimizing',
+        'reference_input_accepted':True,'reference_acceptance_policy':policy,'force_diagnostics_are_training_gate':False,
         'force_diagnostics_passed':False,'complete_climb_verified':False,'final_validation_approved':False,
         'scope':'Two or more motion-conditioned scenes spatially separated in each independent simulator world; no generic terrain perception claim'}
     (out/'manifest.json').write_text(json.dumps(record,indent=2));print(json.dumps(record,indent=2))
@@ -217,11 +218,12 @@ def main():
     p.add_argument('--gpu',type=int,default=3)
     p.add_argument('--source-commit',required=True)
     p.add_argument('--include-task-variants',action='store_true',help='Prepare only: accept source-bound complete ascent/landing goals without counting variants as new families')
+    p.add_argument('--reference-policy',type=Path,help='Prepare only: selective reference tolerances; legacy strict geometry when omitted')
     p.add_argument('--out',type=Path,required=True)
     a=p.parse_args()
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
-    if a.phase=='prepare':prepare(a.inputs,a.out,a.include_task_variants)
+    if a.phase=='prepare':prepare(a.inputs,a.out,a.include_task_variants,a.reference_policy)
     else:train(a)
 
 

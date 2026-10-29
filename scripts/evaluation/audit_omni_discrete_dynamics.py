@@ -83,7 +83,7 @@ def main():
         intervals=len(rows), maximum=maximum,
         exact_integrator_and_replay_verified=bool(maximum['exact_integrator_acceleration_error'] <= 1e-10
             and maximum['replay_position_error'] <= 1e-6 and maximum['replay_velocity_error'] <= 1e-5),
-        inverse_identity_passed_unchanged_1e5=bool(maximum['inverse_root_force_error'] <= 1e-5
+        inverse_identity_passed_unchanged_1e_minus5=bool(maximum['inverse_root_force_error'] <= 1e-5
             and maximum['inverse_motor_force_error'] <= 1e-5),
         interpretation='Finite contact-solver residual prevents treating M*qacc as the exact force RHS. '
             'Use the unchanged simulator step for trajectory optimization and continuous replay.',
