@@ -76,6 +76,13 @@ def prepare(inputs,out,include_task_variants=False,reference_policy=None):
                 or exported['resampling_geometry']['model_sha256']!=scene['model_sha256']
                 or not exported['resampling_geometry']['passed']):
                 raise ValueError('Task dataset requires bound dense geometry and velocity export evidence')
+            export_policy=exported['resampling_geometry'].get('policy',load_reference_policy())
+            for key,measured in [('contact_penetration_m','maximum_support_contact_penetration_m'),
+                ('body_penetration_m','maximum_other_body_penetration_m'),('self_penetration_m','maximum_self_penetration_m')]:
+                if export_policy[key]>policy[key]:
+                    observed=exported['resampling_geometry'].get(measured)
+                    if observed is None or observed>policy[key]:
+                        raise ValueError('Dense measured geometry exceeds selected preparation policy; re-export explicitly')
         with np.load(source/'reference-qpos.npz',allow_pickle=False) as z:q=z['qpos'].copy();v=z['qvel'].copy()
         if float(motion['fps'][0])!=50. or q.shape!=(len(motion['joint_pos']),38):raise ValueError('Expected matching 50 Hz X2 reference')
         if list(motion['joint_names'])!=PROFILE['joint_names']:raise ValueError('Unexpected robot order')

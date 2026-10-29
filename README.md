@@ -9,6 +9,7 @@
 - 已引入参考实现 `ff69a0e5305126eb5b80b323bcd815805bc3df4e`，保留本项目规范；原说明见 [上游 README](docs/upstream/README.md)。
 - 已连接服务器并核验 Ubuntu 22.04.5、四张 RTX 3090、驱动 580.178.04。主训练与 SOMA 环境已核验；40 段 LAFAN1 已完成准备和首轮完整评测，后续续训继续进行。GEM-X 使用独立环境，Webster 参考数据已通过碰撞/接触检查与100步短训；这不代表策略已学会该动作。详见[本项目实验记录](docs/LOCAL_EXPERIMENT.md)。
 - 以下主机与目录布局已连接核验；GPU 占用和磁盘余量以每次启动前的检查为准。
+- 翻箱/上箱三任务参考共1784帧已按用户要求的[分项参考标准](docs/BOX_REFERENCE_ACCEPTANCE.md)复核，可用于训练；接触误差适当放宽，硬限位、速度、身体穿透和来源绑定保留严格检查。近似受力诊断不再阻塞训练，完整策略成功仍待实际验收。
 - 参考项目的安装与运行入口见其 [README](https://github.com/tianshuwu/supermimic-retargeted/blob/main/README.md)、[数据文档](https://github.com/tianshuwu/supermimic-retargeted/blob/main/docs/DATA.md)和[训练文档](https://github.com/tianshuwu/supermimic-retargeted/blob/main/docs/USAGE.md)。引入源码后，以固定版本的实际接口为准。
 
 ## 运行位置

@@ -1,7 +1,8 @@
-"""Export a 50 Hz diagnostic input for the existing frozen X2 controller.
+"""Export a50Hz reference input with explicit training-reference quality gates.
 
-This does not approve the source for training. The original candidate and its
-terrain remain unchanged; all timing changes and hashes are recorded.
+Input acceptance is separate from approximate force diagnostics and actual
+policy success. The original source and terrain remain unchanged; timing,
+selected contact/body tolerances and source hashes are recorded.
 """
 import argparse
 import hashlib
@@ -42,7 +43,7 @@ def main():
     soft=float(np.maximum(np.maximum(mid-half-result[:,7:],result[:,7:]-(mid+half)),0).max())
     if soft>1e-8:raise ValueError('Interpolation violates the existing 0.9 reset bounds')
     a.out.mkdir(parents=True)
-    native=mujoco.MjModel.from_binary_path(str(a.native_model));d=mujoco.MjData(native)
+    native=mujoco.MjModel.from_binary_path(str(a.native_model))
     if (native.nq,native.nv,native.nu)!=(38,37,31):raise ValueError('Unexpected native robot model')
     if [native.joint(i).name.removeprefix('robot/') for i in range(1,native.njnt)]!=[m.joint(i).name for i in range(1,m.njnt)]:raise ValueError('Native joint order differs')
     check=audit_reference_geometry(native,dense,policy)

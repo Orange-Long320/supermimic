@@ -52,8 +52,8 @@
       "retain distinct source families rather than counting scaled copies as distinct skills",
       "keep each clip paired with its measured terrain and contact phases"
     ],
-    "mixing_gate": "Final usable-reference acceptance still requires physical/continuous checks. Explicit user-authorized exploratory training may proceed after finite data, original joint/speed, scene geometry and single-GPU capacity checks; it does not waive final acceptance.",
-    "status": "User confirmed box-top standing and vault/landing tasks. The3-family1784-frame exploratory hour completed, with3/3 full-start task failures. Dense reference force checks also fail. A67-frame50Hz corrected window passes the unchanged force LP, including explicitly verified zero-contact flight; the full reference, C2dense interpolation and native compliant-contact inverse remain unapproved. Correct references before another unchanged long fit.",
+    "mixing_gate": "Use the explicit practical training-reference policy: finite/source/scene/order binding, original hard joint and speed limits, reset-compatible bounds and continuity remain required. Allow up to5mm at valid foot/palm support contacts,1mm at other bodies/self; terminal reference gap up to5mm. Approximate force/inverse residuals are advisory, not a prerequisite for training. Actual complete-policy task acceptance remains separate.",
+    "status": "Three source families/1784frames accepted as training references under the user-requested selective policy. Existing dynamics failures remain recorded as diagnostics. Continue the already active fit and evaluate actual source0 climb/vault/landing; no need to perfect inverse residuals before training.",
     "height_selection_update": "Prioritize official ~46cm effective-rise hand climb before its failed ~69cm variant; retain other ~55cm/~60cm hand families and ~28cm/~39cm/~43cm step families. Variants are not counted as additional skills.",
     "confirmed_task_scope": [
       "box-top standing",
@@ -195,7 +195,11 @@
     "current_formal_training_batch_size": 1024,
     "current_formal_training_pid": 1460731,
     "current_formal_training_run": "omni_single_three_hour_batch4096_20261029_r1",
-    "current_remaining_formal_training_seconds_at_start": 10033.38054513745
+    "current_remaining_formal_training_seconds_at_start": 10033.38054513745,
+    "practical_reference_review": "omni_practical_reference_gate_20261029_r1/review.json",
+    "practical_reference_contact_regression": "omni_practical_reference_gate_20261029_r1/selective-contact-regression.json",
+    "practical_reference_input_accepted": true,
+    "finite_solver_discrete_dynamics": "omni_practical_reference_gate_20261029_r1/discrete-dynamics/report.json"
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
@@ -205,5 +209,7 @@
     "collision_backtracking": true,
     "nonlinear_restoration": true,
     "phase_aware_foot_sticking": true
-  }
+  },
+  "reference_acceptance_policy": "configs/data/omni-reference-acceptance.json",
+  "reference_input_accepted": true
 }
