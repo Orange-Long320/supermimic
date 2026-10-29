@@ -70,7 +70,8 @@ def main():
                       matmul_precision=torch.backends.cuda.matmul.fp32_precision,
                       protocol=f'Fixed actor. Separate seed 0/7 simulator runs; DR, reset/observation/action noise enabled. No reset-crossing windows. Refit only dynamics on {a.fit_window}-step state loss; held-out 1/8/32-step evaluation. No policy/critic/termination updates.',
                       fit_steps=a.fit_steps, fit_batch=a.batch_size, fit_window=a.fit_window,
-                      velocity_loss_weight=a.velocity_loss_weight, num_envs=a.num_envs,
+                      velocity_loss_weight=a.velocity_loss_weight,
+                      requested_collection_num_envs=a.num_envs, reuses_training_windows=bool(a.windows_dir),
                       fit_lr=saved['wm_trainer']['lr'])
     (a.out / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
     results = dict(status='collecting', provenance=provenance, collections=[], baselines={}, refits={})
