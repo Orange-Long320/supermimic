@@ -132,6 +132,7 @@ def main():
         if a.heldout_dir:
             test = torch.load(a.heldout_dir / 'heldout-windows.pt', map_location='cuda:0', weights_only=True)
             results['heldout_sha256'] = digest(a.heldout_dir / 'heldout-windows.pt')
+            (a.out/'heldout-windows.pt').symlink_to((a.heldout_dir/'heldout-windows.pt').resolve())
         else:
             test = collect(7, 32, 512)
     if any(d['actions'].shape[0] < a.fit_window for d in train.values()):
