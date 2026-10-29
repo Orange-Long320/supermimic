@@ -48,6 +48,10 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
     ]
     arm_names = [n for n in PROFILE['joint_names'] if any(k in n for k in ('shoulder', 'elbow', 'wrist'))]
     arm_ids = [PROFILE['joint_names'].index(n) for n in arm_names]
+    mj_model=env.sim.mj_model
+    action_joint_names=[mj_model.joint(int(mj_model.actuator_trnid[i,0])).name.split('/')[-1] for i in range(mj_model.nu)]
+    if action_joint_names != PROFILE['joint_names']:
+        raise ValueError('Actuator order differs from the profile; resolve mapping before diagnostics')
     arm_stats = {}
     mailbox = CommandMailbox()
     records = []
@@ -101,6 +105,7 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
         result = {
             "teacher_action_override": teacher_still_arms,
             "arm_joint_names": arm_names,
+            "action_joint_names": action_joint_names,
             "stop_arm_metrics": {str(k):dict(joint_velocity_rms_rad_s=torch.sqrt(v["square"]/v["count"].clamp_min(1)).cpu().tolist(),mean_joint_range_rad=(v["maximum"]-v["minimum"]).mean(-1).cpu().tolist(),samples=v["count"].cpu().tolist()) for k,v in arm_stats.items()},
             "checkpoint": str(ckpt.resolve()), "duration_s": seconds, "seed": args.seed,
             "num_envs": num_envs, "survived_without_reset": int((failed_at < 0).sum()),
