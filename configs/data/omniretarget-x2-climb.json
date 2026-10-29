@@ -172,7 +172,12 @@
     "single_three_hour_capacity_new_updates": 24,
     "single_three_hour_capacity_checkpoint_sha256": "1ab2d68d49b1bb48264db527ef81a6e619484963cd8d578742cc76ccc1b72cc9",
     "single_three_hour_driver_pid": 1446022,
-    "single_three_hour_training_pid": 1447603
+    "single_three_hour_training_pid": 1447603,
+    "batch1024_requested_run": "omni_single_three_hour_batch1024_20261029_r1",
+    "batch1024_status": "waiting_for_next_numbered_checkpoint_before_measured_capacity",
+    "batch1024_transition_pid": 1455562,
+    "batch1024_memory_budget_mib": 20000,
+    "batch1024_total_original_training_budget_minutes": 180
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
