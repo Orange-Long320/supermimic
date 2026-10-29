@@ -27,6 +27,7 @@ def main():
     p.add_argument('--num-envs-per-rank',type=int,default=2048)
     p.add_argument('--deadline-epoch',type=float,help='Absolute formal-training stop time; capacity and setup do not extend it')
     p.add_argument('--preserve-learning-rate',action='store_true')
+    p.add_argument('--validated-resume-run',type=Path,help='Reuse completed same-config distributed training capacity without another fit')
     p.add_argument('--torch-memory-fraction',type=float,default=.4)
     p.add_argument('--fallback-proof',type=Path,help='Measured same-checkpoint capacity proof to resume if this larger-batch trial fails')
     p.add_argument('--fallback-batch-size',type=int,default=1024)
@@ -124,14 +125,36 @@ def main():
         if a.preserve_learning_rate:common+=['--preserve-learning-rate']
         fallback_used=False
         try:
-            peak=stage('capacity',common+['--checkpoint',str(initial),'--phase','capacity','--minutes',str(a.minutes),'--out',str(r/'capacity')],a.gpus,600)
-            ranks=rank_pair(r/'capacity')
+            if a.validated_resume_run is not None:
+                previous=a.validated_resume_run
+                if (previous/'train_3h-exit').read_text().strip()!='0':raise ValueError('Previous training did not complete')
+                ranks=rank_pair(previous/'train_3h')
+                previous_proof=json.loads((previous/'dual-capacity-proof.json').read_text())
+                if (not previous_proof['passed'] or previous_proof['world_size']!=len(a.gpus)
+                    or previous_proof['num_envs_per_rank']!=a.num_envs_per_rank
+                    or previous_proof['batch_size_per_rank']!=a.batch_size
+                    or previous_proof['terrain_sha256']!=manifest['terrain_sha256']
+                    or ranks[0]['checkpoint_sha256']!=sha(initial)):
+                    raise ValueError('Validated resume configuration/checkpoint mismatch')
+                for relative in (previous/'source/src').rglob('*.py'):
+                    if sha(relative)!=sha(s/'src'/relative.relative_to(previous/'source/src')):
+                        raise ValueError('Training package changed: '+str(relative))
+                memory=json.loads((previous/'train_3h-memory-peak.json').read_text())
+                if memory['over_budget_stopped']:raise ValueError('Previous training exceeded memory protection')
+                peak=memory['device_peak_mib']
+                (r/'validated-resume.json').write_text(json.dumps(dict(previous_run=str(previous),
+                    checkpoint_sha256=sha(initial),same_training_package=True,previous_capacity=previous_proof,
+                    previous_formal_memory=memory),indent=2))
+                charged_capacity=0.
+            else:
+                peak=stage('capacity',common+['--checkpoint',str(initial),'--phase','capacity','--minutes',str(a.minutes),'--out',str(r/'capacity')],a.gpus,600)
+                ranks=rank_pair(r/'capacity')
+                charged_capacity=ranks[0]['training_loop_seconds'] if a.include_capacity_in_budget else 0.
             if any(not 0<v<=a.memory_budget_mib for v in peak.values()):raise RuntimeError('Measured per-card capacity budget failed')
             proof=dict(passed=True,world_size=len(a.gpus),num_envs_per_rank=a.num_envs_per_rank,batch_size_per_rank=a.batch_size,
                 checkpoint_sha256=ranks[0]['checkpoint_sha256'],terrain_sha256=manifest['terrain_sha256'],
                 device_peaks_mib=peak,rank_records=ranks)
             fit_checkpoint=ranks[0]['checkpoint']
-            charged_capacity=ranks[0]['training_loop_seconds'] if a.include_capacity_in_budget else 0.
         except Exception as trial_error:
             if a.fallback_proof is None:raise
             proof=json.loads(a.fallback_proof.read_text())
