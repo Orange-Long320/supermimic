@@ -24,14 +24,17 @@ def main():
     data.ctrl[:] = initial['ctrl']
     mujoco.mj_forward(model, data)
     qpos, qvel = [data.qpos.copy()], [data.qvel.copy()]
+    contacts = [[(int(c.geom1), int(c.geom2), float(c.dist)) for c in data.contact[:data.ncon]]]
     for _ in range(a.steps):
         mujoco.mj_step(model, data)
         qpos.append(data.qpos.copy())
         qvel.append(data.qvel.copy())
+        contacts.append([(int(c.geom1), int(c.geom2), float(c.dist)) for c in data.contact[:data.ncon]])
     qpos, qvel = np.asarray(qpos), np.asarray(qvel)
     if not np.isfinite(qpos).all() or not np.isfinite(qvel).all():
         raise ValueError('Nonfinite trajectory')
     np.savez_compressed(a.out, qpos=qpos, qvel=qvel)
+    a.out.with_name(a.out.stem + '-contacts.json').write_text(json.dumps(contacts) + '\n')
     a.out.with_suffix('.json').write_text(json.dumps({
         'mujoco': mujoco.__version__, 'steps': a.steps, 'timestep': model.opt.timestep,
         'initial_sha256': hashlib.sha256(a.initial.read_bytes()).hexdigest(),
