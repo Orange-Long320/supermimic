@@ -56,7 +56,7 @@ def main():
     cfg.velocity.enabled=True;cfg.velocity.fraction=.5
     cfg.velocity.forward=(-.5,.8);cfg.velocity.lateral=(0.,0.);cfg.velocity.yaw=(-.8,.8)
     cfg.velocity.reference_probability=.5;cfg.velocity.standing_probability=.25;cfg.velocity.stop_relabel_fraction=.25
-    cfg.run_name=a.out.name;cfg.log_root=a.out.parent
+    cfg.run_name=a.out.name if rank==0 else a.out.name+'-rank1-internal';cfg.log_root=a.out.parent
     cfg.schedule.total_iterations=100 if a.phase=='capacity' else 320000
     cfg.schedule.max_hours=.15 if a.phase=='capacity' else .5
     cfg.schedule.lr_final_ratio=1.;cfg.schedule.log_interval=20;cfg.schedule.checkpoint_interval=100
