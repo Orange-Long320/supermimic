@@ -22,7 +22,7 @@ cp "$0" "$out/controller-as-run.sh"
 date -u +%FT%TZ > "$out/start-utc.txt"
 echo $$ > "$out/controller.pid"
 nvidia-smi > "$out/gpu-before.txt"
-ps -eo user,pid,args > "$out/processes-before.txt"
+ps -eo user,pid,comm > "$out/processes-before.txt"
 set +e
 timeout --signal=INT --kill-after=30 900 \
   uv run --no-project --python "$env_root/bin/python" train \
