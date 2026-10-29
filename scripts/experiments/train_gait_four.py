@@ -25,6 +25,9 @@ def main():
     p.add_argument('--gpu',type=int,required=True)
     p.add_argument('--phase',choices=['prepare','capacity','train'],required=True)
     p.add_argument('--proof',type=Path)
+    p.add_argument('--num-envs',type=int,default=4096)
+    p.add_argument('--batch-size',type=int,default=512)
+    p.add_argument('--checkpoint',type=Path)
     a=p.parse_args()
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve(): raise ValueError('Dedicated server interpreter required')
     from supermimic.robots.paths import select_robot
@@ -63,17 +66,19 @@ def main():
     torch.set_num_threads(2);torch.cuda.set_per_process_memory_fraction(.8,0)
     cfg=TrainConfig();cfg.robot='x2_ultra';cfg.run_name=a.out.name;cfg.log_root=a.out.parent
     cfg.data.npz_dir=a.dataset;cfg.data.clips=[c['name'] for c in spec['clips']]
-    cfg.env.num_envs=1024;cfg.env.replay_capacity=512;cfg.env.anchor_obs=True
-    cfg.wm_trainer.batch_size=cfg.policy_trainer.batch_size=512
+    cfg.env.num_envs=a.num_envs;cfg.env.replay_capacity=256;cfg.env.anchor_obs=True
+    cfg.wm_trainer.batch_size=cfg.policy_trainer.batch_size=a.batch_size
     cfg.wm_trainer.compile=cfg.policy_trainer.compile=None
-    cfg.schedule.total_iterations=100 if a.phase=='capacity' else 320000
+    cfg.resume=a.checkpoint
+    initial=0 if a.checkpoint is None else torch.load(a.checkpoint,map_location='cpu',weights_only=False)['iteration']
+    cfg.schedule.total_iterations=initial+100 if a.phase=='capacity' else 320000
     cfg.schedule.max_hours=.15 if a.phase=='capacity' else 1.
     cfg.schedule.lr_final_ratio=1.;cfg.schedule.log_interval=20
     cfg.schedule.checkpoint_interval=100 if a.phase=='capacity' else 500
     if a.phase=='train':
         if a.proof is None: p.error('Capacity proof required')
         proof=json.loads(a.proof.read_text())
-        if proof['status']!='completed' or proof['updates']<20 or proof['device_peak_mib']>20000 or proof['dataset_manifest_sha256']!=sha(a.dataset/'manifest.json'): raise ValueError('Capacity proof mismatch')
+        if proof['status']!='completed' or proof['updates']<20 or proof['device_peak_mib']>20000 or proof['configuration']['env']['num_envs']!=a.num_envs or proof['configuration']['policy_trainer']['batch_size']!=a.batch_size or proof['dataset_manifest_sha256']!=sha(a.dataset/'manifest.json'): raise ValueError('Capacity proof mismatch')
         if sha(proof['checkpoint'])!=proof['checkpoint_sha256']: raise ValueError('Capacity checkpoint changed')
         cfg.resume=Path(proof['checkpoint'])
     a.out.mkdir(parents=True,exist_ok=False)
