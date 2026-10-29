@@ -32,6 +32,7 @@ def main():
     p.add_argument('--batch-size', type=int, default=256)
     p.add_argument('--windows-dir', type=Path, help='Reuse immutable train and held-out trajectories')
     p.add_argument('--fit-arms', nargs='+', choices=('motion_only', 'mixed'), default=['motion_only', 'mixed'])
+    p.add_argument('--fit-window', type=int, choices=(8, 32), default=8)
     a = p.parse_args()
     if not (64 <= a.steps <= 1500 and 8 <= a.num_envs <= 128 and 1 <= a.fit_steps <= 512):
         raise ValueError('Outside bounded audit limits')
@@ -62,7 +63,8 @@ def main():
                       manifest_sha256=digest(a.dataset / 'manifest.json'),
                       saved_iteration=ck['iteration'], saved_updates=ck['num_updates'],
                       protocol='Fixed actor. Separate seed 0/7 simulator runs; DR, reset/observation/action noise enabled. No reset-crossing windows. Refit only dynamics on 8-step state loss; held-out 1/8/32-step evaluation. No policy/critic/termination updates.',
-                      fit_steps=a.fit_steps, fit_batch=a.batch_size, fit_lr=saved['wm_trainer']['lr'])
+                      fit_steps=a.fit_steps, fit_batch=a.batch_size, fit_window=a.fit_window,
+                      fit_lr=saved['wm_trainer']['lr'])
     (a.out / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
     results = dict(status='collecting', provenance=provenance, collections=[], baselines={}, refits={})
 
@@ -119,8 +121,10 @@ def main():
         results['reused_windows'] = {name: digest(a.windows_dir / name)
                                     for name in ('train-windows.pt', 'heldout-windows.pt')}
     else:
-        train = collect(0, 8, 4096)
+        train = collect(0, 32, 4096)
         test = collect(7, 32, 512)
+    if any(d['actions'].shape[0] < a.fit_window for d in train.values()):
+        raise ValueError('Recorded windows are shorter than the requested fit window')
     results['status'] = 'fitting'
 
     def load_wm(checkpoint):
@@ -173,9 +177,9 @@ def main():
             states, actions, xi = merged['states'][:, idx], merged['actions'][:, idx], merged['xi'][idx]
             pred = states[0]
             loss = 0.
-            for j in range(8):
+            for j in range(a.fit_window):
                 pred = wm.step(pred, actions[j], xi)
-                loss = loss + wm.spec.error_vector(pred, states[j + 1]).square().sum(-1).mean() / 8
+                loss = loss + wm.spec.error_vector(pred, states[j + 1]).square().sum(-1).mean() / a.fit_window
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             norm = torch.nn.utils.clip_grad_norm_(wm.parameters(), saved['wm_trainer']['grad_clip'])
