@@ -162,12 +162,17 @@
     "anchored_entry_training_approved": false,
     "current_task_reference_previews": "omni_task_reference_videos_20261029_r1",
     "single_three_hour_run": "omni_single_three_hour_20261029_r1",
-    "single_three_hour_status": "capacity_running_not_formal_fit_yet",
+    "single_three_hour_status": "formal_train_3h_running",
     "single_three_hour_initial_checkpoint_sha256": "56171954cc043456cc00ab239b34bacea6549f3bb27d211de11331df8cd5c44f",
     "single_three_hour_gpu": 3,
     "single_three_hour_memory_budget_mib": 12800,
     "single_three_hour_requested_minutes": 180,
-    "single_three_hour_complete_task_verified": false
+    "single_three_hour_complete_task_verified": false,
+    "single_three_hour_capacity_peak_mib": 11703,
+    "single_three_hour_capacity_new_updates": 24,
+    "single_three_hour_capacity_checkpoint_sha256": "1ab2d68d49b1bb48264db527ef81a6e619484963cd8d578742cc76ccc1b72cc9",
+    "single_three_hour_driver_pid": 1446022,
+    "single_three_hour_training_pid": 1447603
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
