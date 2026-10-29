@@ -95,6 +95,11 @@ def install_velocity_horizon(horizon=8):
     base = module.JointPolicyTrainer
 
     class BoundedVelocityTrainer(base):
+        def checkpoint_state(self):
+            state = super().checkpoint_state()
+            state['imagination_horizon'] = horizon
+            return state
+
         def _velocity_update(self, buffer):
             previous = self.cfg
             self.cfg = replace(previous, horizon=horizon)

@@ -50,6 +50,7 @@ def main():
         metrics=trainer._velocity_update(t.buffer)
         assert captured==dict(velocity_steps=8,state_count=9,horizon_during_update=8),captured
         assert trainer.cfg is original_cfg and trainer.cfg.horizon==32
+        assert trainer.checkpoint_state()['imagination_horizon']==8
         assert metrics['alignment']>0 and metrics['critic_loss']>=0
         assert all(torch.isfinite(torch.tensor(v)) for v in metrics.values())
         assert any(not torch.equal(v,before[k]) for k,v in t.policy.encoders['velocity'].state_dict().items())
