@@ -1,5 +1,6 @@
 """Server CPU preview of an X2 Omni kinematic candidate; never policy footage."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,13 +23,25 @@ def main():
     from scipy.spatial.transform import Rotation
     with np.load(a.reference,allow_pickle=False) as z:q=z['qpos'];fps=float(np.asarray(z['fps']).reshape(-1)[0])
     if not np.isfinite(a.preview_fps) or not 0<a.preview_fps<=fps:p.error('Preview rate must be positive and at most the source rate')
-    spec=mujoco.MjSpec.from_file(str(a.model));scene=json.loads(a.scene.read_text())
-    spec.worldbody.add_geom(name='preview_floor',type=mujoco.mjtGeom.mjGEOM_PLANE,size=(0,0,.05),rgba=(.75,.75,.75,1))
-    spec.worldbody.add_light(pos=(1,-3,5),dir=(0,0,-1))
-    for i,box in enumerate(scene['scene_boxes']):
-        quat=Rotation.from_matrix(box['rotation_world']).as_quat()[[3,0,1,2]]
-        spec.worldbody.add_geom(name=f'preview_box_{i}',type=mujoco.mjtGeom.mjGEOM_BOX,pos=box['center'],size=box['half_size'],quat=quat,rgba=(.2,.45,.7,1))
-    model=spec.compile();data=mujoco.MjData(model)
+    scene=json.loads(a.scene.read_text())
+    if a.model.suffix=='.mjb':
+        # The native binary already contains the verified fixed scene. Do not
+        # add duplicate boxes or manufacture a recorded-execution artifact.
+        model=mujoco.MjModel.from_binary_path(str(a.model))
+        binding=a.reference.parent/'resampling-geometry.json'
+        if not binding.is_file():raise ValueError('Native reference requires its model-binding geometry report')
+        proof=json.loads(binding.read_text())
+        if proof.get('model_sha256')!=hashlib.sha256(a.model.read_bytes()).hexdigest():
+            raise ValueError('Reference/native model hash mismatch')
+    else:
+        spec=mujoco.MjSpec.from_file(str(a.model))
+        spec.worldbody.add_geom(name='preview_floor',type=mujoco.mjtGeom.mjGEOM_PLANE,size=(0,0,.05),rgba=(.75,.75,.75,1))
+        spec.worldbody.add_light(pos=(1,-3,5),dir=(0,0,-1))
+        for i,box in enumerate(scene['scene_boxes']):
+            quat=Rotation.from_matrix(box['rotation_world']).as_quat()[[3,0,1,2]]
+            spec.worldbody.add_geom(name=f'preview_box_{i}',type=mujoco.mjtGeom.mjGEOM_BOX,pos=box['center'],size=box['half_size'],quat=quat,rgba=(.2,.45,.7,1))
+        model=spec.compile()
+    data=mujoco.MjData(model)
     if q.shape[1]!=model.nq:raise ValueError('Reference/model dimensions differ')
     model.vis.global_.offwidth=640;model.vis.global_.offheight=480
     camera=mujoco.MjvCamera();camera.type=mujoco.mjtCamera.mjCAMERA_FREE
@@ -49,7 +62,8 @@ def main():
         finally:process.stdin.close()
         if process.wait()!=0:raise RuntimeError('FFmpeg failed')
     Image.fromarray(np.concatenate([np.concatenate(previews[:2],axis=1),np.concatenate(previews[2:],axis=1)],axis=0)).save(a.out.with_suffix('.jpg'))
-    a.out.with_suffix('.json').write_text(json.dumps({'reference':str(a.reference),'frames':len(q),'source_fps':fps,'render_stride':step,'renderer':'OSMesa CPU','policy_evaluation':False},indent=2)+'\n')
+    sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+    a.out.with_suffix('.json').write_text(json.dumps({'reference':str(a.reference),'frames':len(q),'source_fps':fps,'render_stride':step,'renderer':'OSMesa CPU','policy_evaluation':False,'physics_execution':False,'reference_sha256':sha(a.reference),'model_sha256':sha(a.model),'scene_sha256':sha(a.scene),'video_sha256':sha(a.out)},indent=2)+'\n')
     a.out.with_suffix('.as-run.py').write_bytes(Path(__file__).read_bytes())
 
 
