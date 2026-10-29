@@ -110,6 +110,9 @@ def main():
     else:
         proof=json.loads(a.proof.read_text())
         if not proof['passed'] or proof['checkpoint_sha256']!=sha(a.checkpoint):raise ValueError('Keyboard capacity proof mismatch')
+        if (proof['dataset_manifest_sha256']!=sha(a.dataset/'manifest.json') or proof['world_size']!=world
+                or proof['num_envs_per_rank']!=cfg.env.num_envs or proof['batch_size_per_rank']!=cfg.policy_trainer.batch_size):
+            raise ValueError('Continuation capacity configuration mismatch')
         cfg.resume=a.checkpoint
     record=dict(status='initializing',phase=a.phase,rank=rank,physical_gpu=gpu,pid=os.getpid(),checkpoint=str(a.checkpoint),checkpoint_sha256=sha(a.checkpoint),dataset_manifest_sha256=sha(a.dataset/'manifest.json'),omitted_unused_metadata=omitted,keyboard_validated=False,paired_supervision=a.paired_supervision,quiet_stop_cost=a.quiet_stop_cost)
     def save():(a.out/f'rank-{rank}.json').write_text(json.dumps(record,indent=2,default=str)+'\n')
