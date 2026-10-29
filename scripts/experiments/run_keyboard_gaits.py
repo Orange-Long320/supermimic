@@ -10,6 +10,7 @@ def main():
     p.add_argument('--repaired-velocity',action='store_true')
     p.add_argument('--quiet-stop-cost',action='store_true')
     p.add_argument('--stop-evaluator',type=Path)
+    p.add_argument('--freeze-motion-expert',action='store_true')
     p.add_argument('--control-prior',type=Path)
     p.add_argument('--velocity-horizon',type=int,default=32)
     p.add_argument('--wm-batches-per-update',type=int,default=20)
@@ -36,6 +37,7 @@ def main():
     env['WARP_CACHE_PATH']=env['XDG_CACHE_HOME']+'/warp'
     py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python'
     common=[py,'-m','torch.distributed.run','--standalone','--nproc-per-node','2',str(a.entry),'--dataset',str(a.dataset),'--hours',str(a.hours),'--velocity-horizon',str(a.velocity_horizon),'--wm-batches-per-update',str(a.wm_batches_per_update)]
+    if a.freeze_motion_expert:common+=['--freeze-motion-expert']
     if a.control_prior:common+=['--control-prior',str(a.control_prior)]
     def stage(name,checkpoint,proof=None):
         while True:

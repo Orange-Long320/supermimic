@@ -91,3 +91,13 @@ run_keyboard_gaits增加可选--require-physical-capacity-regression：双卡100
 32步+WM20批+控制保持实际短训至80步：模型NSE8约0.0299，WM每20环境步约21秒，策略约55秒。运行正常不等于模型长期预测已合格。等待rank同步/显存检查与含手臂物理回归，不预先宣布通过。
 
 合并候选66秒原速录像candidate66.mp4已完成，1650帧/25fps/1280×720，无首次失败/重置；同SHA、seed0、只展示env0。已检查4/17/29/41/54/63秒六帧，可见停止有平衡微动与漂移，完整保留，没有剪掉未达标段。本地outputs/keyboard_teacher_merge_20261029_r1/candidate66.mp4。视频不是未来长训结果，也不能替代16环境指标。
+
+## 第一版修正仍退化：容量物理门检已阻止长训
+
+logs/keyboard_rootfix_continue_20261029_r1：32步/WM20批/控制保持的100步24更新完成，双rank最终参数一致，显存9302/9303MiB。然而物理门检8/8不倒但前进0.0931、后退-0.0428、小跑0.3146m/s，显著低于源候选；no_material_regression_vs_source=false，控制器以capacity_physical_regression_failed退出，剩余长训没有启动。该事实否定“单靠增WM批次+软保持已解决”的结论。
+
+同一独立heldout窗口，新WM速度32步vx/yaw RMSE0.2424/0.3118，原1000步模型0.1453/0.2778；短训阶段仍未改善，不能标为模型拟合通过。
+
+因果拆分 logs/keyboard_decoder_causal_20261029_r1：仅恢复源decoder、保留新velocity encoder，66秒8/8不倒，但前进0.0076、后退-0.3843、小跑0.3187；仅恢复源velocity encoder、保留新decoder，前进0.1293、后退-0.0091、小跑0.4957。各变体明确只替换相应参数并逐项核对，均无优化器更新。单独改变decoder就损伤原速度接口，单独恢复任一模块都不足以恢复完整响应，证明存在耦合迁移问题；不把它简化成一个符号错误。
+
+下一项受控改动：--freeze-motion-expert固定已完成五动作的motion encoder、decoder与tracking critic，跟踪环境仍贡献世界模型训练数据，只有速度接口/速度critic更新。维持32步、WM20批、原LR与控制保持，其余配置不变。初始/最终motion_expert参数SHA必须相等；先100步及同物理回归，未通过仍禁止长训。这是待验证修正，不预先宣布成功。

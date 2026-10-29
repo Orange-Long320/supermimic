@@ -20,6 +20,7 @@ def main():
     p.add_argument('--quiet-stop-cost',action='store_true')
     p.add_argument('--velocity-horizon',type=int,default=32,help='Upstream horizon; 8 remains a diagnostic option')
     p.add_argument('--wm-batches-per-update',type=int,default=20,help='20 batches preserve upstream fitting per new transition at 8192 environments')
+    p.add_argument('--freeze-motion-expert',action='store_true')
     p.add_argument('--control-prior',type=Path,help='Frozen validated single-encoder checkpoint for counterfactual control retention')
     p.add_argument('--weights-only',action='store_true',help='Import repaired velocity weights with fresh optimizers')
     p.add_argument('--paired-supervision', action=argparse.BooleanOptionalAction, default=True, help='Use tracking replay for persistent teacher alignment')
@@ -49,6 +50,9 @@ def main():
     if a.control_prior:
         from keyboard_supervision import install_control_prior
         install_control_prior(a.control_prior)
+    if a.freeze_motion_expert:
+        from keyboard_supervision import install_frozen_motion_expert
+        install_frozen_motion_expert()
     from supermimic.training.loop import Trainer
     from supermimic.training.distributed import broadcast_params
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():raise ValueError('Dedicated server interpreter required')
@@ -124,7 +128,7 @@ def main():
                 or proof['num_envs_per_rank']!=cfg.env.num_envs or proof['batch_size_per_rank']!=cfg.policy_trainer.batch_size):
             raise ValueError('Continuation capacity configuration mismatch')
         cfg.resume=a.checkpoint
-    record=dict(status='initializing',phase=a.phase,rank=rank,physical_gpu=gpu,pid=os.getpid(),checkpoint=str(a.checkpoint),checkpoint_sha256=sha(a.checkpoint),dataset_manifest_sha256=sha(a.dataset/'manifest.json'),omitted_unused_metadata=omitted,keyboard_validated=False,paired_supervision=a.paired_supervision,quiet_stop_cost=a.quiet_stop_cost,velocity_horizon=a.velocity_horizon,control_prior=str(a.control_prior) if a.control_prior else None)
+    record=dict(status='initializing',phase=a.phase,rank=rank,physical_gpu=gpu,pid=os.getpid(),checkpoint=str(a.checkpoint),checkpoint_sha256=sha(a.checkpoint),dataset_manifest_sha256=sha(a.dataset/'manifest.json'),omitted_unused_metadata=omitted,keyboard_validated=False,paired_supervision=a.paired_supervision,quiet_stop_cost=a.quiet_stop_cost,velocity_horizon=a.velocity_horizon,control_prior=str(a.control_prior) if a.control_prior else None,freeze_motion_expert=a.freeze_motion_expert)
     def save():(a.out/f'rank-{rank}.json').write_text(json.dumps(record,indent=2,default=str)+'\n')
     def hashes():
         result={}
@@ -132,6 +136,11 @@ def main():
             h=hashlib.sha256()
             for n,v in m.state_dict().items():h.update(n.encode());h.update(v.detach().cpu().contiguous().numpy().tobytes())
             result[k]=h.hexdigest()
+        h=hashlib.sha256()
+        for n,v in trainer.policy.state_dict().items():
+            if not n.startswith('encoders.velocity.'):
+                h.update(n.encode());h.update(v.detach().cpu().contiguous().numpy().tobytes())
+        result['motion_expert']=h.hexdigest()
         return result
     save();trainer=None;stop=threading.Event();samples=[];start=time.monotonic()
     def sample():
@@ -153,6 +162,7 @@ def main():
         del ck
         record.update(status='running',configuration=asdict(cfg),initial_parameter_hashes=hashes(),training_started_epoch=time.time());save()
         trainer.run();record.update(status='completed',iteration=trainer.iteration,updates=trainer.num_updates,final_parameter_hashes=hashes())
+        if a.freeze_motion_expert and record['initial_parameter_hashes']['motion_expert']!=record['final_parameter_hashes']['motion_expert']:raise ValueError('Frozen expert changed')
         if rank==0:
             f=a.out/'ckpt_latest.pt';z=torch.load(f,map_location='cpu',weights_only=False)
             if not all(torch.isfinite(v).all() for k in ['wm','policy','critic'] for v in z[k].values() if torch.is_tensor(v)):raise ValueError('Nonfinite checkpoint')

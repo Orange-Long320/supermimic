@@ -172,3 +172,31 @@ def install_control_prior(checkpoint, weight=10.):
             return super().load_checkpoint_state(state)
 
     module.JointPolicyTrainer=RetainedControlTrainer
+
+
+def install_frozen_motion_expert():
+    """Keep the completed motion expert fixed while learning its velocity input.
+
+    Motion environments still collect transitions for WM fitting. Only their
+    already-validated encoder/decoder and tracking critic skip further updates.
+    """
+    import supermimic.locomotion.trainer as module
+    base=module.JointPolicyTrainer
+
+    class FixedExpertTrainer(base):
+        def __init__(self,*args,**kwargs):
+            super().__init__(*args,**kwargs)
+            self.policy.encoders['motion'].requires_grad_(False)
+            self.policy.decoder.requires_grad_(False)
+            self.critic.requires_grad_(False)
+
+        def update(self,buffer,xi_norm_fn=None):
+            metrics=self._velocity_update(buffer)
+            return {'expert_frozen':1.,**{f'velocity/{k}':v for k,v in metrics.items()}}
+
+        def checkpoint_state(self):
+            state=super().checkpoint_state()
+            state['frozen_motion_expert']=True
+            return state
+
+    module.JointPolicyTrainer=FixedExpertTrainer
