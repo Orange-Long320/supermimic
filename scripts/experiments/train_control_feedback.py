@@ -75,7 +75,7 @@ def main():
   for it in range(a.iterations):
    if a.sigma_final is not None:
     fraction=min(it/a.sigma_anneal_iterations,1.)
-    sigma=a.sigma+(a.sigma_final-a.sigma)*fraction
+    sigma=a.sigma_final if fraction>=1. else a.sigma+(a.sigma_final-a.sigma)*fraction
    batch=[]
    with torch.no_grad():
     for step in range(32):
