@@ -26,6 +26,8 @@ def main():
     p.add_argument('--maximum-knee-deg',type=float,help='Optional posture bound for leg-adjustment calibration; only tightens joint range')
     p.add_argument('--minimum-knee-deg',type=float,help='Optional minimum knee flexion for posture calibration; only tightens joint range')
     p.add_argument('--maximum-hip-roll-magnitude-deg',type=float,help='Optional symmetric hip-roll posture bound; only tightens joint range')
+    p.add_argument('--polish-root-newton',action='store_true',help='Bounded root-wrench Newton refinement with actual geometry/motor acceptance')
+    p.add_argument('--parallel-calves',action='store_true',help='Add measured calf direction and frontal alignment posture residuals')
     args=p.parse_args()
     if not np.isfinite(args.support_height_m) or min(args.max_trials,args.max_nfev)<1:p.error('Finite support height and positive solver budgets required')
     if not 0<args.joint_limit_factor<=1:p.error('Joint range factor must be in (0,1]')
@@ -53,6 +55,15 @@ def main():
     local=mujoco.MjData(m);local.qpos[:]=q0;mujoco.mj_kinematics(m,local)
     left_position=local.xpos[feet['left']].copy()
     left_rotation=Rotation.from_matrix(local.xmat[feet['left']].reshape(3,3))
+    forward=local.xmat[root].reshape(3,3)[:,0].copy();forward[2]=0;forward/=np.linalg.norm(forward)
+    lateral=np.cross([0.,0.,1.],forward)
+    def calf_residual():
+        if not args.parallel_calves:return []
+        directions=[]
+        for side in ['left','right']:
+            vector=d.xpos[m.body('robot/'+side+'_knee_link').id]-d.xpos[feet[side]]
+            directions.append(vector/np.linalg.norm(vector))
+        return np.r_[(directions[0]-directions[1])*10,[v@lateral*10 for v in directions]]
     meshes=[]
     for g in range(m.ngeom):
         if int(m.body_rootid[int(m.geom_bodyid[g])])!=root or not (m.geom_contype[g] or m.geom_conaffinity[g]):continue
@@ -100,7 +111,7 @@ def main():
         return np.r_[force[:6]/scale*20,
             [max(h[s]+.0002,0)*50 for s in feet],[max(-compression_target-h[s],0)*100 for s in feet],
             [max(.05*weight-n[s],0)/weight*10 for s in feet],max(.005-h['nonfoot'],0)*100,
-            np.maximum(abs(force[6:])/effort-.95,0)*10,upright_residual(),x*.001]
+            np.maximum(abs(force[6:])/effort-.95,0)*10,upright_residual(),calf_residual(),x*.001]
     def jacobian(x):
         steps=np.r_[1e-6,np.full(len(x)-1,1e-5)];columns=[]
         for i,h in enumerate(steps):
@@ -125,7 +136,7 @@ def main():
                 return np.r_[force[:6]/scale,
                     np.maximum(abs(force[6:])/effort-1.,0),
                     [max(-compression_target-h[s],0)*100 for s in feet],max(.005-h['nonfoot'],0)*100,
-                    [max(10.-n[s],0)/weight for s in feet],upright_residual()]
+                    [max(10.-n[s],0)/weight for s in feet],upright_residual(),calf_residual()]
             def balance_jac(y):
                 columns=[]
                 for j,step in enumerate(np.r_[1e-7,np.full(len(y)-1,1e-6)]):
@@ -136,10 +147,36 @@ def main():
                 bounds=(lower[indices],upper[indices]),max_nfev=args.max_nfev,
                 ftol=1e-13,xtol=1e-13,gtol=1e-13)
             fixed[indices]=polished.x;fit.x=fixed;polish_evaluations=int(polished.nfev)
+        newton_steps=0
+        if args.polish_root_newton:
+            # Solve the remaining physical root wrench directly. The geometry
+            # and motor limits gate every accepted step; no root force is applied.
+            for iteration in range(20):
+                x=fit.x.copy();_,force,_,_,_=evaluate(x);wrench=force[:6]/scale
+                if abs(wrench).max()<1e-10:break
+                wrench_columns=[]
+                for j in range(len(x)):
+                    hstep=1e-6;delta=np.zeros(len(x));delta[j]=hstep
+                    fp=evaluate(x+delta)[1][:6]/scale;fm=evaluate(x-delta)[1][:6]/scale
+                    wrench_columns.append((fp-fm)/(2*hstep))
+                jac=np.stack(wrench_columns,axis=1)
+                step=np.linalg.lstsq(jac,-wrench,rcond=1e-8)[0]
+                accepted=False
+                for reduction in range(16):
+                    trial=np.clip(x+step*2.**(-reduction),lower,upper)
+                    tq,tf,th,tn,_=evaluate(trial);error=abs(tf[:6]/scale).max()
+                    valid=(max(abs(tf[6:])/effort)<=1 and min(th[s] for s in feet)>-compression_limit
+                           and max(th[s] for s in feet)<.005 and th['nonfoot']>.005
+                           and min(tn.values())>10 and d.xmat[root].reshape(3,3)[2,2]>minimum_up
+                           and (not args.parallel_calves or np.max(abs(calf_residual()))<.35))
+                    if valid and error<abs(wrench).max()*(1-1e-4):
+                        fit.x=trial;newton_steps+=1;accepted=True;break
+                if not accepted:break
         q,force,h,n,contacts=evaluate(fit.x);ratio=float((abs(force[6:])/effort).max())
         root_error=float(abs(force[:6]/scale).max());up=float(d.xmat[root].reshape(3,3)[2,2])
         hard=float(np.maximum(np.maximum(m.jnt_range[1:,0]-q[7:],q[7:]-m.jnt_range[1:,1]),0).max())
-        passed=bool(root_error<1e-5 and ratio<=1 and hard<1e-9 and min(n.values())>10 and
+        posture_passed=not args.parallel_calves or np.max(abs(calf_residual()))<.35
+        passed=bool(posture_passed and root_error<1e-5 and ratio<=1 and hard<1e-9 and min(n.values())>10 and
                     min(h[s] for s in feet)>-compression_limit and max(h[s] for s in feet)<.005 and h['nonfoot']>.005 and up>minimum_up)
         final_residual=residual(fit.x)
         item={'adjustments':fit.x.tolist(),'cost':float(.5*final_residual@final_residual),'initial_fit_cost':float(fit.cost),'root_force_residual_normalized':root_error,
@@ -147,6 +184,8 @@ def main():
               'root_up_z':up,'hard_violation_rad':hard,'static_force_feasible':passed,
               'strict_geometry_static_feasible':passed,'evaluations':int(fit.nfev),
               'fixed_pressure_polish_evaluations':polish_evaluations,
+              'accepted_root_newton_steps':newton_steps,
+              'posture_residual':np.asarray(calf_residual()).tolist(),'posture_passed':bool(posture_passed),
               'adjusted_joint_names':[m.joint(j).name for j in joints]}
         trials.append((item,q,force))
         print(json.dumps({'trial':len(trials),'root_residual':root_error,'maximum_motor_ratio':ratio,'static_feasible':passed}),flush=True)

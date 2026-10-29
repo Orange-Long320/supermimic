@@ -15,11 +15,14 @@ def main():
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--template', type=Path, help='Previously verified stance; rigidly place at terminal support, no joint fitting')
     p.add_argument('--template-support-height-m', type=float)
+    p.add_argument('--feedforward-mode',choices=['inverse','none'],default='inverse',help='Motor-only hold diagnostic: inverse feedforward or original PD alone')
+    p.add_argument('--hold-seconds',type=float,default=2.)
     a = p.parse_args()
     if a.out.exists():
         p.error('New output required')
     if a.template and a.template_support_height_m is None:
         p.error('Template support height required')
+    if not 2<=a.hold_seconds<=10:p.error('Hold duration must be 2–10 seconds')
     import mujoco
     import numpy as np
     from scipy.optimize import least_squares
@@ -120,8 +123,9 @@ def main():
             actual=mujoco.MjData(m); desired=mujoco.MjData(m)
             actual.qpos[:]=q; desired.qpos[:]=q; mujoco.mj_inverse(m,desired)
             kp=m.actuator_gainprm[:,0]; feed=desired.qfrc_inverse[av]
+            if a.feedforward_mode=='none':feed=np.zeros_like(feed)
             states=[]; maxhard=0.; maxpenetration=0.; minup=1.; drift=0.
-            for step in range(round(2/m.opt.timestep)):
+            for step in range(round(a.hold_seconds/m.opt.timestep)):
                 actual.ctrl[:]=q[ac]+feed/kp
                 mujoco.mj_step(m,actual); mujoco.mj_forward(m,actual)
                 states.append(np.r_[actual.qpos.copy(),actual.qvel.copy()])
@@ -133,11 +137,12 @@ def main():
             np.savez_compressed(output/f'{label}-hold.npz',state=np.asarray(states),dt=m.opt.timestep)
             return dict(seconds=len(states)*m.opt.timestep,min_root_up=minup,max_root_drift_m=drift,
                         maximum_hard_violation_rad=maxhard,maximum_contact_penetration_m=maxpenetration,
-                        narrow_hold_gate_passed=bool(len(states)*m.opt.timestep>=2 and minup>.9 and drift<.03 and maxhard<1e-6 and maxpenetration<.005),
-                        scope='Motor PD plus native inverse feedforward, terminal initialized; not learned policy, full task, or transition acceptance')
+                        narrow_hold_gate_passed=bool(len(states)*m.opt.timestep>=a.hold_seconds-1e-9 and minup>.9 and drift<.03 and maxhard<1e-6 and maxpenetration<.005),
+                        scope=f'Motor PD, feedforward={a.feedforward_mode}, terminal initialized; not learned policy, full task, or transition acceptance')
         task={'model_sha256':hashlib.sha256(Path(row['model']).read_bytes()).hexdigest(),
               'reference_sha256':hashlib.sha256(Path(row['reference']).read_bytes()).hexdigest(),
               'template':str(a.template) if a.template else None,
+              'feedforward_mode':a.feedforward_mode,
               'geometric_solver_success':bool(fit.success) if fit else None,'physical_solver_success':bool(physical.success) if physical else None,
               'geometric_nfev':fit.nfev if fit else 0,'physical_nfev':physical.nfev if physical else 0,
               'original_hold':hold(base,'original'),'candidate_hold':hold(candidate,'candidate'),
