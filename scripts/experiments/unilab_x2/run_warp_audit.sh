@@ -8,6 +8,11 @@ export XDG_CACHE_HOME=/home/2025-Long.xh/HHD/data/supermimic/cache
 echo $$ > "$r/controller.pid"
 trap 'code=$?; echo "$code" > "$r/controller.exit"' EXIT
 for name in supermimic supermimic-unilab; do
+  occupants=$(nvidia-smi -i 1 --query-compute-apps=pid --format=csv,noheader,nounits)
+  if [[ -n ${occupants//[[:space:]]/} ]]; then
+    echo "GPU 1 has compute processes; refusing to start: $occupants" >&2
+    exit 1
+  fi
   date -u +%FT%TZ > "$r/$name.start"
   timeout --signal=INT --kill-after=20 300 \
     "/home/2025-Long.xh/HHD/venvs/$name/bin/python" "$r/audit_warp_trajectory.py" \
