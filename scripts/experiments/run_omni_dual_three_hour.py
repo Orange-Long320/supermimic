@@ -136,10 +136,12 @@ def main():
                 or proof['batch_size_per_rank']!=a.fallback_batch_size):raise RuntimeError('Fallback proof mismatch') from trial_error
             failed_path=r/'capacity/rank-0.json'
             failed=json.loads(failed_path.read_text()) if failed_path.exists() else {}
-            charged_capacity=failed.get('training_loop_seconds',max(0.,time.time()-failed['training_started_at']) if 'training_started_at' in failed else 0.)
+            actual_trial_seconds=failed.get('training_loop_seconds',max(0.,time.time()-failed['training_started_at']) if 'training_started_at' in failed else 0.)
+            charged_capacity=actual_trial_seconds if a.include_capacity_in_budget else 0.
             failure=dict(requested_batch_size=a.batch_size,trial_passed=False,reason=str(trial_error),
                 fallback_batch_size=a.fallback_batch_size,fallback_proof=str(a.fallback_proof),
-                charged_trial_training_seconds=charged_capacity,source_checkpoint_sha256=sha(initial))
+                actual_trial_training_seconds=actual_trial_seconds,charged_trial_training_seconds=charged_capacity,
+                source_checkpoint_sha256=sha(initial))
             (r/'larger-batch-trial.json').write_text(json.dumps(failure,indent=2))
             common[common.index('--batch-size')+1]=str(a.fallback_batch_size)
             a.batch_size=a.fallback_batch_size;fit_checkpoint=str(initial);fallback_used=True
