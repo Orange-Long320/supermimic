@@ -26,6 +26,8 @@ def main():
     p.add_argument('--num-envs',type=int,default=2048)
     p.add_argument('--batch-size',type=int,default=512)
     p.add_argument('--torch-memory-fraction',type=float,default=.4)
+    p.add_argument('--preserve-learning-rate',action='store_true',help='Keep checkpoint actual LR across a world-size change')
+    p.add_argument('--deadline-epoch',type=float)
     p.add_argument('--source-world-size',type=int,default=1,help='Normalize checkpoint LR before the existing trainer applies its world-size scaling')
     a=p.parse_args()
     if not 0<a.minutes<=180 or a.num_envs<1 or a.batch_size<1 or not 0<a.torch_memory_fraction<=.8:p.error('Bounded three-hour run and explicit memory cap required')
@@ -62,9 +64,10 @@ def main():
     cfg=TrainConfig();restore(cfg,ck['config'])
     incoming_world=json.loads(a.proof.read_text())['world_size'] if a.phase=='optimize' and a.proof else a.source_world_size
     if incoming_world not in [1,2]:raise ValueError('Explicit known checkpoint world size required')
-    cfg.wm_trainer.lr/=incoming_world**.5
-    cfg.policy_trainer.lr/=incoming_world**.5
-    cfg.policy_trainer.critic_lr/=incoming_world**.5
+    lr_divisor=(world if a.preserve_learning_rate else incoming_world)**.5
+    cfg.wm_trainer.lr/=lr_divisor
+    cfg.policy_trainer.lr/=lr_divisor
+    cfg.policy_trainer.critic_lr/=lr_divisor
     base_learning_rates={'wm':cfg.wm_trainer.lr,'policy':cfg.policy_trainer.lr,'critic':cfg.policy_trainer.critic_lr}
     if cfg.robot!='x2_ultra' or cfg.env.box is not None or cfg.env.sole_profile is not None:raise ValueError('Unchanged X2 terrain interface required')
     if not cfg.env.terrain_manifest or Path(cfg.env.terrain_manifest).read_bytes()!=Path(manifest['terrain']).read_bytes():
@@ -124,6 +127,10 @@ def main():
             initial_parameter_checksums={key:float(sum(t.detach().double().sum() for t in module.parameters()))
                 for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]})
         record['training_started_at']=time.time()
+        if a.phase=='optimize' and a.deadline_epoch is not None:
+            cfg.schedule.max_hours=min(a.minutes/60,max(0.,a.deadline_epoch-time.time())/3600)
+            record['configuration']['schedule']['max_hours']=cfg.schedule.max_hours
+            record['deadline_epoch']=a.deadline_epoch
         save();training_started=time.monotonic();trainer.run()
         record['training_loop_seconds']=time.monotonic()-training_started
         record.update(status='completed',iteration=trainer.iteration,updates=trainer.num_updates,

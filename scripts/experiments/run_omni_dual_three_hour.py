@@ -24,6 +24,9 @@ def main():
     p.add_argument('--minutes',type=float,default=180.)
     p.add_argument('--memory-budget-mib',type=int,default=12800)
     p.add_argument('--batch-size',type=int,default=512)
+    p.add_argument('--num-envs-per-rank',type=int,default=2048)
+    p.add_argument('--deadline-epoch',type=float,help='Absolute formal-training stop time; capacity and setup do not extend it')
+    p.add_argument('--preserve-learning-rate',action='store_true')
     p.add_argument('--torch-memory-fraction',type=float,default=.4)
     p.add_argument('--fallback-proof',type=Path,help='Measured same-checkpoint capacity proof to resume if this larger-batch trial fails')
     p.add_argument('--fallback-batch-size',type=int,default=1024)
@@ -32,7 +35,7 @@ def main():
     p.add_argument('--queue-seconds',type=int,default=3600)
     a=p.parse_args()
     if (len(a.gpus) not in [1,2] or len(set(a.gpus))!=len(a.gpus) or not 0<a.minutes<=180
-        or not 0<a.memory_budget_mib<=22000 or a.batch_size<1 or a.previous_training_seconds<0
+        or not 0<a.memory_budget_mib<=22000 or a.batch_size<1 or a.num_envs_per_rank<1 or a.previous_training_seconds<0
         or not 0<a.torch_memory_fraction<=.8):
         p.error('One/two distinct GPUs, <=3hours, bounded batch and memory with hardware headroom required')
     r=a.run;s=r/'source';py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python'
@@ -109,7 +112,7 @@ def main():
         initial=r/'initial-weights.pt';shutil.copyfile(a.initial_checkpoint,initial)
         if sha(initial)!=a.expected_checkpoint_sha256:raise ValueError('Pinned weights changed')
         (r/'source-commit.txt').write_text(a.source_commit+'; package7568607 private copy\n')
-        (r/'resources.txt').write_text(f'{len(a.gpus)}rank shared policy on explicit GPUs{a.gpus};2048env/{a.batch_size}batch per rank;2CPUcores/2threads per rank;device budget{a.memory_budget_mib}MiB each;original budget{a.minutes}minutes, subtract previous{a.previous_training_seconds}s, capacity charged={a.include_capacity_in_budget};50% source0/50% return;original physics unchanged. User requested continuation despite unresolved reference dynamics.\n')
+        (r/'resources.txt').write_text(f'{len(a.gpus)}rank shared policy on explicit GPUs{a.gpus};{a.num_envs_per_rank}env/{a.batch_size}batch per rank;2CPUcores/2threads per rank;device budget{a.memory_budget_mib}MiB each;original budget{a.minutes}minutes, subtract previous{a.previous_training_seconds}s, capacity charged={a.include_capacity_in_budget};deadline={a.deadline_epoch};50% source0/50% return;original physics unchanged.\n')
         wait_free(a.gpus,a.queue_seconds)
         (r/'gpu-preflight.txt').write_text(subprocess.check_output(['nvidia-smi'],text=True))
         (r/'process-preflight.txt').write_text(subprocess.check_output(['ps','-eo','pid,user,args'],text=True))
@@ -117,13 +120,14 @@ def main():
         common=launcher+[
             str(s/'scripts/experiments/train_omni_dual.py'),'--dataset',str(a.dataset),
             '--source-commit',a.source_commit,'--package-commit','7568607','--batch-size',str(a.batch_size),
-            '--torch-memory-fraction',str(a.torch_memory_fraction)]
+            '--torch-memory-fraction',str(a.torch_memory_fraction),'--num-envs',str(a.num_envs_per_rank)]
+        if a.preserve_learning_rate:common+=['--preserve-learning-rate']
         fallback_used=False
         try:
             peak=stage('capacity',common+['--checkpoint',str(initial),'--phase','capacity','--minutes',str(a.minutes),'--out',str(r/'capacity')],a.gpus,600)
             ranks=rank_pair(r/'capacity')
             if any(not 0<v<=a.memory_budget_mib for v in peak.values()):raise RuntimeError('Measured per-card capacity budget failed')
-            proof=dict(passed=True,world_size=len(a.gpus),num_envs_per_rank=2048,batch_size_per_rank=a.batch_size,
+            proof=dict(passed=True,world_size=len(a.gpus),num_envs_per_rank=a.num_envs_per_rank,batch_size_per_rank=a.batch_size,
                 checkpoint_sha256=ranks[0]['checkpoint_sha256'],terrain_sha256=manifest['terrain_sha256'],
                 device_peaks_mib=peak,rank_records=ranks)
             fit_checkpoint=ranks[0]['checkpoint']
@@ -132,7 +136,7 @@ def main():
             if a.fallback_proof is None:raise
             proof=json.loads(a.fallback_proof.read_text())
             if (not proof['passed'] or proof['world_size']!=len(a.gpus) or proof['checkpoint_sha256']!=sha(initial)
-                or proof['terrain_sha256']!=manifest['terrain_sha256'] or proof['num_envs_per_rank']!=2048
+                or proof['terrain_sha256']!=manifest['terrain_sha256'] or proof['num_envs_per_rank']!=a.num_envs_per_rank
                 or proof['batch_size_per_rank']!=a.fallback_batch_size):raise RuntimeError('Fallback proof mismatch') from trial_error
             failed_path=r/'capacity/rank-0.json'
             failed=json.loads(failed_path.read_text()) if failed_path.exists() else {}
@@ -150,13 +154,14 @@ def main():
         (r/'effective-training-settings.json').write_text(json.dumps(dict(batch_size=a.batch_size,
             fallback_used=fallback_used,memory_budget_mib=a.memory_budget_mib),indent=2))
         remaining=a.minutes*60-a.previous_training_seconds-charged_capacity
+        if a.deadline_epoch is not None:remaining=min(remaining,a.deadline_epoch-time.time())
         (r/'training-budget.json').write_text(json.dumps(dict(original_budget_seconds=a.minutes*60,
             previous_training_seconds=a.previous_training_seconds,charged_capacity_seconds=charged_capacity,
-            remaining_formal_training_seconds=max(0.,remaining)),indent=2))
+            deadline_epoch=a.deadline_epoch,remaining_formal_training_seconds=max(0.,remaining)),indent=2))
         if remaining<=0:raise RuntimeError('Original training budget consumed; no additional long fit launched')
         stage('train_3h',common+['--checkpoint',fit_checkpoint,'--phase','optimize',
             '--minutes',str(remaining/60),'--proof',str(r/'dual-capacity-proof.json'),
-            '--out',str(r/'train_3h')],a.gpus,remaining+600)
+            '--out',str(r/'train_3h')]+(['--deadline-epoch',str(a.deadline_epoch)] if a.deadline_epoch is not None else []),a.gpus,remaining+600)
         final=rank_pair(r/'train_3h');checkpoint=final[0]['checkpoint'];gpu=a.gpus[0]
         stage('benchmark',[py,str(s/'scripts/evaluation/eval_benchmark.py'),'--ckpt',checkpoint,
             '--npz-dir',str(a.dataset/'motions'),'--num-envs','3','--device','cuda:0','--out',str(r/'benchmark.json')],[gpu],300)
