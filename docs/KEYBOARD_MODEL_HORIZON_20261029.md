@@ -49,3 +49,13 @@ horizon_check2已实际通过：速度8步、跟踪32步配置恢复、有限梯
 准备中的隔离源码logs/keyboard_model_horizon_20261029_source，src内容SHA256 7d71b12cf54ed1841c9b52ebf9c80b44956b2472976dcac9a0345c5cfe283313，与旧固定键盘src一致，仅覆盖本轮已提交实验入口和监督扩展。启动时显式--velocity-horizon 8；原跟踪32步、每卡8192环境、两batch2048及域随机化保持。物理修正改变velocity权重，因此旧速度优化器不可直接恢复，入口会明确重新建立优化器与回放。
 
 run_keyboard_gaits增加可选--require-physical-capacity-regression：双卡100步同步/容量验证后，先做含手臂的66秒物理回归，未通过则保留源与候选，拒绝开始长训。这个分支尚待实际执行；不能把单次有限梯度检查或显存容量检查当作修正效果验证。终点仍自动执行66秒与42秒独立评测。
+
+## 第二轮否决与保留能力的合并修复
+
+第二轮400仍未通过：双种子8/8不倒，但前进约0.214m/s、初始停止arm RMS均值0.158–0.167rad/s；不通过不是训练异常，不能采用。恢复代价并不能自动避免多个命令在共享速度网络中的梯度干扰。此轮与第一轮均保留，未覆盖默认验证权重。
+
+改复用此前已经物理验证过的train_quiet_stop.py专门训练零速，再扩展distill_quiet_stop.py为全六指令蒸馏（distill_keyboard_teachers.py）。移动教师为第一轮400，左转教师为第二轮400，二者及新停止教师的decoder/motion encoder必须逐项完全相等。不同教师只用于采集和配对标签；最终仍是一个velocity encoder加同一个decoder，没有运行时教师切换或动作覆盖。采集完整66秒，任一环境失败即拒绝蒸馏；相同历史配对0/+0.3/-0.2/±0.4yaw/+0.6，保留48训练/16留出环境，最终仍需独立多种子物理验收。
+
+旧六小时任务已精确停止controller1926621/torchrun1932485/ranks1932509、1932510，逐个核对UID和命令路径。保留stopped-for-rootfix.pt SHA256 cb9a431ec5922c4bd67b7e356a7db180c8dbd11795b998ff8828f5c913e86418，停止记录rootfix-stop.json；已运行1089.78秒，剩余主训练预算5.69728254小时，等待修复回归后继续。没有停止其他任务。
+
+专门停止训练：logs/keyboard_stop_repair_20261029_r1，GPU1、PID1946543、sm-keyboard-stop-repair，256环境240轮；源码为原train_quiet_stop.py，尚未取得结果。停止教师不可直接当整套控制策略使用。
