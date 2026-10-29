@@ -10,6 +10,9 @@ import importlib.metadata
 import json
 from pathlib import Path
 import time
+from types import SimpleNamespace
+import zipfile
+import xml.etree.ElementTree as ET
 
 
 def main():
@@ -46,12 +49,45 @@ def main():
         mujoco.mj_forward(model, d)
         if xml.exists():
             raise FileExistsError(xml)
-        mujoco.mj_saveLastXML(str(xml), model)
+        # MjSpec.compile does not populate MuJoCo's legacy LastXML storage.
+        # Export the owning spec and bundled meshes, with the same options.
+        cfg.sim.mujoco.apply(SimpleNamespace(opt=scene.spec.option))
+        scene.spec.to_zip(str(a.out / 'scene.zip'))
+        with zipfile.ZipFile(a.out / 'scene.zip') as archive:
+            archive.extractall(a.out / 'scene-assets')
+        files = list((a.out / 'scene-assets').glob('*.xml'))
+        if len(files) != 1:
+            raise ValueError(files)
+        # Attached MjSpec exports an empty nested <default/> that neither
+        # MuJoCo version can parse. Remove only that semantically empty node.
+        tree = ET.parse(files[0])
+        for parent in tree.iter('default'):
+            for child in list(parent):
+                if child.tag == 'default' and not child.attrib and not len(child):
+                    parent.remove(child)
+        tree.write(files[0], encoding='unicode')
+        restored = mujoco.MjModel.from_xml_path(str(files[0]))
+        fields = ('body_mass', 'body_inertia', 'body_ipos', 'body_iquat', 'jnt_range', 'dof_armature',
+                      'actuator_gainprm', 'actuator_biasprm', 'actuator_forcerange',
+                      'actuator_ctrlrange', 'dof_damping', 'dof_frictionloss',
+                      'geom_size', 'geom_pos', 'geom_quat', 'geom_friction',
+                      'geom_contype', 'geom_conaffinity', 'geom_solref', 'geom_solimp')
+        # XML serializes only six significant digits. Restore the measured
+        # physical arrays from a lossless sidecar rather than relax parity.
+        np.savez(a.out / 'physical-parameters.npz', **{f: getattr(model, f) for f in fields})
+        for field in fields:
+            getattr(restored, field)[:] = getattr(model, field)
+            np.testing.assert_allclose(getattr(restored, field), getattr(model, field),
+                                       rtol=0, atol=1e-10, err_msg=field)
+        xml.symlink_to(files[0].relative_to(a.out))
         np.savez(a.out / 'initial.npz', qpos=d.qpos, ctrl=d.ctrl)
         print(json.dumps({'nq': model.nq, 'nv': model.nv, 'nu': model.nu,
                           'timestep': model.opt.timestep}), flush=True)
         return
-    model = mujoco.MjModel.from_xml_path(str(xml))
+    model = mujoco.MjModel.from_xml_path(str(xml.resolve()))
+    with np.load(a.out / 'physical-parameters.npz') as parameters:
+        for field in parameters.files:
+            getattr(model, field)[:] = parameters[field]
     initial = np.load(a.out / 'initial.npz')
     d = mujoco.MjData(model)
     d.qpos[:] = initial['qpos']
@@ -76,7 +112,7 @@ def main():
         import mujoco_warp as mw
         wp.init()
         m = mw.put_model(model)
-        wd = mw.put_data(model, d, nworld=a.envs)
+        wd = mw.put_data(model, d, nworld=a.envs, nconmax=256, njmax=1024)
         q0 = wp.array(np.repeat(initial['qpos'][None], a.envs, axis=0), dtype=wp.float32, device='cuda:0')
         def reset():
             wp.copy(wd.qpos, q0); wd.qvel.zero_()
