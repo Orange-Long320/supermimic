@@ -39,3 +39,13 @@ logs/keyboard_model_diagnosis_20261029_r1/horizon_check/regression.json：32环�
 另发现本次物理训练日志的terminated/timeout张量保存的是环境内部共享引用，可能把一个batch最后一步的标签重复统计到32步，导致timeout字段夸大；PPO实际done=term|tout每步创建新张量，GAE没有此引用问题，独立评测首次失败/重置也不受影响。新源码将统计标签clone保存，旧日志不作为累计跌倒或超时计数。40轮容量日志的0也不证明全程没有超时；此前文档的表述应按此更正。
 
 horizon_check2已实际通过：速度8步、跟踪32步配置恢复、有限梯度与参数更新，且checkpoint_state确实保存imagination_horizon=8。源码ceb8774。
+
+## 第二轮与后续续训入口
+
+恢复原quiet-stop约束的源码5497981。第二轮logs/keyboard_physical_correction_20261029_r2，GPU1、PID1937029、sm-keyboard-physical-train2，512环境400轮已完成；源为第一轮400权重SHA256 5ad6105637617863d9317ba5267db4061400e729438028d261af8edef05b4962。脚本as-run.py SHA256 cceedc3731804482e87525ba302978d5623edf87a863e21fe2ccc7c88ae06ab3。第二轮160步评测仍未通过（前进侧移-0.0744m/s、部分停止段平面速度超限），未采用；400轮双种子66秒与42秒延长停止已启动，PID1943486/1943490/1943494，等待实际结果。
+
+重新读取关联聊天，确认用户另有“训练完以后再训练六个小时”的明确要求。其旧续训已从19:43起使用32步想象；本轮计划待候选验收后保留旧权重，再从修正版切换剩余训练预算。并非把“另一个聊天正在运行”当作新执行授权，而是与用户当前的修复指令及已明确的六小时目标一并核对。
+
+准备中的隔离源码logs/keyboard_model_horizon_20261029_source，src内容SHA256 7d71b12cf54ed1841c9b52ebf9c80b44956b2472976dcac9a0345c5cfe283313，与旧固定键盘src一致，仅覆盖本轮已提交实验入口和监督扩展。启动时显式--velocity-horizon 8；原跟踪32步、每卡8192环境、两batch2048及域随机化保持。物理修正改变velocity权重，因此旧速度优化器不可直接恢复，入口会明确重新建立优化器与回放。
+
+run_keyboard_gaits增加可选--require-physical-capacity-regression：双卡100步同步/容量验证后，先做含手臂的66秒物理回归，未通过则保留源与候选，拒绝开始长训。这个分支尚待实际执行；不能把单次有限梯度检查或显存容量检查当作修正效果验证。终点仍自动执行66秒与42秒独立评测。

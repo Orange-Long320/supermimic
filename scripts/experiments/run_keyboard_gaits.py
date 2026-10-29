@@ -10,19 +10,22 @@ def main():
     p.add_argument('--repaired-velocity',action='store_true')
     p.add_argument('--quiet-stop-cost',action='store_true')
     p.add_argument('--stop-evaluator',type=Path)
+    p.add_argument('--velocity-horizon',type=int,default=8)
+    p.add_argument('--require-physical-capacity-regression',action='store_true')
     a=p.parse_args()
     if not 0 < a.hours <= 24:raise ValueError('Invalid duration')
+    if a.require_physical_capacity_regression and a.stop_evaluator is None:raise ValueError('Arm-aware evaluator required')
     a.out.mkdir(exist_ok=False)
     state=dict(status='initializing',pid=os.getpid(),gpus=[0,2],phases=[])
     def save():(a.out/'controller.json').write_text(json.dumps(state,indent=2)+'\n')
     save();shutil.copy2(__file__,a.out/'controller-as-run.py')
     fixed=a.out/'tracking-source.pt'
     with a.checkpoint.open('rb') as s,fixed.open('xb') as d:shutil.copyfileobj(s,d)
-    state['requested_train_hours']=a.hours;state['repaired_velocity']=a.repaired_velocity
+    state['requested_train_hours']=a.hours;state['repaired_velocity']=a.repaired_velocity;state['velocity_horizon']=a.velocity_horizon
     state['initial_checkpoint_sha256']=hashlib.sha256(fixed.read_bytes()).hexdigest()
     previous=json.loads(a.tracking_eval.read_text())
     if a.repaired_velocity:
-        if previous['sha256']!=state['initial_checkpoint_sha256'] or previous['status'] not in ['backward_direction_and_speed_verified','quiet_stopping_and_forward_backward_regression_verified']:raise ValueError('Matching repaired velocity acceptance required')
+        if previous['sha256']!=state['initial_checkpoint_sha256'] or previous['status'] not in ['backward_direction_and_speed_verified','quiet_stopping_and_forward_backward_regression_verified','full_keyboard_physical_regression_verified']:raise ValueError('Matching repaired velocity acceptance required')
     elif previous['checkpoint_sha256']!=state['initial_checkpoint_sha256'] or len(previous['clips'])!=5 or any(c['failed'] for c in previous['clips']):raise ValueError('Matching completed five-action evaluation required')
     shutil.copy2(a.tracking_eval,a.out/'tracking-evaluation.json');save()
     env=os.environ.copy()
@@ -30,7 +33,7 @@ def main():
     env.update(CUDA_VISIBLE_DEVICES='0,2',SM_ROBOT='x2_ultra',OMP_NUM_THREADS='2',OPENBLAS_NUM_THREADS='2',MKL_NUM_THREADS='2',PYTHONUNBUFFERED='1',MUJOCO_GL='egl',XDG_CACHE_HOME='/home/2025-Long.xh/HHD/data/supermimic/cache',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1')
     env['WARP_CACHE_PATH']=env['XDG_CACHE_HOME']+'/warp'
     py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python'
-    common=[py,'-m','torch.distributed.run','--standalone','--nproc-per-node','2',str(a.entry),'--dataset',str(a.dataset),'--hours',str(a.hours)]
+    common=[py,'-m','torch.distributed.run','--standalone','--nproc-per-node','2',str(a.entry),'--dataset',str(a.dataset),'--hours',str(a.hours),'--velocity-horizon',str(a.velocity_horizon)]
     def stage(name,checkpoint,proof=None):
         while True:
             busy={str(g):subprocess.check_output(['nvidia-smi','-i',str(g),'--query-compute-apps=pid','--format=csv,noheader,nounits'],text=True).strip() for g in [0,2]}
@@ -56,6 +59,18 @@ def main():
     passed=passed and records[0]['initial_parameter_hashes']==records[1]['initial_parameter_hashes'] and records[0]['final_parameter_hashes']==records[1]['final_parameter_hashes']
     proof=a.out/'dual-proof.json';proof.write_text(json.dumps(dict(passed=passed,world_size=2,num_envs_per_rank=8192,batch_size_per_rank=2048,checkpoint_sha256=records[0]['checkpoint_sha256'],dataset_manifest_sha256=records[0]['dataset_manifest_sha256'],peaks_mib=[r['device_peak_mib'] for r in records]),indent=2)+'\n')
     if not passed:raise RuntimeError('Dual capacity or synchronization checks failed')
+    if a.require_physical_capacity_regression:
+        from summarize_keyboard_evaluation import summarize
+        state['status']='capacity_physical_regression';save()
+        check_env=dict(env,CUDA_VISIBLE_DEVICES='0',PYTHONPATH=str(a.source/'src'))
+        result=a.out/'capacity_physical_66s.json'
+        with (a.out/'capacity_physical_66s.log').open('x') as log:
+            subprocess.run([py,str(a.stop_evaluator),'--ckpt',records[0]['checkpoint'],'--npz-dir',str(a.dataset),'--out',str(result),'--seconds','66','--num-envs','8'],cwd=a.source,env=check_env,stdout=log,stderr=subprocess.STDOUT,check=True)
+        summary=summarize(result)
+        (a.out/'capacity_physical_summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+        if not summary['passed_diagnostic_tolerances']:
+            state['status']='capacity_physical_regression_failed';save()
+            raise RuntimeError('Preserved candidate: physical regression failed; long training not started')
     stage('train',Path(records[0]['checkpoint']),proof)
     state['status']='keyboard_evaluation';save()
     evaluation_env=env.copy();evaluation_env['CUDA_VISIBLE_DEVICES']='0';evaluation_env['SM_ROBOT']='x2_ultra';evaluation_env['PYTHONPATH']=str(a.source/'src')
