@@ -16,8 +16,12 @@ def main():
     for n in ['source','checkpoint','dataset','out']:p.add_argument('--'+n,type=Path,required=True)
     p.add_argument('--phase',choices=['capacity','train'],required=True)
     p.add_argument('--proof',type=Path)
+    p.add_argument('--hours',type=float,default=.5)
+    p.add_argument('--weights-only',action='store_true',help='Import repaired velocity weights with fresh optimizers')
     p.add_argument('--paired-supervision', action=argparse.BooleanOptionalAction, default=True, help='Use tracking replay for persistent teacher alignment')
-    a=p.parse_args();sys.path.insert(0,str(a.source/'src'))
+    a=p.parse_args()
+    if not 0 < a.hours <= 24:raise ValueError('Invalid bounded duration')
+    sys.path.insert(0,str(a.source/'src'))
     rank=int(os.environ['RANK']);local=int(os.environ['LOCAL_RANK']);world=int(os.environ['WORLD_SIZE'])
     devices=os.environ['CUDA_VISIBLE_DEVICES'].split(',')
     if world!=2 or len(devices)!=2:raise ValueError('Exactly two selected GPUs required')
@@ -62,13 +66,28 @@ def main():
     cfg.velocity.reference_probability=.5;cfg.velocity.standing_probability=.25;cfg.velocity.stop_relabel_fraction=.25
     cfg.run_name=a.out.name if rank==0 else a.out.name+'-rank1-internal';cfg.log_root=a.out.parent
     cfg.schedule.total_iterations=100 if a.phase=='capacity' else 320000
-    cfg.schedule.max_hours=.15 if a.phase=='capacity' else .5
+    cfg.schedule.max_hours=.15 if a.phase=='capacity' else a.hours
     cfg.schedule.lr_final_ratio=1.;cfg.schedule.log_interval=20;cfg.schedule.checkpoint_interval=100
     cfg.resume=None;cfg.initialize_from=None;cfg.warmstart_world_model=None
     a.out.mkdir(parents=True,exist_ok=True)
     # Strip only explicitly absent scene-conditioning metadata. Tensor state is
     # unchanged; strict initialization still checks architecture and every key.
-    if a.phase=='capacity':
+    if a.phase=='capacity' and a.weights_only:
+        if not ck['config'].get('velocity',{}).get('enabled',False):raise ValueError('Repaired velocity checkpoint required')
+        class RepairedTrainer(Trainer):
+            def initialize(self,path):
+                source=torch.load(path,map_location='cpu',weights_only=False)
+                for key in ['history','latent_dim','goal_dim']:
+                    if source['config']['policy'][key]!=getattr(self.cfg.policy,key):raise ValueError('Policy architecture mismatch')
+                for key,module in [('wm',self.wm),('policy',self.policy),('critic',self.critic)]:
+                    module.load_state_dict(source[key],strict=True)
+                    if any(not torch.equal(t.cpu(),source[key][n]) for n,t in module.state_dict().items()):raise ValueError('Repaired weight changed')
+                for opt in [self.wm_trainer.opt,self.policy_trainer.opt,self.policy_trainer.critic_opt,self.policy_trainer.velocity_opt,self.policy_trainer.velocity_critic_opt]:
+                    if opt.state:raise ValueError('Fresh optimizer required')
+                print('[INFO] imported repaired model weights exactly; fresh optimizers, velocity critic, replay and counters',flush=True)
+        Trainer=RepairedTrainer
+        cfg.initialize_from=a.checkpoint
+    elif a.phase=='capacity':
         if ck['config'].get('velocity',{}).get('enabled',False):raise ValueError('Tracking checkpoint required')
         compat=dict(ck);compat['config']=dict(ck['config']);wm=dict(ck['config']['world_model']);ss=dict(wm['state_spec'])
         for k in ['box','terrain_manifest']:
