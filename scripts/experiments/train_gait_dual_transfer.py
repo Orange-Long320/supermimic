@@ -28,7 +28,7 @@ def main():
     from supermimic.training.loop import Trainer
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():raise ValueError('Dedicated interpreter required')
     manifest=json.loads((a.dataset/'manifest.json').read_text())
-    if not manifest.get('exploratory_training_authorized') or {c['name'] for c in manifest['clips']}!={'walk','backward','turn_left_inplace','jog'}:raise ValueError('Authorized four-gait dataset required')
+    if not manifest.get('exploratory_training_authorized') or {c['name'] for c in manifest['clips']}!={'walk','backward','turn_left_inplace','turn_right_inplace','jog'}:raise ValueError('Authorized five-gait dataset required')
     for c in manifest['clips']:
         if sha(a.dataset/(c['name']+'.npz'))!=c['sha256']:raise ValueError('Motion changed')
     torch.set_num_threads(2);torch.cuda.set_per_process_memory_fraction(.8,0)
@@ -44,7 +44,7 @@ def main():
     if a.phase=='train':
         proof=json.loads(a.proof.read_text())
         if not proof['passed'] or proof['checkpoint_sha256']!=sha(a.checkpoint) or proof['dataset_manifest_sha256']!=sha(a.dataset/'manifest.json'):raise ValueError('Dual proof mismatch')
-    cfg.data.npz_dir=a.dataset;cfg.data.clips=['walk','backward','turn_left_inplace','jog'];cfg.data.manifest=None;cfg.data.library=None;cfg.data.limit=None
+    cfg.data.npz_dir=a.dataset;cfg.data.clips=['walk','backward','turn_left_inplace','turn_right_inplace','jog'];cfg.data.manifest=None;cfg.data.library=None;cfg.data.limit=None
     cfg.env.num_envs=8192;cfg.env.replay_capacity=256;cfg.env.anchor_obs=True;cfg.env.episode_length_s=10
     cfg.env.action_noise_std=.1;cfg.env.reset_noise=cfg.env.obs_noise=cfg.env.domain_randomization=True
     cfg.env.sampling_mode='return';cfg.policy_trainer.obs_noise=True

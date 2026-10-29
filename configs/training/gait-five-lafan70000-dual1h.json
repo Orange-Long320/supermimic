@@ -1,0 +1,55 @@
+{
+  "exploratory_training_authorized": true,
+  "authorization": "User requested five actions including in-place right turn; later connect to keyboard locomotion task",
+  "physics_validated": false,
+  "initialization": "weights-only from LAFAN70000; fresh optimizers, replay, sampler and transfer counters",
+  "clips": [
+    {
+      "name": "walk",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/data/video/walk_IMG4884_20261029_r1/x2_reference/IMG_4884.npz",
+      "sha256": "8e7813254aa415246ef1a895bdc89350e2b1c134dab73114e7da55fa8f07dd63"
+    },
+    {
+      "name": "backward",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/backward_IMG4884_20261029_r1/candidate/backward.npz",
+      "sha256": "a2ebe7b9c6380666bcb8cb876245b5a8e35f54ed27c5f4fa67f315adb0ab0bca"
+    },
+    {
+      "name": "turn_left_inplace",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/turn_inplace_IMG4884_20261029_r1/candidate/turn.npz",
+      "sha256": "0cad5cc477da15203e9b2f8c14c074cc27d45da2c0001682540ddb979a98048b"
+    },
+    {
+      "name": "jog",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/data/video/gait_IMG4880_4883_20261029_r1/x2_candidates_r4/IMG_4881.npz",
+      "sha256": "170f721735359b0101165af40238254bd5ad25dea6d913563ff80e98332fe2bf"
+    },
+    {
+      "name": "turn_right_inplace",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/turn_inplace_right_IMG4884_20261029_r1/candidate/turn.npz",
+      "sha256": "aaaa641356b0f2364aa1265ec163946da324de8ae8fe78bde3a3084b1260fa48"
+    }
+  ],
+  "num_envs": 8192,
+  "world_model_batch_size": 2048,
+  "policy_batch_size": 2048,
+  "formal_training_hours": 1,
+  "source_checkpoint": "/home/2025-Long.xh/HHD/data/supermimic/logs/x2_lafan_dual23_20261027_r2_train/ckpt_latest.pt",
+  "physical_gpus": [
+    0,
+    2
+  ],
+  "world_size": 2,
+  "num_envs_per_rank": 8192,
+  "world_model_batch_size_per_rank": 2048,
+  "policy_batch_size_per_rank": 2048,
+  "total_environments": 16384,
+  "global_world_model_batch_size": 4096,
+  "global_policy_batch_size": 4096,
+  "actual_learning_rate": 0.0002,
+  "keyboard_followup": {
+    "thread_id": "01a18229-5cdd-7ed0-9053-e5e3931e9a95",
+    "status": "future velocity-encoder adaptation; not yet keyboard controllable",
+    "notes": "Preserve locomotion decoder and world model; extend negative forward commands and validate zero-speed stop. Do not overwrite existing keyboard experiment."
+  }
+}
