@@ -9,3 +9,7 @@
 队列入口scripts/experiments/continue_keyboard_gaits.py以独立tmux进程等待父运行完成，检查GPU空闲后启动；不停止其他进程。父任务失败/取消或等待超过3小时即保留错误退出，不使用旧检查点悄悄启动。续训本身计时六小时，约每20步检查一次时间，可能略超；每100步保存检查点。六小时结束后自动执行66秒五动作连续控制和42秒持续停止/手臂运动回归。
 
 当前尚未开始六小时段；以controller.json的waiting_for_parent/train/failed等状态和rank记录为准。预计一小时段19:40左右结束，评测后六小时段约19:45开始，次日01:45左右结束；具体以实际启动时间为准。
+
+## 已实际入队
+
+续训入口提交e7cd5a0。服务器会话sm-keyboard-continue6h、控制器PID1926621，已核验controller.json状态waiting_for_parent、requested_train_hours=6.0、GPU[0,2]，尚未启动六小时训练。launch.json保留完整argv、解释器、源版本及入口SHA。当前一小时段未中断、未修改运行快照。六小时入口、监督修复与两项评测均在独立源码快照内，父最终权重尚未产生，SHA与实际起始步数将在接续时自动记录。
