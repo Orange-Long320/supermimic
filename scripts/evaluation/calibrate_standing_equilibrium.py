@@ -68,9 +68,14 @@ def main():
     meshes=[]
     for g in range(m.ngeom):
         if int(m.body_rootid[int(m.geom_bodyid[g])])!=root or not (m.geom_contype[g] or m.geom_conaffinity[g]):continue
-        k=int(m.geom_dataid[g]);assert k>=0;a,n=m.mesh_vertadr[k],m.mesh_vertnum[k]
+        k=int(m.geom_dataid[g])
+        if int(m.geom_type[g])==int(mujoco.mjtGeom.mjGEOM_BOX):
+            vertices=np.array([[x,y,z] for x in [-1.,1.] for y in [-1.,1.] for z in [-1.,1.]])*m.geom_size[g]
+        elif k>=0:
+            a,n=m.mesh_vertadr[k],m.mesh_vertnum[k];vertices=m.mesh_vert[a:a+n].copy()
+        else:raise ValueError('Expected an original mesh or explicit diagnostic sole box')
         side=next((s for s,b in feet.items() if int(m.geom_bodyid[g])==b),'nonfoot')
-        meshes.append((g,m.mesh_vert[a:a+n].copy(),side))
+        meshes.append((g,vertices,side))
     scale=np.r_[np.full(3,weight),np.full(3,weight*.7)]
     radius=np.r_[np.full(4,.15),np.full(len(joints)-4,.25)]
     mid=m.jnt_range[joints].mean(axis=1);half=np.diff(m.jnt_range[joints],axis=1).reshape(-1)*.5*args.joint_limit_factor

@@ -31,7 +31,8 @@ def main():
         support_pen=other_pen=waist_pitch=torso_tilt=0.;minimum_foot_force=np.full(2,np.inf)
         feet=[m.body('robot/'+s+'_ankle_roll_link').id for s in ['left','right']]
         torso=m.body('robot/torso_link').id;waist=m.jnt_qposadr[m.joint('robot/waist_pitch_joint').id]
-        for i,state in enumerate(np.vstack([np.r_[q,np.zeros(m.nv)],states])):
+        entry_velocity=np.zeros(m.nv);entry_velocity[:3]=modes[name].get('initial_root_velocity',[0.,0.,0.])
+        for i,state in enumerate(np.vstack([np.r_[q,entry_velocity],states])):
             d.qpos[:]=state[:m.nq];d.qvel[:]=state[m.nq:]
             d.ctrl[:]=z['controls'][max(i-1,0)] if 'controls' in z else ctrl
             mujoco.mj_forward(m,d)

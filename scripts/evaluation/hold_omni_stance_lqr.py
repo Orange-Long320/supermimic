@@ -14,8 +14,11 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for k in ['attribution','targets','out']:p.add_argument('--'+k,type=Path,required=True)
     p.add_argument('--seconds',type=float,default=5.)
+    p.add_argument('--finite-horizon-steps',type=int,help='Use finite-horizon Riccati recursion when fixed contact leaves invariant world-frame modes')
+    p.add_argument('--initial-root-velocity',nargs=3,type=float,default=[0.,0.,0.],help='Initial-only world translation velocity disturbance')
     a=p.parse_args()
     if a.out.exists() or not 2<=a.seconds<=10:p.error('New output and 2–10 second duration required')
+    if a.finite_horizon_steps is not None and not 100<=a.finite_horizon_steps<=2000:p.error('Finite horizon must be 100–2000 native steps')
     if os.environ.get('CUDA_VISIBLE_DEVICES')!='':raise ValueError('Explicit CPU-only server execution required')
     import mujoco
     import numpy as np
@@ -34,11 +37,18 @@ def main():
         mujoco.mjd_transitionFD(m,d,1e-6,True,A,B,None,None)
         Q=np.diag(np.r_[np.full(3,2000.),np.full(3,1000.),np.full(m.nv-6,100.),np.full(6,20.),np.full(m.nv-6,.2)])
         R=np.eye(m.nu)
-        P=solve_discrete_are(A,B,Q,R);K=np.linalg.solve(R+B.T@P@B,B.T@P@A)
+        if a.finite_horizon_steps is None:
+            P=solve_discrete_are(A,B,Q,R)
+        else:
+            P=Q.copy()
+            for _ in range(a.finite_horizon_steps):
+                gain=np.linalg.solve(R+B.T@P@B,B.T@P@A)
+                P=Q+A.T@P@(A-B@gain);P=(P+P.T)/2
+        K=np.linalg.solve(R+B.T@P@B,B.T@P@A)
         radius=float(max(abs(np.linalg.eigvals(A-B@K))))
         if not np.isfinite(K).all() or radius>=1+1e-7:raise ValueError('Linear feedback failed local stability check')
         np.savez_compressed(folder/'linear-feedback.npz',A=A,B=B,K=K,Q=Q,R=R,nominal_control=u,reference_qpos=q)
-        actual=mujoco.MjData(m);actual.qpos[:]=q;actual.qvel[:]=0;mujoco.mj_forward(m,actual)
+        actual=mujoco.MjData(m);actual.qpos[:]=q;actual.qvel[:]=0;actual.qvel[:3]=a.initial_root_velocity;mujoco.mj_forward(m,actual)
         tangent=np.zeros(m.nv);states=[];controls=[];status='completed';root=int(m.jnt_bodyid[0]);rows=[]
         for step in range(round(a.seconds/m.opt.timestep)):
             mujoco.mj_differentiatePos(m,tangent,1.,q,actual.qpos)
@@ -51,6 +61,7 @@ def main():
             if hard>.001 or up<.9 or drift>.15 or not np.isfinite(states[-1]).all():status='safety_stop';break
         np.savez_compressed(folder/'candidate-hold.npz',state=np.array(states),controls=np.array(controls),dt=m.opt.timestep)
         item={'status':status,'seconds':len(states)*m.opt.timestep,'linear_closed_loop_radius':radius,
+              'initial_root_velocity':a.initial_root_velocity,
               'maximum_hard_violation_rad':max(x['hard_violation_rad'] for x in rows),
               'maximum_root_drift_m':max(x['root_drift_m'] for x in rows),'minimum_root_up':min(x['root_up'] for x in rows),
               'feedforward_mode':'inverse','control_mode':'native-discrete-LQR','state_resets_after_initialization':0,
