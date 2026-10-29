@@ -111,8 +111,8 @@ def install_velocity_horizon(horizon=8):
     module.JointPolicyTrainer = BoundedVelocityTrainer
 
 
-def install_control_prior(checkpoint, weight=10.):
-    """Retain validated command responses on the SAME evolving physical history.
+def install_control_prior(checkpoint, weight=10., include_standing=False):
+    """Retain validated moving responses on the SAME evolving physical history.
 
     A frozen single-encoder checkpoint supplies training labels only. Action
     labels use its own decoder, so tracking updates cannot silently move the
@@ -145,9 +145,9 @@ def install_control_prior(checkpoint, weight=10.):
                     self.lib.default_joint_pos) for i in range(self.cfg.history)])
                 obs=flatten_history_term_major(history)
                 choices=torch.tensor([[.3,0,0],[-.2,0,0],[0,0,.4],[0,0,-.4],[.6,0,0]],device=obs.device)
-                command=torch.zeros(len(obs),3,device=obs.device)
-                count=len(obs)//2
-                command[count:]=choices[torch.arange(len(obs)-count,device=obs.device)%5]
+                # A drifting zero-command teacher is not a standing target.
+                command=choices[torch.arange(len(obs),device=obs.device)%5].clone()
+                if include_standing:command[:len(obs)//2]=0  # Explicit diagnostic control only.
                 target=self.control_prior.encoders['velocity'](obs,command)
                 target_action=self.control_prior.decoder(target,obs)
             latent=self.policy.encoders['velocity'](obs,command)
@@ -163,10 +163,12 @@ def install_control_prior(checkpoint, weight=10.):
 
         def checkpoint_state(self):
             state=super().checkpoint_state()
-            state['control_prior']=dict(checkpoint=str(path),sha256=digest,weight=weight)
+            state['control_prior']=dict(checkpoint=str(path),sha256=digest,weight=weight,include_standing=include_standing)
             return state
 
         def load_checkpoint_state(self,state):
+            if 'control_prior' in state and state['control_prior'].get('include_standing',True)!=include_standing:
+                raise ValueError('Control prior standing scope changed across resume; use explicit weights-only initialization')
             if 'control_prior' in state and state['control_prior']['sha256']!=digest:
                 raise ValueError('Control prior changed across resume')
             return super().load_checkpoint_state(state)

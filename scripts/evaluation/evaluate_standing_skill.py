@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, teacher_still_arms: bool = False, extended_stop: bool = False):
+def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, teacher_still_arms: bool = False, extended_stop: bool = False, standing_only: bool = False):
     import json
     from dataclasses import asdict
 
@@ -55,6 +55,8 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
     arm_stats = {}
     if extended_stop:
         schedule = schedule[:5]
+    if standing_only:
+        schedule = schedule[:1]
     mailbox = CommandMailbox()
     records = []
     failed_at = torch.full((num_envs,), -1., device=device)
