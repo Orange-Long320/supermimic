@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None):
+def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, seconds: float = 66.):
     import datetime
     import hashlib
     import json
@@ -24,6 +24,8 @@ def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: 
     from supermimic.locomotion.task import measured_velocity
     from supermimic.robots.paths import lafan_npz_dir
 
+    if not 0 < seconds <= 66:
+        raise ValueError("Recording duration must be in (0, 66] seconds")
     if out.exists() or out.with_suffix(".json").exists():
         raise FileExistsError(out)
     before = ckpt.stat()
@@ -39,7 +41,7 @@ def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: 
     files = discover_npz(npz_dir or lafan_npz_dir(), names=["walk"] if npz_dir else ["walk1_subject1"])
     args = SuperMimicEnvCfgArgs(
         npz_files=[str(p) for p in files], num_envs=2, seed=seed,
-        future_frames=saved["env"]["future_frames"], episode_length_s=71.,
+        future_frames=saved["env"]["future_frames"], episode_length_s=seconds + 5.,
         action_noise_std=0., obs_noise=False, reset_noise=False,
         domain_randomization=False, record_transitions=False,
         anchor_obs=saved["env"].get("anchor_obs", False), velocity=velocity_cfg,
@@ -59,7 +61,8 @@ def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: 
         (46., "STOP", (0.,0.,0.)), (51., "RUN", (.6,0.,0.)),
         (58., "STOP", (0.,0.,0.)),
     ]
-    duration, width, height, fps = 66., 1280, 720, 25
+    duration, width, height, fps = seconds, 1280, 720, 25
+    schedule = [item for item in schedule if item[0] < duration]
     model = env.sim.mj_model
     model.vis.global_.offwidth = max(width, model.vis.global_.offwidth)
     model.vis.global_.offheight = max(height, model.vis.global_.offheight)
