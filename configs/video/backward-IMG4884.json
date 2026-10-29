@@ -1,0 +1,22 @@
+{
+  "method": "reflect fore-aft root travel and foot excursions, bounded leg IK; source frame order retained",
+  "source": "/home/2025-Long.xh/HHD/data/supermimic/data/video/walk_IMG4884_20261029_r1/x2_reference/IMG_4884.npz",
+  "source_sha256": "8e7813254aa415246ef1a895bdc89350e2b1c134dab73114e7da55fa8f07dd63",
+  "frames": 204,
+  "fps": 50.0,
+  "duration_s": 4.06,
+  "forward_displacement_m": 0.912649872452603,
+  "backward_displacement_m": -0.9126498724526031,
+  "max_foot_target_error_m": 0.0078105292332326425,
+  "max_floor_lift_m": 0.00794341464982845,
+  "max_joint_limit_violation_rad": 4.0193176271685616e-06,
+  "arms_unchanged": true,
+  "physics_validated": false,
+  "training_approved": false,
+  "status": "synthetic backward preview complete",
+  "run": "backward_IMG4884_20261029_r1",
+  "video_frames": 204,
+  "video_duration_s": 4.08,
+  "video_fps": 50,
+  "review": "Contact sheet reviewed; preserves standing preparation and arm swing with backward-directed foot excursions. No dynamic rollout."
+}
