@@ -10,7 +10,7 @@
 - 已连接服务器并核验 Ubuntu 22.04.5、四张 RTX 3090、驱动 580.178.04。主训练与 SOMA 环境已核验；40 段 LAFAN1 已完成准备和首轮完整评测，后续续训继续进行。GEM-X 使用独立环境，Webster 参考数据已通过碰撞/接触检查与100步短训；这不代表策略已学会该动作。详见[本项目实验记录](docs/LOCAL_EXPERIMENT.md)。
 - 以下主机与目录布局已连接核验；GPU 占用和磁盘余量以每次启动前的检查为准。
 - 翻箱/上箱三任务参考共1784帧已按用户要求的[分项参考标准](docs/BOX_REFERENCE_ACCEPTANCE.md)复核，可用于训练；接触误差适当放宽，硬限位、速度、身体穿透和来源绑定保留严格检查。近似受力诊断不再阻塞训练，完整策略成功仍待实际验收。
-- 用户已明确拒绝以碰撞盒替换脚底：后续站姿修复保留原脚部网格与碰撞模型，只调整姿态和关节控制。此前盒形脚底的保持结果仅为隔离诊断，不得用于正式参考或训练；原网格下直腰、平行腿的稳定保持仍在修复，见[站姿记录](docs/OMNI_STANCE_REPAIR.md)。
+- 用户已选择继续沿用既有三个参考动作及原脚部网格/碰撞模型，本轮站姿修复停留在诊断阶段，不接入正式参考或训练。此前盒形脚底方案已被明确拒绝；原网格的新站姿候选也未通过稳定保持，均仅保留实验记录，见[站姿记录](docs/OMNI_STANCE_REPAIR.md)。
 - 参考项目的安装与运行入口见其 [README](https://github.com/tianshuwu/supermimic-retargeted/blob/main/README.md)、[数据文档](https://github.com/tianshuwu/supermimic-retargeted/blob/main/docs/DATA.md)和[训练文档](https://github.com/tianshuwu/supermimic-retargeted/blob/main/docs/USAGE.md)。引入源码后，以固定版本的实际接口为准。
 
 ## 运行位置
