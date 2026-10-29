@@ -11,6 +11,7 @@ def main():
  for k in ['checkpoint','stop_teacher','dataset','out']:p.add_argument('--'+k.replace('_','-'),type=Path,required=True)
  p.add_argument('--updates',type=int,default=10000)
  p.add_argument('--left-teacher',type=Path,required=True)
+ p.add_argument('--initial-arm-pose',type=Path)
  p.add_argument('--move-weight',type=float,default=4.)
  a=p.parse_args();a.out.mkdir(exist_ok=False)
  import torch
@@ -36,6 +37,16 @@ def main():
   reset_noise=False,domain_randomization=False,record_transitions=False,anchor_obs=cfg['env']['anchor_obs'],velocity=VelocityCfg(**cfg['velocity'])),device='cuda:0')
  env.cfg.auto_reset=False;cmd=env.command_manager.get_term('motion');cmd.is_velocity[:]=True
  cmd.force_standing_reset=True;cmd.set_manual_command((0.,0.,0.))
+ if a.initial_arm_pose:
+  from supermimic.robots.dimensions import PROFILE
+  pose=json.loads(a.initial_arm_pose.read_text())['joint_positions_rad']
+  ids=[PROFILE['joint_names'].index(n) for n in pose];target=torch.tensor(list(pose.values()),device='cuda')
+  original_reset=cmd._write_reference_state_to_sim
+  def reset_pose(env_ids,*args,**kwargs):
+   original_reset(env_ids,*args,**kwargs);state=cmd.state_io.read()[env_ids]
+   state[:,[7+i for i in ids]]=target;cmd.state_io.write(env_ids,state)
+  cmd._write_reference_state_to_sim=reset_pose
+
  schedule=[(0.,(0.,0.,0.)),(3.,(.3,0.,0.)),(10.,(0.,0.,0.)),(15.,(-.2,0.,0.)),(22.,(0.,0.,0.)),(27.,(0.,0.,.4)),(34.,(0.,0.,0.)),(39.,(0.,0.,-.4)),(46.,(0.,0.,0.)),(51.,(.6,0.,0.)),(58.,(0.,0.,0.))]
  mailbox=CommandMailbox();rows=[];trace=[];failed=torch.zeros(64,dtype=torch.bool,device='cuda')
  try:
@@ -82,6 +93,6 @@ def main():
  for k,v in policy.state_dict().items():
   if not k.startswith('encoders.velocity.'):assert torch.equal(v.cpu(),ck['policy'][k]),k
  ck['policy']={k:v.cpu() for k,v in policy.state_dict().items()};ck.pop('velocity_training',None)
- meta=dict(source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),stop_sha256=hashlib.sha256(a.stop_teacher.read_bytes()).hexdigest(),updates=a.updates,selected_step=best_step,teacher_failures=0,teacher_seconds=66,move_weight=a.move_weight,action_loss_weight=20,left_sha256=hashlib.sha256(a.left_teacher.read_bytes()).hexdigest(),train_envs=48,validation_envs=16,history=history,seconds=time.monotonic()-started,scope='Single encoder and unchanged decoder; physical acceptance required; not resumable.')
+ meta=dict(source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),stop_sha256=hashlib.sha256(a.stop_teacher.read_bytes()).hexdigest(),updates=a.updates,selected_step=best_step,teacher_failures=0,teacher_seconds=66,initial_arm_pose=str(a.initial_arm_pose) if a.initial_arm_pose else None,move_weight=a.move_weight,action_loss_weight=20,left_sha256=hashlib.sha256(a.left_teacher.read_bytes()).hexdigest(),train_envs=48,validation_envs=16,history=history,seconds=time.monotonic()-started,scope='Single encoder and unchanged decoder; physical acceptance required; not resumable.')
  ck['quiet_stop_distillation']=meta;torch.save(ck,a.out/'candidate.pt');(a.out/'report.json').write_text(json.dumps(meta,indent=2)+'\n')
 if __name__=='__main__':main()

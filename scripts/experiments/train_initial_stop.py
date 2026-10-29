@@ -6,6 +6,8 @@ def main():
  p=argparse.ArgumentParser(description=__doc__)
  for k in ['checkpoint','dataset','out']:p.add_argument('--'+k,type=Path,required=True)
  p.add_argument('--iterations',type=int,default=80)
+ p.add_argument('--move-teacher',type=Path)
+ p.add_argument('--standing-pose',type=Path)
  p.add_argument('--conditional',action='store_true')
  a=p.parse_args();a.out.mkdir(exist_ok=False)
  import torch
@@ -19,6 +21,8 @@ def main():
  policy,saved=load_policy_from_checkpoint(a.checkpoint,'cuda:0');policy.requires_grad_(False)
  actor=policy.encoders['velocity'];actor.requires_grad_(True)
  prior=copy.deepcopy(actor).requires_grad_(False)
+ if a.move_teacher:
+  moving,_=load_policy_from_checkpoint(a.move_teacher,'cuda:0');prior.load_state_dict(moving.encoders['velocity'].state_dict());del moving
  cfg=SuperMimicEnvCfgArgs(npz_files=[str(a.dataset/'backward.npz')],num_envs=256,seed=29,
   future_frames=saved['env']['future_frames'],episode_length_s=3.,action_noise_std=0.,obs_noise=False,
   reset_noise=False,domain_randomization=False,record_transitions=False,anchor_obs=saved['env']['anchor_obs'],velocity=VelocityCfg(**saved['velocity']))
@@ -28,6 +32,9 @@ def main():
  value=nn.Sequential(nn.Linear(x.shape[-1],256),nn.Tanh(),nn.Linear(256,128),nn.Tanh(),nn.Linear(128,1)).cuda()
  opt=torch.optim.Adam(actor.parameters(),lr=5e-5);vopt=torch.optim.Adam(value.parameters(),lr=3e-4)
  arm_ids=[i for i,n in enumerate(PROFILE['joint_names']) if any(k in n for k in ('shoulder','elbow','wrist'))]
+ arm_target=cmd.library.default_joint_pos[arm_ids].clone()
+ if a.standing_pose:
+  pose=json.loads(a.standing_pose.read_text())['joint_positions_rad'];arm_target=torch.tensor([pose[PROFILE['joint_names'][i]] for i in arm_ids],device='cuda')
  sigma=.02;trace=[];beg=time.monotonic()
  try:
   for it in range(a.iterations):
@@ -46,9 +53,9 @@ def main():
      state=cmd.state_io.read();speed=measured_velocity(state)
      dq=state[:,NQ+6:];q=state[:,7:NQ]
      arm_motion=dq[:,arm_ids].square().mean(-1)
-     arm_pose=(q[:,arm_ids]-cmd.library.default_joint_pos[arm_ids]).square().mean(-1)
-     r=2-10*speed[:,:2].square().sum(-1)-2*speed[:,2].square()
-     r-=2*arm_motion+.1*arm_pose+.05*dq.square().mean(-1)+20*term.float()
+     arm_pose=(q[:,arm_ids]-arm_target).square().mean(-1)
+     r=2-30*speed[:,:2].square().sum(-1)-4*speed[:,2].square()
+     r-=10*arm_motion+.5*arm_pose+.1*dq.square().mean(-1)+20*term.float()
      batch.append((x.clone(),z,lp,v,r,done,goal.clone(),term.clone(),tout.clone()));x=nxt['policy']
     tail=value(x).squeeze(-1);adv=[];gae=torch.zeros_like(tail)
     for b in reversed(batch):
