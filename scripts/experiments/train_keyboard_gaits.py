@@ -17,6 +17,7 @@ def main():
     p.add_argument('--phase',choices=['capacity','train'],required=True)
     p.add_argument('--proof',type=Path)
     p.add_argument('--hours',type=float,default=.5)
+    p.add_argument('--quiet-stop-cost',action='store_true')
     p.add_argument('--weights-only',action='store_true',help='Import repaired velocity weights with fresh optimizers')
     p.add_argument('--paired-supervision', action=argparse.BooleanOptionalAction, default=True, help='Use tracking replay for persistent teacher alignment')
     a=p.parse_args()
@@ -35,6 +36,9 @@ def main():
     if a.paired_supervision:
         from keyboard_supervision import install
         install()
+    if a.quiet_stop_cost:
+        from keyboard_supervision import install_quiet_stop_cost
+        install_quiet_stop_cost()
     from supermimic.training.loop import Trainer
     from supermimic.training.distributed import broadcast_params
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():raise ValueError('Dedicated server interpreter required')
@@ -107,7 +111,7 @@ def main():
         proof=json.loads(a.proof.read_text())
         if not proof['passed'] or proof['checkpoint_sha256']!=sha(a.checkpoint):raise ValueError('Keyboard capacity proof mismatch')
         cfg.resume=a.checkpoint
-    record=dict(status='initializing',phase=a.phase,rank=rank,physical_gpu=gpu,pid=os.getpid(),checkpoint=str(a.checkpoint),checkpoint_sha256=sha(a.checkpoint),dataset_manifest_sha256=sha(a.dataset/'manifest.json'),omitted_unused_metadata=omitted,keyboard_validated=False)
+    record=dict(status='initializing',phase=a.phase,rank=rank,physical_gpu=gpu,pid=os.getpid(),checkpoint=str(a.checkpoint),checkpoint_sha256=sha(a.checkpoint),dataset_manifest_sha256=sha(a.dataset/'manifest.json'),omitted_unused_metadata=omitted,keyboard_validated=False,paired_supervision=a.paired_supervision,quiet_stop_cost=a.quiet_stop_cost)
     def save():(a.out/f'rank-{rank}.json').write_text(json.dumps(record,indent=2,default=str)+'\n')
     def hashes():
         result={}

@@ -48,3 +48,34 @@ def install():
             return rollout, align
 
     module.JointPolicyTrainer = PairedJointPolicyTrainer
+
+
+def install_quiet_stop_cost():
+    """Carry the physical quiet-stop joint-motion costs into imagined updates.
+
+    Only zero commands receive these costs. Deployment and moving rewards stay
+    unchanged. The extension still needs physical regression after training.
+    """
+    import torch
+    import supermimic.locomotion.trainer as module
+    from supermimic.locomotion.task import measured_velocity
+    from supermimic.robots.dimensions import PROFILE, NQ
+
+    base = module.velocity_reward
+    arms = [i for i, name in enumerate(PROFILE['joint_names'])
+            if any(key in name for key in ('shoulder', 'elbow', 'wrist'))]
+    if len(arms) != 14:
+        raise ValueError('Expected X2 shoulder/elbow/wrist joints')
+
+    def reward(state, command, action, previous_action, joint_limits, nominal_height, default_joints):
+        original = base(state, command, action, previous_action, joint_limits, nominal_height, default_joints)
+        standing = command.square().sum(-1) < 1e-6
+        speed = measured_velocity(state)
+        dq, q = state[..., NQ + 6:], state[..., 7:NQ]
+        cost = (2 * dq[..., arms].square().mean(-1)
+                + .1 * (q[..., arms] - default_joints[arms]).square().mean(-1)
+                + .05 * dq.square().mean(-1)
+                + 10 * speed[..., :2].square().sum(-1) + 2 * speed[..., 2].square())
+        return original - cost * standing
+
+    module.velocity_reward = reward
