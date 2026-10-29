@@ -6,6 +6,7 @@ def main():
  p=argparse.ArgumentParser(description=__doc__)
  for k in ['checkpoint','dataset','out']:p.add_argument('--'+k,type=Path,required=True)
  p.add_argument('--iterations',type=int,default=80)
+ p.add_argument('--yaw-cost',type=float,default=40.)
  p.add_argument('--move-teacher',type=Path)
  p.add_argument('--standing-pose',type=Path)
  p.add_argument('--conditional',action='store_true')
@@ -54,7 +55,7 @@ def main():
      dq=state[:,NQ+6:];q=state[:,7:NQ]
      arm_motion=dq[:,arm_ids].square().mean(-1)
      arm_pose=(q[:,arm_ids]-arm_target).square().mean(-1)
-     r=2-30*speed[:,:2].square().sum(-1)-4*speed[:,2].square()
+     r=2-30*speed[:,:2].square().sum(-1)-a.yaw_cost*speed[:,2].square()
      r-=10*arm_motion+.5*arm_pose+.1*dq.square().mean(-1)+20*term.float()
      batch.append((x.clone(),z,lp,v,r,done,goal.clone(),term.clone(),tout.clone()));x=nxt['policy']
     tail=value(x).squeeze(-1);adv=[];gae=torch.zeros_like(tail)
