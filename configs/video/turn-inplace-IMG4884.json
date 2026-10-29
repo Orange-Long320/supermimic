@@ -1,0 +1,65 @@
+{
+  "method": "fixed pelvis XY, reduced fore-aft stepping, relative-height stance anchors and bounded leg IK",
+  "source": "/home/2025-Long.xh/HHD/data/supermimic/data/video/walk_IMG4884_20261029_r1/x2_reference/IMG_4884.npz",
+  "source_sha256": "8e7813254aa415246ef1a895bdc89350e2b1c134dab73114e7da55fa8f07dd63",
+  "frames": 204,
+  "fps": 50.0,
+  "duration_s": 4.06,
+  "forward_displacement_m": 0.912649872452603,
+  "turn_angle_deg": 60.0,
+  "in_place": true,
+  "max_pelvis_horizontal_drift_m": 0.0,
+  "stance_runs": [
+    [
+      [
+        0,
+        56
+      ],
+      [
+        73,
+        104
+      ],
+      [
+        129,
+        158
+      ],
+      [
+        184,
+        204
+      ]
+    ],
+    [
+      [
+        0,
+        77
+      ],
+      [
+        102,
+        133
+      ],
+      [
+        155,
+        188
+      ]
+    ]
+  ],
+  "endpoint_displacement_m": [
+    0.0,
+    0.0,
+    -0.0776242537080738
+  ],
+  "max_foot_target_error_m": 0.00037114120624142294,
+  "max_floor_lift_m": 0.0044446664274242,
+  "max_joint_limit_violation_rad": 4.0193176271685616e-06,
+  "arms_unchanged": true,
+  "physics_validated": false,
+  "training_approved": false,
+  "run": "turn_inplace_IMG4884_20261029_r1",
+  "status": "in-place left turn preview complete",
+  "measured_heading_change_deg": 60.0,
+  "verified_pelvis_horizontal_drift_m": 0.0,
+  "video_frames": 204,
+  "video_fps": 50,
+  "video_duration_s": 4.08,
+  "review": "Fixed camera contact sheet reviewed; pelvis XY and actual heading independently checked from generated FK arrays; physics unvalidated."
+}
