@@ -23,12 +23,17 @@ def main():
     p.add_argument('--joint-limit-factor',type=float,default=1.,help='Optional tighter optimization range, e.g. existing reset factor 0.9; physical limits unchanged')
     p.add_argument('--minimum-root-up-z',type=float,help='Optional stricter upright target; legacy threshold is 0.85')
     p.add_argument('--maximum-foot-penetration-m',type=float,help='Optional tighter foot compression limit; legacy bound is 5 mm')
+    p.add_argument('--maximum-knee-deg',type=float,help='Optional posture bound for leg-adjustment calibration; only tightens joint range')
+    p.add_argument('--minimum-knee-deg',type=float,help='Optional minimum knee flexion for posture calibration; only tightens joint range')
+    p.add_argument('--maximum-hip-roll-magnitude-deg',type=float,help='Optional symmetric hip-roll posture bound; only tightens joint range')
     args=p.parse_args()
     if not np.isfinite(args.support_height_m) or min(args.max_trials,args.max_nfev)<1:p.error('Finite support height and positive solver budgets required')
     if not 0<args.joint_limit_factor<=1:p.error('Joint range factor must be in (0,1]')
     if args.minimum_root_up_z is not None and not .85<=args.minimum_root_up_z<1:p.error('Upright target may only tighten the legacy threshold')
     if args.maximum_foot_penetration_m is not None and not .00005<args.maximum_foot_penetration_m<=.005:p.error('Foot limit may only tighten the legacy bound')
     if args.polish_fixed_pressure and not args.anchor_left_foot:p.error('Fixed pressure polishing requires an explicit left-foot anchor')
+    if any(v is not None and (not np.isfinite(v) or v<=0) for v in [args.minimum_knee_deg,args.maximum_knee_deg,args.maximum_hip_roll_magnitude_deg]):p.error('Posture bounds must be positive finite degrees')
+    if (args.minimum_knee_deg is not None or args.maximum_knee_deg is not None or args.maximum_hip_roll_magnitude_deg is not None) and not args.leg_adjustments:p.error('Posture bounds require leg adjustments')
     args.out.mkdir(parents=True,exist_ok=False)
     from supermimic.robots.dimensions import PROFILE
     m=mujoco.MjModel.from_binary_path(str(args.model));d=mujoco.MjData(m)
@@ -59,8 +64,17 @@ def main():
     mid=m.jnt_range[joints].mean(axis=1);half=np.diff(m.jnt_range[joints],axis=1).reshape(-1)*.5*args.joint_limit_factor
     joint_lower=np.maximum(m.jnt_range[joints,0]+.025,mid-half)
     joint_upper=np.minimum(m.jnt_range[joints,1]-.025,mid+half)
+    for i,j in enumerate(joints):
+        if args.maximum_knee_deg is not None and 'knee' in m.joint(j).name:
+            joint_upper[i]=min(joint_upper[i],np.radians(args.maximum_knee_deg))
+        if args.minimum_knee_deg is not None and 'knee' in m.joint(j).name:
+            joint_lower[i]=max(joint_lower[i],np.radians(args.minimum_knee_deg))
+        if args.maximum_hip_roll_magnitude_deg is not None and 'hip_roll' in m.joint(j).name:
+            limit=np.radians(args.maximum_hip_roll_magnitude_deg)
+            joint_lower[i]=max(joint_lower[i],-limit);joint_upper[i]=min(joint_upper[i],limit)
     lower=np.r_[[-.12,-.15,-.15],np.maximum(joint_lower-q0[columns],-radius)]
     upper=np.r_[[.03,.15,.15],np.minimum(joint_upper-q0[columns],radius)]
+    if np.any(lower>=upper):raise ValueError('Empty calibration/posture bounds')
     def evaluate(x):
         q=q0.copy();q[2]+=x[0];q[3:7]=(Rotation.from_rotvec([x[1],x[2],0])*rotation0).as_quat()[[3,0,1,2]]
         q[columns]+=x[3:]
