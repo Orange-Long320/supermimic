@@ -200,7 +200,7 @@
     "practical_reference_contact_regression": "omni_practical_reference_gate_20261029_r1/selective-contact-regression.json",
     "practical_reference_input_accepted": true,
     "finite_solver_discrete_dynamics": "omni_practical_reference_gate_20261029_r1/discrete-dynamics/report.json",
-    "current_formal_training_status": "authorized_extra3h_running",
+    "current_formal_training_status": "completed_full_task_validation_failed",
     "latest_reference2048_run": "omni_latest_reference_batch2048_3h_20261029_r1",
     "latest_reference2048_driver_pid": 1468591,
     "latest_reference2048_capacity_pid": 1468614,
@@ -239,7 +239,7 @@
     "dual8192_deadline_epoch": 1793247353.366828,
     "extra_three_hour_run": "omni_dual8192_extra3h_20261029_r1",
     "extra_three_hour_queue_pid": 1630259,
-    "extra_three_hour_status": "running",
+    "extra_three_hour_status": "completed_postprocessing_recovered_tasks_failed",
     "extra_three_hour_formal_budget_seconds": 10800,
     "extra_three_hour_driver_pid": 1633329,
     "extra_three_hour_rank_pids": [
@@ -259,7 +259,13 @@
       "vault_clip_no_termination": true,
       "vault_simulated_seconds": 14.68,
       "complete_task_verified": false
-    }
+    },
+    "extra_three_hour_final_iteration": 12800,
+    "extra_three_hour_final_updates": 4928,
+    "extra_three_hour_new_updates": 2016,
+    "extra_three_hour_final_checkpoint_sha256": "8559441801dc93a62d7640042dde4b3b05386fab08ae9212a66e3af2e841984c",
+    "extra_three_hour_postprocessing": "omni_dual8192_extra3h_20261029_r1/final-evaluation-recovery-r1",
+    "extra_three_hour_complete_task_verified": false
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
