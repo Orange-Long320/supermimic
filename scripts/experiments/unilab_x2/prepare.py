@@ -81,6 +81,19 @@ def main():
         for attr in ("pos", "quat", "size", "friction", "solref", "solimp",
                      "margin", "gap", "contype", "conaffinity", "condim", "priority"):
             value = getattr(geom, attr)
+            if (attr in ("pos", "quat")
+                    and original.geom_type[geom.id] == mujoco.mjtGeom.mjGEOM_MESH):
+                # Compiled mesh geoms are expressed in the mesh principal-axis
+                # frame. MJCF geom poses precede that compiler transform;
+                # writing geom_pos/quat directly would apply it twice.
+                mesh_id = int(original.geom_dataid[geom.id])
+                mesh_inverse = original.mesh_quat[mesh_id].copy()
+                mesh_inverse[1:] *= -1
+                xml_quat = np.empty(4)
+                mujoco.mju_mulQuat(xml_quat, geom.quat, mesh_inverse)
+                rotated_offset = np.empty(3)
+                mujoco.mju_rotVecQuat(rotated_offset, original.mesh_pos[mesh_id], xml_quat)
+                value = geom.pos - rotated_offset if attr == "pos" else xml_quat
             if attr in ("contype", "conaffinity", "condim", "priority"):
                 el.set(attr, str(int(np.asarray(value).reshape(-1)[0])))
             else:
@@ -142,17 +155,40 @@ def main():
     frames = source["joint_pos"].shape[0]
     motion = {}
     mapping = []
-    for name in target_names[1:]:
-        stripped = name.removeprefix(prefix)
-        if stripped not in source_names:
-            raise ValueError(f"Body {name} absent from source motion")
-        mapping.append(source_names.index(stripped))
+    mapped_robot_rows = []
+    static_rows = []
+    static_data = mujoco.MjData(restored)
+    # Configuration/FK only; no integration or trajectory rollout.
+    mujoco.mj_forward(restored, static_data)
+    for target_id, name in enumerate(target_names[1:], start=1):
+        if name.startswith(prefix):
+            stripped = name.removeprefix(prefix)
+            if stripped not in source_names:
+                raise ValueError(f"Robot body {name} absent from source motion")
+            source_id = source_names.index(stripped)
+            mapping.append(source_id)
+            mapped_robot_rows.append((target_id, source_id))
+        else:
+            # Static scene bodies such as mjlab's terrain are absent from the
+            # robot-only motion. Fail closed if a nonrobot body is articulated.
+            ancestor = target_id
+            while ancestor:
+                if restored.body_jntnum[ancestor]:
+                    raise ValueError(f"Unmapped articulated scene body {name}")
+                ancestor = int(restored.body_parentid[ancestor])
+            mapping.append(None)
+            static_rows.append(target_id)
     for field, width in (("body_pos_w", 3), ("body_quat_w", 4),
                          ("body_lin_vel_w", 3), ("body_ang_vel_w", 3)):
         array = np.zeros((frames, restored.nbody, width), dtype=np.float32)
         if width == 4:
             array[:, 0, 0] = 1
-        array[:, 1:] = source[field][:, mapping]
+        for target_id, source_id in mapped_robot_rows:
+            array[:, target_id] = source[field][:, source_id]
+        if field in ("body_pos_w", "body_quat_w"):
+            values = static_data.xpos if field == "body_pos_w" else static_data.xquat
+            for target_id in static_rows:
+                array[:, target_id] = values[target_id]
         motion[field] = array
     joints = [restored.joint(i).name for i in range(1, restored.njnt)]
     source_joint_names = [str(n) for n in source["joint_names"].tolist()]
@@ -171,6 +207,8 @@ def main():
                     source_motion=str(a.motion.resolve()), source_motion_sha256=digest(a.motion),
                     motion_sha256=digest(npz), scene_sha256=digest(xml),
                     source_body_indices=mapping, source_joint_indices=joint_map,
+                    static_scene_body_rows={target_names[i]: i for i in static_rows},
+                    static_scene_body_source="Restored scene MuJoCo FK at qpos0; zero velocities; no simulation stepping",
                     physical_parameter_max_errors=errors,
                     note="Shared X2 physical scene with official UniLab FlashSAC tracking task terms; not SuperMimic algorithm parity")
     (a.out / "adapter.json").write_text(json.dumps(metadata, indent=2) + "\n")
