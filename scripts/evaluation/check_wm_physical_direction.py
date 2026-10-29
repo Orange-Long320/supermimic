@@ -50,7 +50,7 @@ def main():
         return ((measured_velocity(states)-commands)/scale).square().sum(-1).mean(0)
 
     @torch.no_grad()
-    def physical(plan=None):
+    def physical(plan=None, start_state=None):
         torch.manual_seed(19)
         env = make_env(SuperMimicEnvCfgArgs(npz_files=[str(a.dataset/'walk.npz')],
             num_envs=6, seed=19, future_frames=saved['env']['future_frames'], episode_length_s=30,
@@ -75,6 +75,12 @@ def main():
                 obs,_,term,tout,_ = env.step(act)
                 if (term|tout).any():
                     raise RuntimeError('Warmup failed')
+            initial = cmd.state_io.read().clone()
+            # Replaying warmup is not guaranteed to reproduce a contact trajectory.
+            # Match qpos/qvel explicitly, and zero the solver warmstart in BOTH arms.
+            if hasattr(env.sim.data, 'act') and env.sim.data.act[:].numel():
+                raise RuntimeError('Actuator internal state needs an explicit snapshot')
+            cmd.state_io.write(torch.arange(6,device='cuda'), initial if start_state is None else start_state)
             initial = cmd.state_io.read().clone()
             xi = SimContext(env, '.*(ankle_roll|foot).*', 'torso_link').read().clone()
             states, actions, failures = [], [], []
@@ -125,7 +131,7 @@ def main():
                 plan.copy_(torch.maximum(torch.minimum(plan,actions+a.epsilon),actions-a.epsilon))
         with torch.no_grad():
             predicted_final = error(predict(plan))
-        start2,xi2,states2,_,failed2=physical(plan.detach())
+        start2,xi2,states2,_,failed2=physical(plan.detach(),initial)
         state_delta=float((start2-initial).abs().max())
         context_delta=float((xi2-xi).abs().max())
         if state_delta>1e-3 or context_delta>1e-6:
