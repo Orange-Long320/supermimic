@@ -1,0 +1,75 @@
+{
+  "clips": [
+    {
+      "name": "walk",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/data/video/walk_IMG4884_20261029_r1/x2_reference/IMG_4884.npz",
+      "sha256": "8e7813254aa415246ef1a895bdc89350e2b1c134dab73114e7da55fa8f07dd63",
+      "frames": 204,
+      "hard_limit_violation_rad": 4.0193176271685616e-06
+    },
+    {
+      "name": "backward",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/backward_IMG4884_20261029_r1/candidate/backward.npz",
+      "sha256": "a2ebe7b9c6380666bcb8cb876245b5a8e35f54ed27c5f4fa67f315adb0ab0bca",
+      "frames": 204,
+      "hard_limit_violation_rad": 4.0193176271685616e-06
+    },
+    {
+      "name": "turn_left_inplace",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/turn_inplace_IMG4884_20261029_r1/candidate/turn.npz",
+      "sha256": "0cad5cc477da15203e9b2f8c14c074cc27d45da2c0001682540ddb979a98048b",
+      "frames": 204,
+      "hard_limit_violation_rad": 4.0193176271685616e-06
+    },
+    {
+      "name": "jog",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/data/video/gait_IMG4880_4883_20261029_r1/x2_candidates_r4/IMG_4881.npz",
+      "sha256": "170f721735359b0101165af40238254bd5ad25dea6d913563ff80e98332fe2bf",
+      "frames": 131,
+      "hard_limit_violation_rad": 4.0193176271685616e-06
+    },
+    {
+      "name": "turn_right_inplace",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/turn_inplace_right_IMG4884_20261029_r1/candidate/turn.npz",
+      "sha256": "aaaa641356b0f2364aa1265ec163946da324de8ae8fe78bde3a3084b1260fa48",
+      "frames": 204,
+      "hard_limit_violation_rad": 4.0193176271685616e-06
+    },
+    {
+      "name": "stand_bent",
+      "frames": 500,
+      "fps": 50.0,
+      "sha256": "b820fe5a0d62deea9a7b12b42d9c3f4f9617a5974b991ec1d438f2a8d057ebfa",
+      "source_kind": "generated_static_reference",
+      "validation": "static_feasibility_passed_active_tracking_pending"
+    }
+  ],
+  "exploratory_training_authorized": true,
+  "physics_validated": false,
+  "supersedes_dataset": "/home/2025-Long.xh/HHD/data/supermimic/data/video/gait_four_final_train_20261029_r1",
+  "authorization": "User explicitly requested left turn, right turn, forward, backward and jogging; dual GPU hour from LAFAN70000",
+  "keyboard_ready": false,
+  "parent_manifest_sha256": "3759116728f8e76e96033649566d64597e0ffc34d054646facd60fd40ad84094",
+  "standing_validation": {
+    "stage": "static_feasibility_passed_active_tracking_pending",
+    "source_equilibrium": "/home/2025-Long.xh/HHD/data/supermimic/logs/standing_reference_physical_20261029_r5/equilibrium.json",
+    "root_inverse_wrench": [
+      0.0,
+      0.0,
+      0.008503995997500624,
+      0.0031747353319266924,
+      0.008517639243814656,
+      5.296131100738025e-06
+    ],
+    "support_margin_m": 0.02913674353882862,
+    "feet": [
+      "robot/foot_12_collision",
+      "robot/foot_6_collision"
+    ],
+    "max_foot_penetration_m": 0.0007470142347196437,
+    "max_joint_limit_violation_rad": 0.0,
+    "max_effort_fraction": 0.5659845466410426,
+    "reference_controller": "none; static goal for learned active balance",
+    "physical_policy_accepted": false
+  }
+}

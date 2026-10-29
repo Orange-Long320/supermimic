@@ -121,7 +121,7 @@ def main():
    if actor_kls and sum(actor_kls)/len(actor_kls)<.01:
     for group in opt.param_groups:group['lr']=min(3e-5,max(1e-7,group['lr']*1.2))
    if it%5==0:
-    row=dict(reference_action_rmse=float((actor(refhistory)-refaction).detach().square().mean().sqrt()),iteration=it,seconds=time.monotonic()-beg,arm_velocity_rms=float(arm_motion.mean().sqrt()),actor_kl_max=max(actor_kls,default=0),actor_lr=opt.param_groups[0]['lr'],accepted_actor_steps=accepted_steps,reward=float(torch.stack([b[4] for b in batch]).mean()),vx=float(speed[:,0].mean()),falls=int(torch.stack([b[7] for b in batch]).sum()),timeouts=int(torch.stack([b[8] for b in batch]).sum()))
+    row=dict(cuda_peak_allocated_mib=torch.cuda.max_memory_allocated()/1024**2,reference_action_rmse=float((actor(refhistory)-refaction).detach().square().mean().sqrt()),iteration=it,seconds=time.monotonic()-beg,arm_velocity_rms=float(arm_motion.mean().sqrt()),actor_kl_max=max(actor_kls,default=0),actor_lr=opt.param_groups[0]['lr'],accepted_actor_steps=accepted_steps,reward=float(torch.stack([b[4] for b in batch]).mean()),vx=float(speed[:,0].mean()),falls=int(torch.stack([b[7] for b in batch]).sum()),timeouts=int(torch.stack([b[8] for b in batch]).sum()))
     trace.append(row);print(json.dumps(row),flush=True)
    if (it+1)%20==0:
     ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
