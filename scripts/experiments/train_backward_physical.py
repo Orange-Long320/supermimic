@@ -6,6 +6,7 @@ def main():
  p=argparse.ArgumentParser(description=__doc__)
  for k in ['checkpoint','dataset','out']:p.add_argument('--'+k,type=Path,required=True)
  p.add_argument('--iterations',type=int,default=80)
+ p.add_argument('--conditional',action='store_true')
  a=p.parse_args();a.out.mkdir(exist_ok=False)
  import torch
  from torch import nn
@@ -28,6 +29,11 @@ def main():
  sigma=.08;trace=[];beg=time.monotonic()
  try:
   for it in range(a.iterations):
+   if a.conditional and it % 2 == 0:
+    choices=torch.tensor([-.2,0.,.3],device='cuda')
+    goal[:,0]=choices[torch.randint(3,(256,),device='cuda')]
+    cmd.manual_command=goal
+    cmd._refresh_velocity()
    batch=[]
    with torch.no_grad():
     for step in range(32):
@@ -37,25 +43,25 @@ def main():
      nxt,_,term,tout,_=env.step(action);done=term|tout
      state=cmd.state_io.read();speed=measured_velocity(state)
      # Physical directional tracking resolves the standing solution directly.
-     r=3*torch.exp(-((speed[:,0]+.2)/.15).square())+torch.exp(-(speed[:,2]/.3).square())
+     r=(1-20*(speed[:,0]-goal[:,0]).square()-2*speed[:,2].square() if a.conditional else 3*torch.exp(-((speed[:,0]+.2)/.15).square())+torch.exp(-(speed[:,2]/.3).square()))
      r-=2*speed[:,1].square()+.02*(z-prior(x,goal)).square().mean(-1)+20*term.float()
-     batch.append((x.clone(),z,lp,v,r,done));x=nxt['policy']
+     batch.append((x.clone(),z,lp,v,r,done,goal.clone()));x=nxt['policy']
     tail=value(x).squeeze(-1);adv=[];gae=torch.zeros_like(tail)
     for b in reversed(batch):
      delta=b[4]+.99*tail*(~b[5])-b[3]
      gae=delta+.99*.95*(~b[5])*gae;adv.append(gae);tail=b[3]
     adv=torch.stack(adv[::-1]);ret=(adv+torch.stack([b[3] for b in batch])).flatten()
     adv=adv.flatten();adv=(adv-adv.mean())/adv.std().clamp_min(1e-6)
-    xx=torch.cat([b[0] for b in batch]);zz=torch.cat([b[1] for b in batch]);old=torch.cat([b[2] for b in batch])
+    cc=torch.cat([b[6] for b in batch]);xx=torch.cat([b[0] for b in batch]);zz=torch.cat([b[1] for b in batch]);old=torch.cat([b[2] for b in batch])
    for epoch in range(4):
     for ids in torch.randperm(len(xx),device='cuda').split(1024):
-     c=goal[:1].expand(len(ids),-1);mean=actor(xx[ids],c)
+     c=cc[ids];mean=actor(xx[ids],c)
      lp=torch.distributions.Normal(mean,sigma).log_prob(zz[ids]).sum(-1)
      ratio=(lp-old[ids]).exp();loss=-torch.minimum(ratio*adv[ids],ratio.clamp(.8,1.2)*adv[ids]).mean()
      # Preserve the other command interfaces on the same physical histories.
      other=c.clone();other[:,0]=.3;other[:len(ids)//2]=0
      with torch.no_grad():target=prior(xx[ids],other)
-     loss+=10*(actor(xx[ids],other)-target).square().mean()
+     if not a.conditional:loss+=10*(actor(xx[ids],other)-target).square().mean()
      opt.zero_grad(set_to_none=True);loss.backward();torch.nn.utils.clip_grad_norm_(actor.parameters(),.5);opt.step()
      vl=(value(xx[ids]).squeeze(-1)-ret[ids]).square().mean()
      vopt.zero_grad(set_to_none=True);vl.backward();torch.nn.utils.clip_grad_norm_(value.parameters(),1.);vopt.step()
@@ -67,7 +73,7 @@ def main():
     for k,t in policy.state_dict().items():
      if not k.startswith('encoders.velocity.'):assert torch.equal(t.cpu(),ck['policy'][k])
     ck['policy']={k:v.cpu() for k,v in policy.state_dict().items()};ck.pop('velocity_training',None)
-    ck['physical_backward']=dict(iterations=it+1,source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),trace=trace,scope='Backward-specific physical PPO; evaluation required; not resumable.')
+    ck['physical_backward']=dict(iterations=it+1,source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),trace=trace,conditional=a.conditional,scope='Physical PPO; evaluation required; not resumable.')
     torch.save(ck,a.out/f'candidate_{it+1}.pt')
   (a.out/'report.json').write_text(json.dumps(trace,indent=2)+'\n')
  finally:env.close()
