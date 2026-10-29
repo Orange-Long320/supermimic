@@ -5,6 +5,7 @@ import argparse,json
 def main():
  p=argparse.ArgumentParser(description=__doc__)
  for k in ['checkpoint','dataset','out']:p.add_argument('--'+k,type=Path,required=True)
+ p.add_argument('--tracking-source',type=Path)
  a=p.parse_args();a.out.mkdir(exist_ok=False)
  import torch
  from supermimic.eval.benchmark import load_policy_from_checkpoint
@@ -13,6 +14,9 @@ def main():
  from supermimic.locomotion.task import measured_velocity
  torch.set_num_threads(2)
  policy,saved=load_policy_from_checkpoint(a.checkpoint,'cuda:0')
+ if a.tracking_source:
+  source=torch.load(a.tracking_source,map_location='cuda:0',weights_only=False)['policy']
+  policy.load_state_dict(source,strict=False)
  args=SuperMimicEnvCfgArgs(npz_files=[str(a.dataset/'backward.npz')],num_envs=8,seed=0,
   future_frames=saved['env']['future_frames'],episode_length_s=20.,action_noise_std=0.,obs_noise=False,
   reset_noise=False,domain_randomization=False,record_transitions=False,anchor_obs=saved['env']['anchor_obs'],velocity=VelocityCfg(**saved['velocity']))

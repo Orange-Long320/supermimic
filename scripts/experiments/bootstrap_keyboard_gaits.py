@@ -15,6 +15,7 @@ def main():
     p.add_argument('--dataset', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--updates', type=int, default=2000)
+    p.add_argument('--backward-dagger', action='store_true')
     a = p.parse_args()
     a.out.mkdir(exist_ok=False)
     import torch
@@ -35,20 +36,51 @@ def main():
         domain_randomization=False, record_transitions=False, anchor_obs=saved['env']['anchor_obs'])
     env = make_env(args, device=device)
     rows = []
+    if a.backward_dagger:
+        policy.requires_grad_(False)
+        policy.encoders['velocity'].requires_grad_(True)
+        online_opt = torch.optim.Adam(policy.encoders['velocity'].parameters(), lr=2e-4)
+    dagger_metrics = []
     try:
         cmd = env.command_manager.get_term('motion')
         table = reference_command_table(cmd.library)
         # Spread the batch across all clips, start at frame zero.
         cmd.forced_frame[:] = cmd.library.clip_start[torch.arange(100, device=device) % cmd.library.num_clips]
         obs, _ = env.reset()
-        with torch.no_grad():
-            for step in range(650):
+        backward_clip = next(i for i,c in enumerate(cmd.library.clips) if c.name == 'backward')
+        backward = cmd.library.frame_clip[cmd.frame] == backward_clip
+        total_steps = 2040 if a.backward_dagger else 650
+        for step in range(total_steps):
+            with torch.no_grad():
                 command, valid = bounded_reference(table, cmd.frame, vc)
+                if a.backward_dagger:
+                    # Fixed requested backward speed, independent of frame sway.
+                    # Teacher supplies gait phase; off-trajectory student history
+                    # is included explicitly rather than inferred from fitting.
+                    command[backward] = torch.tensor([-.2,0.,0.],device=device)
+                    valid[backward] = True
                 latent = policy.encoders['motion'](obs['goal'])
                 action = policy.decoder(latent, obs['policy'])
                 if step % 2 == 0 and valid.any():
                     rows.append(tuple(t[valid].clone() for t in (obs['policy'], command, latent, action)))
+                if a.backward_dagger:
+                    student = policy.velocity_action(obs['policy'], command)
+                    # Different mixtures expose the student to its own errors.
+                    alpha = ((torch.arange(100,device=device) % 5) / 4)[:,None]
+                    action = torch.where(backward[:,None], action*(1-alpha)+student*alpha, action)
                 obs, _, _, _, _ = env.step(action)
+            if a.backward_dagger and (step+1) % 102 == 0:
+                pool = [torch.cat([r[i] for r in rows]) for i in range(4)]
+                for _ in range(150):
+                    ids = torch.randint(len(pool[0]), (1024,),device=device)
+                    x,c,z,y = [v[ids] for v in pool]
+                    pred = policy.encoders['velocity'](x,c)
+                    loss = (pred-z).square().mean() + (policy.decoder(pred,x)-y).square().mean()
+                    online_opt.zero_grad(set_to_none=True);loss.backward()
+                    torch.nn.utils.clip_grad_norm_(policy.encoders['velocity'].parameters(),1.)
+                    online_opt.step()
+                dagger_metrics.append(dict(step=step+1,loss=float(loss.detach())))
+                print(dagger_metrics[-1],flush=True)
     finally:
         env.close()
     data = [torch.cat([r[i] for r in rows]) for i in range(4)]
@@ -87,7 +119,7 @@ def main():
     ck['policy'] = {k:v.cpu() for k,v in policy.state_dict().items()}
     ck.pop('velocity_training', None)
     ck['bootstrap'] = dict(source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),
-        updates=a.updates, samples=count, holdout_before=before, holdout_after=after,
+        updates=a.updates, dagger=dagger_metrics, samples=count, holdout_before=before, holdout_after=after,
         limitation='Random row holdout checks fitting only; continuous physical acceptance required. Not resumable.')
     torch.save(ck, a.out/'candidate.pt')
     (a.out/'report.json').write_text(json.dumps(ck['bootstrap'], indent=2)+'\n')
