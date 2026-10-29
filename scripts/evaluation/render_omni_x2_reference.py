@@ -63,7 +63,7 @@ def main():
         if process.wait()!=0:raise RuntimeError('FFmpeg failed')
     Image.fromarray(np.concatenate([np.concatenate(previews[:2],axis=1),np.concatenate(previews[2:],axis=1)],axis=0)).save(a.out.with_suffix('.jpg'))
     sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
-    a.out.with_suffix('.json').write_text(json.dumps({'reference':str(a.reference),'frames':len(q),'source_fps':fps,'render_stride':step,'renderer':'OSMesa CPU','policy_evaluation':False,'physics_execution':False,'reference_sha256':sha(a.reference),'model_sha256':sha(a.model),'scene_sha256':sha(a.scene),'video_sha256':sha(a.out)},indent=2)+'\n')
+    a.out.with_suffix('.json').write_text(json.dumps({'reference':str(a.reference),'frames':len(q),'source_fps':fps,'render_stride':step,'renderer':os.environ.get('MUJOCO_GL','osmesa'),'egl_device_id':os.environ.get('MUJOCO_EGL_DEVICE_ID'),'cuda_visible_devices':os.environ.get('CUDA_VISIBLE_DEVICES'),'policy_evaluation':False,'physics_execution':False,'reference_sha256':sha(a.reference),'model_sha256':sha(a.model),'scene_sha256':sha(a.scene),'video_sha256':sha(a.out)},indent=2)+'\n')
     a.out.with_suffix('.as-run.py').write_bytes(Path(__file__).read_bytes())
 
 
