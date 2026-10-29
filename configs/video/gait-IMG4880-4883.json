@@ -1,5 +1,5 @@
 {
-  "status": "running: video recovery; retargeting and review pending",
+  "status": "four 50Hz X2 reference candidates generated; final render running; no policy validation",
   "sources": [
     {
       "file": "IMG_4880.MOV",
@@ -19,8 +19,71 @@
     }
   ],
   "source_review": "4880/4881 approach camera; 4882 turns; 4883 side view. Direction labels require continuous motion review.",
-  "pipeline": "pinned GEM-X raw world motion -> SOMA BVH -> existing X2 Ultra preset -> 50Hz bounded preparation",
+  "pipeline": "pinned GEM-X raw world motion -> official SOMA contact/IK postprocess -> SOMA BVH -> existing X2 Ultra preset -> 50Hz bounded preparation",
   "gpu": 3,
-  "run": "gait_IMG4880_4883_20261029_r2",
-  "limitation": "Monocular world translation and foot contacts require review; outputs are reference candidates."
+  "run": "gait_IMG4880_4883_20261029_r4",
+  "limitation": "Monocular world translation and foot contacts require review; outputs are reference candidates.",
+  "server_dataset": "/home/2025-Long.xh/HHD/data/supermimic/data/video/gait_IMG4880_4883_20261029_r1/x2_candidates_r4",
+  "results": [
+    {
+      "max_residual_root_lift_m": 9.759498165841807e-05,
+      "repaired_frames": 23,
+      "max_joint_repair_rad": 0.1450987131736845,
+      "minimum_repaired_sole_m": 0.0,
+      "clip": "IMG_4880",
+      "frames": 284,
+      "duration_s": 5.66,
+      "root_height_offset_m": 0.00888458183533974,
+      "joint_limit_violation_rad": 3.966593569160182e-06,
+      "joint_velocity_p99": 4.189402912219639,
+      "source_sha256": "a942d0bb9647200cc4d881b43f5b4d6bdab4bd7d9787e1667404f05a2fdc726f",
+      "npz_sha256": "8096bf9d1bd76a0e99d5e5773924b4f0d986a00cc443e5dbee5d062abe079665",
+      "training_approved": false
+    },
+    {
+      "max_residual_root_lift_m": 7.144391419760046e-07,
+      "repaired_frames": 3,
+      "max_joint_repair_rad": 0.06074736666228686,
+      "minimum_repaired_sole_m": 0.0,
+      "clip": "IMG_4881",
+      "frames": 131,
+      "duration_s": 2.6,
+      "root_height_offset_m": 0.011463840101381233,
+      "joint_limit_violation_rad": 3.966593569160182e-06,
+      "joint_velocity_p99": 5.078108169094149,
+      "source_sha256": "ea0c7f6e7a61545bce6fa0dc614469b4547b2d2c98231a41b873c43d37a51e16",
+      "npz_sha256": "170f721735359b0101165af40238254bd5ad25dea6d913563ff80e98332fe2bf",
+      "training_approved": false
+    },
+    {
+      "max_residual_root_lift_m": 0.0,
+      "repaired_frames": 0,
+      "max_joint_repair_rad": 0.0,
+      "minimum_repaired_sole_m": 0.0,
+      "clip": "IMG_4882",
+      "frames": 196,
+      "duration_s": 3.9,
+      "root_height_offset_m": 0.002161244283317558,
+      "joint_limit_violation_rad": 3.966593569160182e-06,
+      "joint_velocity_p99": 4.040502775115272,
+      "source_sha256": "3e69c49930da2ebbba75b4774d3ee96b6700d3922eda6d95c41ae66bc90565c7",
+      "npz_sha256": "3252f8a1039540d1bf7b22c20824098f30d7e0bed8833afd5ed394c3d1492c40",
+      "training_approved": false
+    },
+    {
+      "max_residual_root_lift_m": 0.0,
+      "repaired_frames": 0,
+      "max_joint_repair_rad": 0.0,
+      "minimum_repaired_sole_m": 0.0,
+      "clip": "IMG_4883",
+      "frames": 269,
+      "duration_s": 5.36,
+      "root_height_offset_m": 0.0038137510431339736,
+      "joint_limit_violation_rad": 3.966593569160182e-06,
+      "joint_velocity_p99": 4.701947855312599,
+      "source_sha256": "b3c3407f484c50ed4a250829495d46e4fd63d509adb6591d9762a878407f5db1",
+      "npz_sha256": "f75b0cc3fabc5ca0eeb2b757bd28207381e637e33ca7fe666708ba68254ea12f",
+      "training_approved": false
+    }
+  ]
 }

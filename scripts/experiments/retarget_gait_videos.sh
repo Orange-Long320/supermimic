@@ -33,8 +33,15 @@ for N in 4880 4881 4882 4883; do
   CMD=("$G/bin/gem-infer" motion-video --task body --input "$V" --config "$O/config.json" --device cuda --output "$C/raw_motion.pt")
   printf '%q ' "${CMD[@]}" > "$C/command.sh"
   printf '\n' >> "$C/command.sh"
-  "${CMD[@]}" > "$C/inference.log" 2>&1
-  "$G/bin/python" scripts/data/export_gem_bvh.py --input "$C/raw_motion.pt" --soma-assets "$D/assets/gem-x/soma" --out "$C/bvh" --name "IMG_$N" > "$C/export.log" 2>&1
+  CACHE="$D/logs/gait_IMG4880_4883_20261029_r2/IMG_$N/raw_motion.pt"
+  if [[ -f "$CACHE" ]]; then
+    cp "$CACHE" "$C/raw_motion.pt"
+    echo "Recovered from $CACHE" > "$C/inference.log"
+  else
+    "${CMD[@]}" > "$C/inference.log" 2>&1
+  fi
+  "$G/bin/gem-infer" motion-cache --task body --input "$C/raw_motion.pt" --device cpu --postprocess --soma-assets "$D/assets/gem-x/soma" --output "$C/postprocessed_motion.pt" > "$C/postprocess.log" 2>&1
+  "$G/bin/python" scripts/data/export_gem_bvh.py --input "$C/postprocessed_motion.pt" --soma-assets "$D/assets/gem-x/soma" --out "$C/bvh" --name "IMG_$N" > "$C/export.log" 2>&1
   "$P" scripts/data/retarget.py --robot x2_ultra --input "$C/bvh" --output "$C/retarget" --batch-size 1 > "$C/retarget.log" 2>&1
   printf 'filename\nIMG_%s\n' "$N" > "$C/manifest.csv"
   "$P" scripts/data/prepare_lafan.py --robot x2_ultra --source "$C/retarget" --dest "$C/npz" --manifest "$C/manifest.csv" --workers 1 --input-fps 30 --audit "$C/preparation.json" > "$C/prepare.log" 2>&1
