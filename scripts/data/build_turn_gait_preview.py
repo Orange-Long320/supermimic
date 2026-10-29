@@ -1,7 +1,7 @@
 """Server-only synthetic turning reference, preserving source time and arm motion.
 
 Bend the root path and solve bounded leg IK with stance foot anchors. This is a kinematic design, not a recovered
-backward performance or a physics rollout.
+turning performance or a physics rollout.
 """
 import argparse
 import hashlib
@@ -14,6 +14,7 @@ def main():
     p.add_argument('--input', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--angle-deg', type=float, default=60.)
+    p.add_argument('--in-place', action='store_true', help='Fix pelvis XY, reduce fore-aft steps, turn heading exactly by requested angle')
     a = p.parse_args()
     if a.out.exists(): p.error('output directory already exists')
     from supermimic.robots.paths import select_robot
@@ -41,16 +42,23 @@ def main():
     if progress[-1] < .1: raise ValueError('source has insufficient walking travel')
     u = progress / progress[-1]
     yaw = np.deg2rad(a.angle_deg) * (3*u*u - 2*u*u*u)
+    if a.in_place:
+        facing = Rotation.from_quat(quat[:,[1,2,3,0]]).apply(np.tile([1.,0,0],(len(quat),1)))
+        source_yaw = np.unwrap(np.arctan2(facing[:,1],facing[:,0]))
+        yaw -= source_yaw-source_yaw[0]
     turn = Rotation.from_euler('z', yaw[:,None])
-    original_quat = quat.copy()
     quat = (turn * Rotation.from_quat(quat[:,[1,2,3,0]])).as_quat()[:,[3,0,1,2]]
     backward = pos.copy()
     delta = np.diff(pos,axis=0)
     delta[:,:2] = Rotation.from_euler('z',((yaw[1:]+yaw[:-1])/2)[:,None]).apply(delta)[:,:2]
     backward[1:] = pos[0] + np.cumsum(delta,axis=0)
+    if a.in_place: backward[:,:2] = pos[0,:2]
     feet = [model.body(f'{s}_ankle_roll_link').id for s in ('left','right')]
     original = src['body_pos_w'][:, [names.index(model.body(i).name) for i in feet]].astype(float)
     rel = original - pos[:,None,:]
+    if a.in_place:
+        neutral = rel[:min(40,len(rel))].mean(axis=0)
+        rel -= .85 * ((rel-neutral) @ h)[...,None] * h
     targets = backward[:,None,:] + np.stack([turn.apply(rel[:,k]) for k in range(2)],axis=1)
     foot_rot = Rotation.from_quat(src['body_quat_w'][:,[names.index(model.body(i).name) for i in feet]][:,:,[1,2,3,0]].reshape(-1,4)).as_matrix().reshape(len(q),2,3,3)
     foot_rot = turn.as_matrix()[:,None] @ foot_rot
@@ -59,6 +67,7 @@ def main():
     for k in range(2):
         z = original[:,k,2]
         low = z < np.quantile(z,.15) + .025
+        if a.in_place: low = z - original[:,:,2].min(axis=1) < .025
         edges = np.diff(np.r_[False,low,False].astype(int))
         runs = [(int(b),int(e)) for b,e in zip(np.flatnonzero(edges==1),np.flatnonzero(edges==-1)) if e-b>=3]
         if len(runs)<2: raise ValueError('insufficient stance phases for turn synthesis')
@@ -129,7 +138,7 @@ def main():
     for value in arrays.values():
         if np.issubdtype(value.dtype,np.number) and not np.isfinite(value).all(): raise ValueError('nonfinite output')
     np.savez(a.out/'turn.npz',**arrays)
-    report=dict(method='curved root path, smooth yaw and source-height stance anchors, bounded leg IK; source frame order retained',source=str(a.input),source_sha256=hashlib.sha256(a.input.read_bytes()).hexdigest(),frames=len(q),fps=fps,duration_s=(len(q)-1)/fps,forward_displacement_m=float((pos[-1]-pos[0])@h),turn_angle_deg=a.angle_deg,stance_runs=stance_runs,endpoint_displacement_m=(backward[-1]-backward[0]).tolist(),max_foot_target_error_m=float(np.max(errors)),max_floor_lift_m=max(lifts),max_joint_limit_violation_rad=float(np.maximum(model.jnt_range[1:,0]-q,q-model.jnt_range[1:,1]).clip(0).max()),arms_unchanged=bool(np.array_equal(q[:,[i for i in range(len(joints)) if i not in leg]],src['joint_pos'][:,[i for i in range(len(joints)) if i not in leg]])),physics_validated=False,training_approved=False)
+    report=dict(method=('fixed pelvis XY, reduced fore-aft stepping, relative-height stance anchors and bounded leg IK' if a.in_place else 'curved root path, smooth yaw and source-height stance anchors, bounded leg IK; source frame order retained'),source=str(a.input),source_sha256=hashlib.sha256(a.input.read_bytes()).hexdigest(),frames=len(q),fps=fps,duration_s=(len(q)-1)/fps,forward_displacement_m=float((pos[-1]-pos[0])@h),turn_angle_deg=a.angle_deg,in_place=a.in_place,max_pelvis_horizontal_drift_m=float(np.linalg.norm(backward[:,:2]-backward[0,:2],axis=1).max()),stance_runs=stance_runs,endpoint_displacement_m=(backward[-1]-backward[0]).tolist(),max_foot_target_error_m=float(np.max(errors)),max_floor_lift_m=max(lifts),max_joint_limit_violation_rad=float(np.maximum(model.jnt_range[1:,0]-q,q-model.jnt_range[1:,1]).clip(0).max()),arms_unchanged=bool(np.array_equal(q[:,[i for i in range(len(joints)) if i not in leg]],src['joint_pos'][:,[i for i in range(len(joints)) if i not in leg]])),physics_validated=False,training_approved=False)
     (a.out/'report.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report,indent=2))
 
