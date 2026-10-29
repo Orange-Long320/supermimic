@@ -127,7 +127,7 @@ def main():
     original = source['policy'] if a.tracking_source else ck['policy']
     for name, value in policy.state_dict().items():
         if not name.startswith('encoders.velocity.'):
-            assert torch.equal(value.cpu(), original[name]), name
+            assert torch.equal(value.cpu(), original[name].cpu()), name
     ck['policy'] = {k:v.cpu() for k,v in policy.state_dict().items()}
     ck.pop('velocity_training', None)
     ck['bootstrap'] = dict(source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),
