@@ -149,7 +149,8 @@ def main():
         load_wm(ck)
         torch.manual_seed(42)
         optimizer = torch.optim.Adam(wm.parameters(), lr=saved['wm_trainer']['lr'])
-        optimizer.load_state_dict(ck['wm_opt'])
+        # Adam mutates its moment tensors; each arm must start from its own copy.
+        optimizer.load_state_dict(copy.deepcopy(ck['wm_opt']))
         for group in optimizer.param_groups:
             group['lr'] = saved['wm_trainer']['lr']
         datasets = [train['motion']] if arm == 'motion_only' else [train['motion'], train['velocity']]
