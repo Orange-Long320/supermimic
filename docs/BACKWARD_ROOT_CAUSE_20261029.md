@@ -48,3 +48,9 @@
 - 源码入口：`scripts/experiments/bootstrap_keyboard_gaits.py`、`train_backward_physical.py`、`calibrate_velocity_input.py`；诊断入口 `scripts/evaluation/probe_backward.py`。运行使用键盘快照的PYTHONPATH，未修改原键盘工作树。
 - 有界运行会话依次为sm-backward-probe、sm-backward-sourceprobe、sm-backward-dagger、sm-backward-dagger-v2/v3、sm-backward-physical、sm-directional-physical、sm-directional-calibration-test、sm-calibration-seed7、sm-calibration-standback；全部已结束。GPU1用于采集/训练/probe，GPU3用于评测，未停止其他任务。r2未产出权重，等待它的两个本任务会话已精确取消。
 - 所用环境/依赖/资产均沿用专用环境和既有离线快照，未安装依赖或修改系统。失败记录与每20轮保存点均保留。
+
+## 2026-10-29 18:03：验证权重连续录像
+
+- 用户要求视频。固定同SHA的backward_validated.pt，GPU1，tmux `sm-backward-video`，PID1866413；运行 `logs/backward_video_20261029_r1/`，完整argv与PID见launch.json，入口as-run.py对应renderer提交748d67e。
+- 录像25秒，seed0、模拟2环境展示env0，前进/停止/后退/停止；仅速度编码器驱动，无未来参考姿态输入、无reset，无动作覆盖。625帧、25fps、1280×720，结束原因requested_duration，无首次失败。没有挑选种子或剪掉停止晃动。
+- 视频backward-verified.mp4，同名JSON保存速度/命令/轨迹与权重SHA；overview.jpg已查看1/6/12/18/21/24秒关键帧，ffprobe确认25秒625帧。本地副本在outputs/backward_video_20261029_r1/。
