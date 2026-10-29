@@ -33,8 +33,10 @@ def main():
     p.add_argument('--windows-dir', type=Path, help='Reuse immutable train and held-out trajectories')
     p.add_argument('--fit-arms', nargs='+', choices=('motion_only', 'mixed'), default=['motion_only', 'mixed'])
     p.add_argument('--fit-window', type=int, choices=(8, 32), default=8)
+    p.add_argument('--heldout-dir', type=Path, help='Keep validation trajectories fixed while changing training coverage')
+    p.add_argument('--velocity-loss-weight', type=float, default=1.)
     a = p.parse_args()
-    if not (64 <= a.steps <= 1500 and 8 <= a.num_envs <= 128 and 1 <= a.fit_steps <= 512):
+    if not (64 <= a.steps <= 1500 and 8 <= a.num_envs <= 512 and 1 <= a.fit_steps <= 512 and 1 <= a.velocity_loss_weight <= 10):
         raise ValueError('Outside bounded audit limits')
     expected = Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve()
     if Path(sys.prefix).resolve() != expected or len(os.environ['CUDA_VISIBLE_DEVICES'].split(',')) != 1:
@@ -68,6 +70,7 @@ def main():
                       matmul_precision=torch.backends.cuda.matmul.fp32_precision,
                       protocol=f'Fixed actor. Separate seed 0/7 simulator runs; DR, reset/observation/action noise enabled. No reset-crossing windows. Refit only dynamics on {a.fit_window}-step state loss; held-out 1/8/32-step evaluation. No policy/critic/termination updates.',
                       fit_steps=a.fit_steps, fit_batch=a.batch_size, fit_window=a.fit_window,
+                      velocity_loss_weight=a.velocity_loss_weight, num_envs=a.num_envs,
                       fit_lr=saved['wm_trainer']['lr'])
     (a.out / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
     results = dict(status='collecting', provenance=provenance, collections=[], baselines={}, refits={})
@@ -126,7 +129,11 @@ def main():
                                     for name in ('train-windows.pt', 'heldout-windows.pt')}
     else:
         train = collect(0, 32, 4096)
-        test = collect(7, 32, 512)
+        if a.heldout_dir:
+            test = torch.load(a.heldout_dir / 'heldout-windows.pt', map_location='cuda:0', weights_only=True)
+            results['heldout_sha256'] = digest(a.heldout_dir / 'heldout-windows.pt')
+        else:
+            test = collect(7, 32, 512)
     if any(d['actions'].shape[0] < a.fit_window for d in train.values()):
         raise ValueError('Recorded windows are shorter than the requested fit window')
     results['status'] = 'fitting'
@@ -144,7 +151,7 @@ def main():
             row = {}
             for j in range(data['actions'].shape[0]):
                 pred = wm.step(pred, data['actions'][j], data['xi'])
-                if j + 1 in (1, 8, 32):
+                if j + 1 in (1, 8, 16, 32):
                     actual = data['states'][j + 1]
                     delta = measured_velocity(pred) - measured_velocity(actual)
                     row[str(j + 1)] = dict(velocity_rmse=delta.square().mean(0).sqrt().tolist(),
@@ -183,14 +190,15 @@ def main():
             loss = 0.
             for j in range(a.fit_window):
                 pred = wm.step(pred, actions[j], xi)
-                loss = loss + wm.spec.error_vector(pred, states[j + 1]).square().sum(-1).mean() / a.fit_window
+                error = wm.spec.error_vector(pred, states[j + 1]).square()
+                loss = loss + (error.sum(-1) + (a.velocity_loss_weight-1)*error[..., 6:12].sum(-1)).mean() / a.fit_window
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             norm = torch.nn.utils.clip_grad_norm_(wm.parameters(), saved['wm_trainer']['grad_clip'])
             if not torch.isfinite(loss) or not torch.isfinite(norm):
                 raise FloatingPointError('Nonfinite refit')
             optimizer.step()
-            if update in (16, 64, a.fit_steps):
+            if update in (16, 64, 128, 256, a.fit_steps):
                 row = dict(updates=update, training_state_loss=float(loss.detach()), seconds=time.monotonic()-started,
                            heldout=evaluate())
                 rows.append(row)
