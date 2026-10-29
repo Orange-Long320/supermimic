@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, teacher_still_arms: bool = False, extended_stop: bool = False, standing_only: bool = False, disable_standing_feedback: bool = False, disable_moving_feedback: bool = False):
+def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, teacher_still_arms: bool = False, extended_stop: bool = False, standing_only: bool = False, disable_standing_feedback: bool = False, disable_moving_feedback: bool = False, direct_switches: bool = False):
     import json
     from dataclasses import asdict
 
@@ -58,6 +58,9 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
         schedule = schedule[:5]
     if standing_only:
         schedule = schedule[:1]
+    if direct_switches:
+        if standing_only or extended_stop:raise ValueError('Direct switches require their own schedule')
+        schedule=[(0.,(0.,0.,0.)),(3.,(.3,0.,0.)),(10.,(-.2,0.,0.)),(17.,(0.,0.,.4)),(24.,(0.,0.,-.4)),(31.,(.6,0.,0.)),(38.,(0.,0.,0.))]
     context=StandingContext(cmd,env)
     mailbox = CommandMailbox()
     records = []
@@ -114,7 +117,7 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
             "arm_joint_names": arm_names,
             "action_joint_names": action_joint_names,
             "stop_arm_metrics": {str(k):dict(joint_velocity_rms_rad_s=torch.sqrt(v["square"]/v["count"].clamp_min(1)).cpu().tolist(),mean_joint_range_rad=(v["maximum"]-v["minimum"]).mean(-1).cpu().tolist(),samples=v["count"].cpu().tolist()) for k,v in arm_stats.items()},
-            "checkpoint": str(ckpt.resolve()), "duration_s": seconds, "seed": args.seed,
+            "checkpoint": str(ckpt.resolve()), "duration_s": seconds, "seed": args.seed, "direct_switches":direct_switches,
             "num_envs": num_envs, "survived_without_reset": int((failed_at < 0).sum()),
             "first_failure_s": failed_at.cpu().tolist(), "resets": resets.cpu().tolist(),
             "steady_rmse_vx_vy_wz": torch.sqrt(error_sum / error_count.clamp_min(1)[:, None]).cpu().tolist(),

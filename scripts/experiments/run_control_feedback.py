@@ -46,7 +46,9 @@ def main():
  p.add_argument('--gpu',type=int,default=2);p.add_argument('--iterations',type=int,default=800);p.add_argument('--hours',type=float,default=1.);p.add_argument('--source-commit',required=True)
  a=p.parse_args();a.out.mkdir(exist_ok=False)
  if subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-compute-apps=pid','--format=csv,noheader'],text=True).strip():raise RuntimeError('Requested GPU is not idle')
- env=os.environ.copy();env.pop('PYTHONHOME',None);env.update(CUDA_VISIBLE_DEVICES=str(a.gpu),PYTHONPATH=str(a.source/'src'),SM_ROBOT='x2_ultra',MUJOCO_GL='egl',OMP_NUM_THREADS='2',OPENBLAS_NUM_THREADS='2',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',XDG_CACHE_HOME=str(a.source.parent.parent/'cache'))
+ env=os.environ.copy()
+ for key in ['PYTHONHOME','SM_ROBOT_SPEC','SM_SOLE_BOX_CONFIG','SM_GPU_PINNED']:env.pop(key,None)
+ env.update(CUDA_VISIBLE_DEVICES=str(a.gpu),PYTHONPATH=str(a.source/'src'),SM_ROBOT='x2_ultra',MUJOCO_GL='egl',OMP_NUM_THREADS='2',OPENBLAS_NUM_THREADS='2',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',XDG_CACHE_HOME=str(a.source.parent.parent/'cache'))
  py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python';entry=a.source/'scripts/train_control_feedback.py';ev=a.source/'scripts/evaluate_standing_skill.py'
  argv=[py,str(entry),'--checkpoint',str(a.checkpoint),'--dataset',str(a.dataset),'--standing-pose',str(a.standing_pose),'--out',str(a.out/'train'),'--iterations',str(a.iterations),'--hours',str(a.hours),'--sigma','.08','--reference',str(a.reference)]
  if a.resume_state:argv+=['--resume-state']
@@ -75,13 +77,19 @@ def main():
     if all(r['passed'] for r in results):
      results.append(evaluate(ck,'hold20',20,23,['--standing-only']))
      if results[-1]['passed']:
-      for seed,base in [(0,a.baseline0),(7,a.baseline7)]:results.append(evaluate(ck,f'full{seed}',66,seed,baseline=json.loads(base.read_text())))
-      results.append(evaluate(ck,'extended42',42,23,['--extended-stop']))
-    attempt=dict(checkpoint=str(ck),results=results,accepted=all(r['passed'] for r in results) and len(results)==6);record['evaluations'].append(attempt);save()
+      for seed,base in [(0,a.baseline0),(7,a.baseline7)]:
+       results.append(evaluate(ck,f'full{seed}',66,seed,baseline=json.loads(base.read_text())))
+       if not results[-1]['passed']:break
+      if all(r['passed'] for r in results) and len(results)==5:
+       results.append(evaluate(ck,'extended42',42,23,['--extended-stop']))
+       if results[-1]['passed']:results.append(evaluate(ck,'direct58',58,41,['--direct-switches']))
+    attempt=dict(checkpoint=str(ck),results=results,accepted=all(r['passed'] for r in results) and len(results)==7);record['evaluations'].append(attempt);save()
     if attempt['accepted']:
      stop_own_training();shutil.copy2(ck,a.out/'accepted.pt');record.update(status='accepted',accepted_checkpoint=str(a.out/'accepted.pt'),accepted_sha256=hashlib.sha256(ck.read_bytes()).hexdigest(),finished_epoch=time.time());save();break
     record['status']='training';save()
    if train.poll() is not None:
+    newest=max((int(f.stem.split('_')[-1]) for f in (a.out/'train').glob('candidate_*.ready')),default=0)
+    if train.returncode==0 and newest>last_evaluated:continue
     record.update(status='not_accepted' if train.returncode==0 else 'training_failed',train_returncode=train.returncode,finished_epoch=time.time());save();break
    if time.monotonic()-beg>(a.hours*3600+600):
     stop_own_training();record.update(status='time_limit_not_accepted',finished_epoch=time.time());save();break

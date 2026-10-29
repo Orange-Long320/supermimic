@@ -1,4 +1,4 @@
-"""Train a private standing expert; the existing moving policy stays immutable."""
+"""Train task-state inputs for retained gaits, standing, and command transitions."""
 from pathlib import Path
 import argparse,json,copy,hashlib,time
 
@@ -49,7 +49,7 @@ def main():
  act=env.action_manager.get_term('joint_pos');refaction=(torch.tensor(inv['position_control_target'],device='cuda',dtype=x.dtype)[None]-act._offset[:1])/act._scale[:1]
  xi=torch.zeros(1,XI_DIM,device='cuda');xi[:,0]=1.;refobs=analytic_observation(refstate,refaction,xi,cmd.library.default_joint_pos);refhistory=flatten_history_term_major(refobs.expand(saved['policy']['history'],-1,-1))
  height[:]=refpos[2];stop_age=torch.zeros(a.num_envs,device='cuda');was_zero=torch.ones(a.num_envs,dtype=torch.bool,device='cuda');mix_ids=torch.arange(a.num_envs,device='cuda')%2==0
- choices=torch.tensor([[.3,0,0],[-.2,0,0],[0,0,.4],[0,0,-.4],[.6,0,0]],device='cuda');move_goal=choices[(torch.arange(a.num_envs,device='cuda')//2)%5];rates=torch.tensor([1.,1.,1.5],device='cuda')*env.step_dt
+ choices=torch.tensor([[.3,0,0],[-.2,0,0],[0,0,.4],[0,0,-.4],[.6,0,0]],device='cuda');indices=torch.arange(a.num_envs,device='cuda');move_goal=choices[(indices//2)%5];second_goal=choices[((indices//2)+1+(indices//10)%4)%5];direct_ids=indices%4==0;rates=torch.tensor([1.,1.,1.5],device='cuda')*env.step_dt
  arm_ids=[i for i,n in enumerate(PROFILE['joint_names']) if any(k in n for k in ('shoulder','elbow','wrist'))]
  arm_target=qref[arm_ids].clone()
  if a.standing_pose:
@@ -70,7 +70,7 @@ def main():
    batch=[]
    with torch.no_grad():
     for step in range(32):
-     age=env.episode_length_buf*env.step_dt;desired=torch.where((mix_ids&(age>=3.)&(age<10.))[:,None],move_goal,torch.zeros_like(move_goal));goal=goal+(desired-goal).clamp(-rates,rates);cmd.manual_command=goal;cmd._refresh_velocity()
+     age=env.episode_length_buf*env.step_dt;desired=torch.where((mix_ids&(age>=3.)&(age<10.))[:,None],move_goal,torch.zeros_like(move_goal));direct_goal=torch.where(((age>=3.)&(age<7.))[:,None],move_goal,torch.where(((age>=7.)&(age<11.))[:,None],second_goal,torch.zeros_like(move_goal)));desired=torch.where(direct_ids[:,None],direct_goal,desired);goal=goal+(desired-goal).clamp(-rates,rates);cmd.manual_command=goal;cmd._refresh_velocity()
      zero=goal.square().sum(-1)<1e-6;stop_age=torch.where(zero,stop_age+env.step_dt,torch.zeros_like(stop_age));was_zero=zero.clone()
      feedback=context.features(goal);anchor_xy=context.anchor_xy;anchor_yaw=context.anchor_yaw
      oldx=x.clone();oldgoal=goal.clone();mean=policy.velocity_action(x,goal,feedback);dist=torch.distributions.Normal(mean,sigma)
@@ -156,7 +156,7 @@ def main():
     ck['policy']={k:v.cpu() for k,v in policy.state_dict().items()};ck.pop('velocity_training',None)
     ck['standing_reference']=dict(path=str(a.reference),sha256=hashlib.sha256(a.reference.read_bytes()).hexdigest(),validation='static_feasibility_passed_active_tracking_pending',moving_core_frozen=True,transition_env_fraction=.5,episode_seconds=16)
     ck['standing_skill']=dict(radius=.1,max_residual=.5,mode='expert',feedback_dim=6,moving_feedback=True)
-    ck['control_feedback']=dict(movement_velocity_feedback='measured_minus_target',motion_prior_weight=10.,motion_prior_tracking_validity=[.05,.05,.08],physical_cycle='stand 0-3; move 3-10; stop 10-16',only_new_input_projections_trained=True)
+    ck['control_feedback']=dict(movement_velocity_feedback='measured_minus_target',motion_prior_weight=10.,motion_prior_tracking_validity=[.05,.05,.08],physical_cycle='50% hold; 25% stand3-move7-stop6; 25% stand3-move4-switch4-stop5',only_new_input_projections_trained=True)
     ck['standing_feedback']=dict(inputs=['vx_heading','vy_heading','world_yaw_rate','stop_dx_heading','stop_dy_heading','stop_heading_error'],trainable=['standing_skill.feedback_weight','velocity_feedback_weight'],standing_base_frozen=True,simulation_state_feedback=True)
     ck['standing_ppo_state']=dict(actor_optimizer=opt.state_dict(),value=value.state_dict(),value_optimizer=vopt.state_dict(),sigma=sigma,privileged_value=True)
     with torch.no_grad():
