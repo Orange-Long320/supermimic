@@ -95,10 +95,10 @@ def main():
         'initial_checkpoint_sha256':sha(a.checkpoint),'initial_iteration':initial_iteration,'initial_updates':initial_updates,
         'terrain_sha256':manifest['terrain_sha256'],'num_envs_per_rank':a.num_envs,'batch_size_per_rank':a.batch_size,
         'incoming_checkpoint_world_size':incoming_world,'base_learning_rates':base_learning_rates,
-        'cpu_affinity':sorted(os.sched_getaffinity(0)),'authorization':'User: three hours/about12GiB per GPU; latest instruction: use one vacant GPU first',
+        'cpu_affinity':sorted(os.sched_getaffinity(0)),'authorization':'User: single GPU three-hour continuation; latest instruction permits higher VRAM and batch1024',
         'scope':__doc__,'final_validation_approved':False}
     def save():record_path.write_text(json.dumps(record,indent=2,default=str))
-    trainer=None;started=time.monotonic()
+    trainer=None;started=time.monotonic();training_started=None
     def parameter_hashes():
         result={}
         for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]:
@@ -120,7 +120,9 @@ def main():
             initial_parameter_hashes=parameter_hashes(),
             initial_parameter_checksums={key:float(sum(t.detach().double().sum() for t in module.parameters()))
                 for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]})
-        save();trainer.run()
+        record['training_started_at']=time.time()
+        save();training_started=time.monotonic();trainer.run()
+        record['training_loop_seconds']=time.monotonic()-training_started
         record.update(status='completed',iteration=trainer.iteration,updates=trainer.num_updates,
             new_updates=trainer.num_updates-initial_updates,
             final_parameter_hashes=parameter_hashes(),
@@ -137,6 +139,7 @@ def main():
             if trainer.writer:trainer.writer.close()
         if record['status']!='completed':record['status']='failed'
         record.update(elapsed_seconds=time.monotonic()-started,
+            training_loop_seconds=record.get('training_loop_seconds',time.monotonic()-training_started if training_started is not None else 0.),
             torch_peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,
             torch_peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20)
         save()

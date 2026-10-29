@@ -23,10 +23,14 @@ def main():
     p.add_argument('--gpus',type=int,nargs='+',default=[3,2])
     p.add_argument('--minutes',type=float,default=180.)
     p.add_argument('--memory-budget-mib',type=int,default=12800)
+    p.add_argument('--batch-size',type=int,default=512)
+    p.add_argument('--previous-training-seconds',type=float,default=0.)
+    p.add_argument('--include-capacity-in-budget',action='store_true',help='Count this continuation capacity fit within the same original wall-clock training budget')
     p.add_argument('--queue-seconds',type=int,default=3600)
     a=p.parse_args()
-    if len(a.gpus) not in [1,2] or len(set(a.gpus))!=len(a.gpus) or not 0<a.minutes<=180 or not 0<a.memory_budget_mib<=12800:
-        p.error('One/two distinct GPUs, <=3hours, <=12.5GiB per GPU required')
+    if (len(a.gpus) not in [1,2] or len(set(a.gpus))!=len(a.gpus) or not 0<a.minutes<=180
+        or not 0<a.memory_budget_mib<=22000 or a.batch_size<1 or a.previous_training_seconds<0):
+        p.error('One/two distinct GPUs, <=3hours, bounded batch and memory with hardware headroom required')
     r=a.run;s=r/'source';py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python'
     if (r/'progress.json').exists():p.error('Run already started')
     (r/'pid').write_text(str(os.getpid()))
@@ -101,23 +105,30 @@ def main():
         initial=r/'initial-weights.pt';shutil.copyfile(a.initial_checkpoint,initial)
         if sha(initial)!=a.expected_checkpoint_sha256:raise ValueError('Pinned weights changed')
         (r/'source-commit.txt').write_text(a.source_commit+'; package7568607 private copy\n')
-        (r/'resources.txt').write_text(f'{len(a.gpus)}rank shared policy on explicit GPUs{a.gpus};2048env/512batch per rank;2CPUcores/2threads per rank;device budget{a.memory_budget_mib}MiB each;capacity100steps then{a.minutes}minutes;50% source0/50% return;original physics unchanged. User requested continuation despite unresolved reference dynamics.\n')
+        (r/'resources.txt').write_text(f'{len(a.gpus)}rank shared policy on explicit GPUs{a.gpus};2048env/{a.batch_size}batch per rank;2CPUcores/2threads per rank;device budget{a.memory_budget_mib}MiB each;original budget{a.minutes}minutes, subtract previous{a.previous_training_seconds}s, capacity charged={a.include_capacity_in_budget};50% source0/50% return;original physics unchanged. User requested continuation despite unresolved reference dynamics.\n')
         wait_free(a.gpus,a.queue_seconds)
         (r/'gpu-preflight.txt').write_text(subprocess.check_output(['nvidia-smi'],text=True))
         (r/'process-preflight.txt').write_text(subprocess.check_output(['ps','-eo','pid,user,args'],text=True))
         launcher=[py,'-m','torch.distributed.run','--standalone','--nproc-per-node','2'] if len(a.gpus)==2 else [py]
         common=launcher+[
             str(s/'scripts/experiments/train_omni_dual.py'),'--dataset',str(a.dataset),
-            '--source-commit',a.source_commit,'--package-commit','7568607','--minutes',str(a.minutes)]
-        peak=stage('capacity',common+['--checkpoint',str(initial),'--phase','capacity','--out',str(r/'capacity')],a.gpus,600)
+            '--source-commit',a.source_commit,'--package-commit','7568607','--batch-size',str(a.batch_size)]
+        peak=stage('capacity',common+['--checkpoint',str(initial),'--phase','capacity','--minutes',str(a.minutes),'--out',str(r/'capacity')],a.gpus,600)
         ranks=rank_pair(r/'capacity')
         if any(not 0<v<=a.memory_budget_mib for v in peak.values()):raise RuntimeError('Measured per-card capacity budget failed')
-        proof=dict(passed=True,world_size=len(a.gpus),num_envs_per_rank=2048,batch_size_per_rank=512,
+        proof=dict(passed=True,world_size=len(a.gpus),num_envs_per_rank=2048,batch_size_per_rank=a.batch_size,
             checkpoint_sha256=ranks[0]['checkpoint_sha256'],terrain_sha256=manifest['terrain_sha256'],
             device_peaks_mib=peak,rank_records=ranks)
         (r/'dual-capacity-proof.json').write_text(json.dumps(proof,indent=2))
+        charged_capacity=ranks[0]['training_loop_seconds'] if a.include_capacity_in_budget else 0.
+        remaining=a.minutes*60-a.previous_training_seconds-charged_capacity
+        (r/'training-budget.json').write_text(json.dumps(dict(original_budget_seconds=a.minutes*60,
+            previous_training_seconds=a.previous_training_seconds,charged_capacity_seconds=charged_capacity,
+            remaining_formal_training_seconds=max(0.,remaining)),indent=2))
+        if remaining<=0:raise RuntimeError('Original training budget consumed; no additional long fit launched')
         stage('train_3h',common+['--checkpoint',ranks[0]['checkpoint'],'--phase','optimize',
-            '--proof',str(r/'dual-capacity-proof.json'),'--out',str(r/'train_3h')],a.gpus,a.minutes*60+600)
+            '--minutes',str(remaining/60),'--proof',str(r/'dual-capacity-proof.json'),
+            '--out',str(r/'train_3h')],a.gpus,remaining+600)
         final=rank_pair(r/'train_3h');checkpoint=final[0]['checkpoint'];gpu=a.gpus[0]
         stage('benchmark',[py,str(s/'scripts/evaluation/eval_benchmark.py'),'--ckpt',checkpoint,
             '--npz-dir',str(a.dataset/'motions'),'--num-envs','3','--device','cuda:0','--out',str(r/'benchmark.json')],[gpu],300)
