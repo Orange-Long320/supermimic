@@ -16,6 +16,8 @@ def main():
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--updates', type=int, default=2000)
     p.add_argument('--backward-dagger', action='store_true')
+    p.add_argument('--tracking-source', type=Path)
+    p.add_argument('--standing-starts', action='store_true')
     a = p.parse_args()
     a.out.mkdir(exist_ok=False)
     import torch
@@ -27,13 +29,16 @@ def main():
     torch.manual_seed(17)
     device = 'cuda:0'
     policy, saved = load_policy_from_checkpoint(a.checkpoint, device)
+    if a.tracking_source:
+        source = torch.load(a.tracking_source, map_location=device, weights_only=False)
+        policy.load_state_dict(source['policy'], strict=False)
     vc = VelocityCfg(**saved['velocity'])
     # Collect only tracking episodes: their frame and physical histories remain
     # paired, independently of the velocity replay's expired reference flags.
     args = SuperMimicEnvCfgArgs(npz_files=[str(x) for x in sorted(a.dataset.glob('*.npz'))],
         num_envs=100, seed=17, future_frames=saved['env']['future_frames'],
         episode_length_s=15., action_noise_std=0., obs_noise=False, reset_noise=False,
-        domain_randomization=False, record_transitions=False, anchor_obs=saved['env']['anchor_obs'])
+        domain_randomization=False, record_transitions=False, anchor_obs=saved['env']['anchor_obs'], velocity=vc if a.standing_starts else None)
     env = make_env(args, device=device)
     rows = []
     if a.backward_dagger:
@@ -46,11 +51,16 @@ def main():
         table = reference_command_table(cmd.library)
         # Spread the batch across all clips, start at frame zero.
         cmd.forced_frame[:] = cmd.library.clip_start[torch.arange(100, device=device) % cmd.library.num_clips]
+        if a.standing_starts:
+            cmd.is_velocity[:] = True
+            cmd.force_standing_reset = True
         obs, _ = env.reset()
         backward_clip = next(i for i,c in enumerate(cmd.library.clips) if c.name == 'backward')
         backward = cmd.library.frame_clip[cmd.frame] == backward_clip
         total_steps = 2040 if a.backward_dagger else 650
         for step in range(total_steps):
+            if a.standing_starts and step and step % 204 == 0:
+                obs, _ = env.reset()
             with torch.no_grad():
                 command, valid = bounded_reference(table, cmd.frame, vc)
                 if a.backward_dagger:
@@ -72,7 +82,9 @@ def main():
             if a.backward_dagger and (step+1) % 102 == 0:
                 pool = [torch.cat([r[i] for r in rows]) for i in range(4)]
                 for _ in range(150):
-                    ids = torch.randint(len(pool[0]), (1024,),device=device)
+                    neg = (pool[1][:,0] == -.2).nonzero().flatten()
+                    other = (pool[1][:,0] != -.2).nonzero().flatten()
+                    ids = torch.cat((neg[torch.randint(len(neg),(512,),device=device)], other[torch.randint(len(other),(512,),device=device)]))
                     x,c,z,y = [v[ids] for v in pool]
                     pred = policy.encoders['velocity'](x,c)
                     loss = (pred-z).square().mean() + (policy.decoder(pred,x)-y).square().mean()
@@ -112,15 +124,17 @@ def main():
     ck = torch.load(a.checkpoint, map_location='cpu', weights_only=False)
     # Encoder-only change; stale optimizer state is deliberately removed. This
     # artifact is for evaluation / warm start, not an exact training resume.
-    original = ck['policy']
+    original = source['policy'] if a.tracking_source else ck['policy']
     for name, value in policy.state_dict().items():
         if not name.startswith('encoders.velocity.'):
             assert torch.equal(value.cpu(), original[name]), name
     ck['policy'] = {k:v.cpu() for k,v in policy.state_dict().items()}
     ck.pop('velocity_training', None)
     ck['bootstrap'] = dict(source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),
-        updates=a.updates, dagger=dagger_metrics, samples=count, holdout_before=before, holdout_after=after,
-        limitation='Random row holdout checks fitting only; continuous physical acceptance required. Not resumable.')
+        tracking_source_sha256=hashlib.sha256(a.tracking_source.read_bytes()).hexdigest() if a.tracking_source else None, standing_starts=a.standing_starts,
+        updates=a.updates, online_updates=150*len(dagger_metrics), dagger=dagger_metrics, samples=count,
+        dataset_sha256={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(a.dataset.glob('*.npz'))}, holdout_before=before, holdout_after=after,
+        limitation=('Post-collection row split is not independent of online DAgger fitting; physical acceptance required. Not resumable.' if a.backward_dagger else 'Random row holdout checks fitting only; continuous physical acceptance required. Not resumable.'))
     torch.save(ck, a.out/'candidate.pt')
     (a.out/'report.json').write_text(json.dumps(ck['bootstrap'], indent=2)+'\n')
     print(json.dumps(ck['bootstrap']), flush=True)
