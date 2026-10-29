@@ -1,0 +1,26 @@
+{
+  "status": "recovery and retargeting pending; no training approval",
+  "sources": [
+    {
+      "file": "IMG_4880.MOV",
+      "sha256": "a942d0bb9647200cc4d881b43f5b4d6bdab4bd7d9787e1667404f05a2fdc726f"
+    },
+    {
+      "file": "IMG_4881.MOV",
+      "sha256": "ea0c7f6e7a61545bce6fa0dc614469b4547b2d2c98231a41b873c43d37a51e16"
+    },
+    {
+      "file": "IMG_4882.MOV",
+      "sha256": "3e69c49930da2ebbba75b4774d3ee96b6700d3922eda6d95c41ae66bc90565c7"
+    },
+    {
+      "file": "IMG_4883.MOV",
+      "sha256": "b3c3407f484c50ed4a250829495d46e4fd63d509adb6591d9762a878407f5db1"
+    }
+  ],
+  "source_review": "4880/4881 approach camera; 4882 turns; 4883 side view. Direction labels require continuous motion review.",
+  "pipeline": "pinned GEM-X raw world motion -> SOMA BVH -> existing X2 Ultra preset -> 50Hz bounded preparation",
+  "gpu": 3,
+  "run": "gait_IMG4880_4883_20261029_r1",
+  "limitation": "Monocular world translation and foot contacts require review; outputs are reference candidates."
+}
