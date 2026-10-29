@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, seconds: float = 66.):
+def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, seconds: float = 66., standing_only: bool = False):
     import datetime
     import hashlib
     import json
@@ -61,6 +61,8 @@ def main(ckpt: Path, out: Path, device: str = "cuda:0", seed: int = 0, npz_dir: 
         (46., "STOP", (0.,0.,0.)), (51., "RUN", (.6,0.,0.)),
         (58., "STOP", (0.,0.,0.)),
     ]
+    if standing_only:
+        schedule=schedule[:1]
     duration, width, height, fps = seconds, 1280, 720, 25
     schedule = [item for item in schedule if item[0] < duration]
     model = env.sim.mj_model

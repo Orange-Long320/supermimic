@@ -43,3 +43,5 @@ logs/keyboard_initial_stop_merge_20261029_r1已严格检查上述两份初始结
 进一步站立expert模式：复制原速度encoder+decoder，初始化零速行为与原网络相同，仅训练这个副本用于零速附近；原移动核心所有参数固定，正常移动指令输出仍严格一致。完整站立网络可独立改变decoder，不再受固定移动decoder的latent映射或小残差幅度限制。该改动是新增技能结构，不能说“只是原单encoder的修复”。仍需初始/启停/移动/延长停止物理验证。
 
 后续站立专项扩大单卡采样到1024环境、minibatch2048，critic增加真实身体速度、根部高度与启动阶段（只给训练critic，部署actor输入不变）。此前critic只有proprio历史，不能直接观察主要速度惩罚；这是方差/信息不足的可能原因，不预先当唯一根因。完整站立网络copy与原移动网络物理隔离、KL门限、原起态和站姿目标保持。候选仍须回归后采用。
+
+用户询问未达标含义与参考视频。已明确参考为姿态目标，不是已有真人静止参考片段；新增5秒kinematic预览standing-reference.mp4，画面标明非物理成功。另录privileged60检查点原始起态、连续8秒零指令物理录像actual-standing60.mp4，未预热，无失败/重置。两视频均服务器GPU3生成（GPU0/1被其他用户占用，未干扰），ffprobe确认125/200帧，已检查1.5秒截图。视频目录logs/standing_reference_preview_20261029_r1，本地outputs同名目录。actual仅为一个环境，不替代多种子验收。
