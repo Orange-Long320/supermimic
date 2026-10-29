@@ -16,6 +16,7 @@ def main():
     for n in ['source','checkpoint','dataset','out']:p.add_argument('--'+n,type=Path,required=True)
     p.add_argument('--phase',choices=['capacity','train'],required=True)
     p.add_argument('--proof',type=Path)
+    p.add_argument('--paired-supervision', action=argparse.BooleanOptionalAction, default=True, help='Use tracking replay for persistent teacher alignment')
     a=p.parse_args();sys.path.insert(0,str(a.source/'src'))
     rank=int(os.environ['RANK']);local=int(os.environ['LOCAL_RANK']);world=int(os.environ['WORLD_SIZE'])
     devices=os.environ['CUDA_VISIBLE_DEVICES'].split(',')
@@ -27,6 +28,9 @@ def main():
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
     from supermimic.config import TrainConfig
+    if a.paired_supervision:
+        from keyboard_supervision import install
+        install()
     from supermimic.training.loop import Trainer
     from supermimic.training.distributed import broadcast_params
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():raise ValueError('Dedicated server interpreter required')
