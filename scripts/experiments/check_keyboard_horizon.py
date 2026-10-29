@@ -8,11 +8,15 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('checkpoint','dataset','out'):
         p.add_argument('--'+name,type=Path,required=True)
+    p.add_argument('--control-prior',type=Path)
     a=p.parse_args()
     if a.out.exists():raise FileExistsError(a.out)
     import torch
     from keyboard_supervision import install,install_quiet_stop_cost,install_velocity_horizon
     install();install_quiet_stop_cost();install_velocity_horizon(8)
+    if a.control_prior:
+        from keyboard_supervision import install_control_prior
+        install_control_prior(a.control_prior)
     from supermimic.config import TrainConfig
     from supermimic.training.loop import Trainer
     torch.set_num_threads(2)
@@ -48,6 +52,12 @@ def main():
         trainer._imagine_velocity=capture
         before={k:v.clone() for k,v in t.policy.encoders['velocity'].state_dict().items()}
         metrics=trainer._velocity_update(t.buffer)
+        if a.control_prior:
+            teacher_before={k:v.clone() for k,v in trainer.control_prior.state_dict().items()}
+            metrics=trainer._velocity_update(t.buffer)
+            assert metrics['control_prior_action_mse']>0,metrics
+            assert all(torch.equal(v,teacher_before[k]) for k,v in trainer.control_prior.state_dict().items())
+            assert trainer.checkpoint_state()['control_prior']['weight']==10.
         assert captured==dict(velocity_steps=8,state_count=9,horizon_during_update=8),captured
         assert trainer.cfg is original_cfg and trainer.cfg.horizon==32
         assert trainer.checkpoint_state()['imagination_horizon']==8

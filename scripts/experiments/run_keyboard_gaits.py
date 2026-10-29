@@ -10,6 +10,7 @@ def main():
     p.add_argument('--repaired-velocity',action='store_true')
     p.add_argument('--quiet-stop-cost',action='store_true')
     p.add_argument('--stop-evaluator',type=Path)
+    p.add_argument('--control-prior',type=Path)
     p.add_argument('--velocity-horizon',type=int,default=8)
     p.add_argument('--require-physical-capacity-regression',action='store_true')
     a=p.parse_args()
@@ -34,6 +35,7 @@ def main():
     env['WARP_CACHE_PATH']=env['XDG_CACHE_HOME']+'/warp'
     py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python'
     common=[py,'-m','torch.distributed.run','--standalone','--nproc-per-node','2',str(a.entry),'--dataset',str(a.dataset),'--hours',str(a.hours),'--velocity-horizon',str(a.velocity_horizon)]
+    if a.control_prior:common+=['--control-prior',str(a.control_prior)]
     def stage(name,checkpoint,proof=None):
         while True:
             busy={str(g):subprocess.check_output(['nvidia-smi','-i',str(g),'--query-compute-apps=pid','--format=csv,noheader,nounits'],text=True).strip() for g in [0,2]}

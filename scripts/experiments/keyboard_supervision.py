@@ -109,3 +109,66 @@ def install_velocity_horizon(horizon=8):
                 self.cfg = previous
 
     module.JointPolicyTrainer = BoundedVelocityTrainer
+
+
+def install_control_prior(checkpoint, weight=10.):
+    """Retain validated command responses on the SAME evolving physical history.
+
+    A frozen single-encoder checkpoint supplies training labels only. Action
+    labels use its own decoder, so tracking updates cannot silently move the
+    velocity interface's target when the shared decoder changes.
+    """
+    import copy
+    import hashlib
+    from pathlib import Path
+    import torch
+    import supermimic.locomotion.trainer as module
+    from supermimic.world_model.heads import analytic_observation, flatten_history_term_major
+    path=Path(checkpoint)
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    base=module.JointPolicyTrainer
+
+    class RetainedControlTrainer(base):
+        def __init__(self,*args,**kwargs):
+            super().__init__(*args,**kwargs)
+            source=torch.load(path,map_location=next(self.policy.parameters()).device,weights_only=False)
+            self.control_prior=copy.deepcopy(self.policy).requires_grad_(False).eval()
+            self.control_prior.load_state_dict(source['policy'],strict=True)
+            self.control_prior_metrics={}
+            if self.velocity_cfg.alignment_weight<=0:
+                raise ValueError('Control retention requires positive alignment weight')
+
+        def _imagine_velocity(self,start):
+            rollout,align=super()._imagine_velocity(start)
+            with torch.no_grad():
+                history=torch.stack([analytic_observation(start.hist_states[i],start.hist_actions[i],start.xi,
+                    self.lib.default_joint_pos) for i in range(self.cfg.history)])
+                obs=flatten_history_term_major(history)
+                choices=torch.tensor([[.3,0,0],[-.2,0,0],[0,0,.4],[0,0,-.4],[.6,0,0]],device=obs.device)
+                command=torch.zeros(len(obs),3,device=obs.device)
+                count=len(obs)//2
+                command[count:]=choices[torch.arange(len(obs)-count,device=obs.device)%5]
+                target=self.control_prior.encoders['velocity'](obs,command)
+                target_action=self.control_prior.decoder(target,obs)
+            latent=self.policy.encoders['velocity'](obs,command)
+            latent_mse=(latent-target).square().mean()
+            action_mse=(self.policy.decoder(latent,obs)-target_action).square().mean()
+            self.control_prior_metrics=dict(control_prior_latent_mse=float(latent_mse.detach()),control_prior_action_mse=float(action_mse.detach()))
+            return rollout,align+weight/self.velocity_cfg.alignment_weight*(latent_mse+action_mse)
+
+        def _velocity_update(self,buffer):
+            metrics=super()._velocity_update(buffer)
+            metrics.update(self.control_prior_metrics)
+            return metrics
+
+        def checkpoint_state(self):
+            state=super().checkpoint_state()
+            state['control_prior']=dict(checkpoint=str(path),sha256=digest,weight=weight)
+            return state
+
+        def load_checkpoint_state(self,state):
+            if 'control_prior' in state and state['control_prior']['sha256']!=digest:
+                raise ValueError('Control prior changed across resume')
+            return super().load_checkpoint_state(state)
+
+    module.JointPolicyTrainer=RetainedControlTrainer

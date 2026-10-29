@@ -59,3 +59,9 @@ run_keyboard_gaits增加可选--require-physical-capacity-regression：双卡100
 旧六小时任务已精确停止controller1926621/torchrun1932485/ranks1932509、1932510，逐个核对UID和命令路径。保留stopped-for-rootfix.pt SHA256 cb9a431ec5922c4bd67b7e356a7db180c8dbd11795b998ff8828f5c913e86418，停止记录rootfix-stop.json；已运行1089.78秒，剩余主训练预算5.69728254小时，等待修复回归后继续。没有停止其他任务。
 
 专门停止训练：logs/keyboard_stop_repair_20261029_r1，GPU1、PID1946543、sm-keyboard-stop-repair，256环境240轮；源码为原train_quiet_stop.py，尚未取得结果。停止教师不可直接当整套控制策略使用。
+
+## 防止续训再次覆盖已验证控制能力
+
+增加可选--control-prior（训练用固定单编码器权重）。在速度环境的同一物理历史上均衡查询零速及五种移动命令，用固定教师自己的decoder生成action目标，同时约束latent和action，权重10，复用已验证停止训练中的强配对保持思路。这样共享decoder的跟踪更新不能悄悄改变教师action目标。教师仅提供训练标签，不进入部署策略，不改变部署输入。保留全指令物理回归作为最终标准。
+
+该扩展为待验证checkpoint；将用实际回放连续做两次速度更新，检查保持损失确实在首轮更新后非零、教师权重完全不变、8步actor/critic仍正常。长训入口显式携带该固定教师路径，checkpoint保存其SHA256与权重并在恢复时核对，避免只把已修好的权重作为起点、随后再次忘记零速或另一种指令。
