@@ -49,7 +49,7 @@ def main():
      arm_pose=(q[:,arm_ids]-cmd.library.default_joint_pos[arm_ids]).square().mean(-1)
      r=2-10*speed[:,:2].square().sum(-1)-2*speed[:,2].square()
      r-=2*arm_motion+.1*arm_pose+.05*dq.square().mean(-1)+20*term.float()
-     batch.append((x.clone(),z,lp,v,r,done,goal.clone()));x=nxt['policy']
+     batch.append((x.clone(),z,lp,v,r,done,goal.clone(),term.clone(),tout.clone()));x=nxt['policy']
     tail=value(x).squeeze(-1);adv=[];gae=torch.zeros_like(tail)
     for b in reversed(batch):
      delta=b[4]+.99*tail*(~b[5])-b[3]
@@ -74,7 +74,7 @@ def main():
      vl=(value(xx[ids]).squeeze(-1)-ret[ids]).square().mean()
      vopt.zero_grad(set_to_none=True);vl.backward();torch.nn.utils.clip_grad_norm_(value.parameters(),1.);vopt.step()
    if it%5==0:
-    row=dict(iteration=it,seconds=time.monotonic()-beg,arm_velocity_rms=float(arm_motion.mean().sqrt()),reward=float(torch.stack([b[4] for b in batch]).mean()),vx=float(speed[:,0].mean()),falls=int(torch.stack([b[5] for b in batch]).sum()))
+    row=dict(iteration=it,seconds=time.monotonic()-beg,arm_velocity_rms=float(arm_motion.mean().sqrt()),reward=float(torch.stack([b[4] for b in batch]).mean()),vx=float(speed[:,0].mean()),falls=int(torch.stack([b[7] for b in batch]).sum()),timeouts=int(torch.stack([b[8] for b in batch]).sum()))
     trace.append(row);print(json.dumps(row),flush=True)
    if (it+1)%20==0:
     ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
