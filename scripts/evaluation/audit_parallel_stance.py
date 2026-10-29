@@ -29,7 +29,9 @@ def main():
         cap=np.maximum(abs(m.actuator_forcerange).max(1),1e-10)
         values=[];maxhard=0.;maxpen=0.;motor=0.;speedratio=0.;minup=1.;maxdrift=0.;terminal_com=[];jac=np.zeros((3,m.nv))
         for i,state in enumerate(np.vstack([np.r_[q,np.zeros(m.nv)],states])):
-            d.qpos[:]=state[:m.nq];d.qvel[:]=state[m.nq:];d.ctrl[:]=ctrl;mujoco.mj_forward(m,d)
+            d.qpos[:]=state[:m.nq];d.qvel[:]=state[m.nq:]
+            d.ctrl[:]=z['controls'][max(i-1,0)] if 'controls' in z else ctrl
+            mujoco.mj_forward(m,d)
             vectors=[];front=[]
             for side in ['left','right']:
                 vector=d.xpos[m.body('robot/'+side+'_knee_link').id]-d.xpos[m.body('robot/'+side+'_ankle_roll_link').id]

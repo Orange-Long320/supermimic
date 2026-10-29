@@ -28,6 +28,7 @@ def main():
     p.add_argument('--maximum-hip-roll-magnitude-deg',type=float,help='Optional symmetric hip-roll posture bound; only tightens joint range')
     p.add_argument('--polish-root-newton',action='store_true',help='Bounded root-wrench Newton refinement with actual geometry/motor acceptance')
     p.add_argument('--parallel-calves',action='store_true',help='Add measured calf direction and frontal alignment posture residuals')
+    p.add_argument('--initial-seed-first',action='store_true',help='Try the supplied near-contact pose before compressed multistart seeds')
     args=p.parse_args()
     if not np.isfinite(args.support_height_m) or min(args.max_trials,args.max_nfev)<1:p.error('Finite support height and positive solver budgets required')
     if not 0<args.joint_limit_factor<=1:p.error('Joint range factor must be in (0,1]')
@@ -118,7 +119,7 @@ def main():
             delta=np.zeros(len(x));delta[i]=h;columns.append((residual(x+delta)-residual(x-delta))/(2*h))
         return np.stack(columns,axis=1)
     trials=[]
-    seeds=[np.zeros(len(lower))] if args.anchor_left_foot else []
+    seeds=[np.zeros(len(lower))] if args.anchor_left_foot or args.initial_seed_first else []
     seeds += [np.r_[z,roll,0.,np.zeros(len(joints))] for z in [-.008,-.018,-.03] for roll in [-.03,.03]]
     if args.refine_from:
         previous=json.loads(args.refine_from.read_text())['best']['adjustments']
