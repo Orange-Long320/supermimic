@@ -97,9 +97,14 @@ def main():
 
     initial, xi, actual, actions, failed = physical()
     baseline = error(actual)
+    replay_start, replay_xi, replay_states, _, replay_failed = physical(actions,initial)
+    replay_delta=float((error(replay_states)-baseline).abs().max())
+    if replay_delta>1e-3 or replay_failed!=failed:
+        raise RuntimeError(f'Unperturbed physical replay control failed: {replay_delta}')
     report = dict(actor=str(a.actor), actor_sha256=digest(a.actor), argv=sys.argv,
                   gpu=os.environ['CUDA_VISIBLE_DEVICES'], pid=os.getpid(), commands=commands.tolist(),
                   baseline_error=baseline.tolist(), baseline_failure=failed,
+                  unperturbed_replay_error_max_delta=replay_delta,
                   scope='Six nominal command cases, deterministic fresh simulators. No policy update. Compare a bounded 32-action plan against the same frozen actor actions; not a full continuous-control acceptance test.', models=[])
     torch.save(dict(initial=initial,xi=xi,states=actual,actions=actions),a.out/'baseline.pt')
     for path in a.models:
