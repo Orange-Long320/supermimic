@@ -24,12 +24,16 @@ def main():
     p.add_argument('--minutes',type=float,default=180.)
     p.add_argument('--memory-budget-mib',type=int,default=12800)
     p.add_argument('--batch-size',type=int,default=512)
+    p.add_argument('--torch-memory-fraction',type=float,default=.4)
+    p.add_argument('--fallback-proof',type=Path,help='Measured same-checkpoint capacity proof to resume if this larger-batch trial fails')
+    p.add_argument('--fallback-batch-size',type=int,default=1024)
     p.add_argument('--previous-training-seconds',type=float,default=0.)
     p.add_argument('--include-capacity-in-budget',action='store_true',help='Count this continuation capacity fit within the same original wall-clock training budget')
     p.add_argument('--queue-seconds',type=int,default=3600)
     a=p.parse_args()
     if (len(a.gpus) not in [1,2] or len(set(a.gpus))!=len(a.gpus) or not 0<a.minutes<=180
-        or not 0<a.memory_budget_mib<=22000 or a.batch_size<1 or a.previous_training_seconds<0):
+        or not 0<a.memory_budget_mib<=22000 or a.batch_size<1 or a.previous_training_seconds<0
+        or not 0<a.torch_memory_fraction<=.8):
         p.error('One/two distinct GPUs, <=3hours, bounded batch and memory with hardware headroom required')
     r=a.run;s=r/'source';py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python'
     if (r/'progress.json').exists():p.error('Run already started')
@@ -112,21 +116,43 @@ def main():
         launcher=[py,'-m','torch.distributed.run','--standalone','--nproc-per-node','2'] if len(a.gpus)==2 else [py]
         common=launcher+[
             str(s/'scripts/experiments/train_omni_dual.py'),'--dataset',str(a.dataset),
-            '--source-commit',a.source_commit,'--package-commit','7568607','--batch-size',str(a.batch_size)]
-        peak=stage('capacity',common+['--checkpoint',str(initial),'--phase','capacity','--minutes',str(a.minutes),'--out',str(r/'capacity')],a.gpus,600)
-        ranks=rank_pair(r/'capacity')
-        if any(not 0<v<=a.memory_budget_mib for v in peak.values()):raise RuntimeError('Measured per-card capacity budget failed')
-        proof=dict(passed=True,world_size=len(a.gpus),num_envs_per_rank=2048,batch_size_per_rank=a.batch_size,
-            checkpoint_sha256=ranks[0]['checkpoint_sha256'],terrain_sha256=manifest['terrain_sha256'],
-            device_peaks_mib=peak,rank_records=ranks)
+            '--source-commit',a.source_commit,'--package-commit','7568607','--batch-size',str(a.batch_size),
+            '--torch-memory-fraction',str(a.torch_memory_fraction)]
+        fallback_used=False
+        try:
+            peak=stage('capacity',common+['--checkpoint',str(initial),'--phase','capacity','--minutes',str(a.minutes),'--out',str(r/'capacity')],a.gpus,600)
+            ranks=rank_pair(r/'capacity')
+            if any(not 0<v<=a.memory_budget_mib for v in peak.values()):raise RuntimeError('Measured per-card capacity budget failed')
+            proof=dict(passed=True,world_size=len(a.gpus),num_envs_per_rank=2048,batch_size_per_rank=a.batch_size,
+                checkpoint_sha256=ranks[0]['checkpoint_sha256'],terrain_sha256=manifest['terrain_sha256'],
+                device_peaks_mib=peak,rank_records=ranks)
+            fit_checkpoint=ranks[0]['checkpoint']
+            charged_capacity=ranks[0]['training_loop_seconds'] if a.include_capacity_in_budget else 0.
+        except Exception as trial_error:
+            if a.fallback_proof is None:raise
+            proof=json.loads(a.fallback_proof.read_text())
+            if (not proof['passed'] or proof['world_size']!=len(a.gpus) or proof['checkpoint_sha256']!=sha(initial)
+                or proof['terrain_sha256']!=manifest['terrain_sha256'] or proof['num_envs_per_rank']!=2048
+                or proof['batch_size_per_rank']!=a.fallback_batch_size):raise RuntimeError('Fallback proof mismatch') from trial_error
+            failed_path=r/'capacity/rank-0.json'
+            failed=json.loads(failed_path.read_text()) if failed_path.exists() else {}
+            charged_capacity=failed.get('training_loop_seconds',max(0.,time.time()-failed['training_started_at']) if 'training_started_at' in failed else 0.)
+            failure=dict(requested_batch_size=a.batch_size,trial_passed=False,reason=str(trial_error),
+                fallback_batch_size=a.fallback_batch_size,fallback_proof=str(a.fallback_proof),
+                charged_trial_training_seconds=charged_capacity,source_checkpoint_sha256=sha(initial))
+            (r/'larger-batch-trial.json').write_text(json.dumps(failure,indent=2))
+            common[common.index('--batch-size')+1]=str(a.fallback_batch_size)
+            a.batch_size=a.fallback_batch_size;fit_checkpoint=str(initial);fallback_used=True
+            proof=dict(proof,reused_from=str(a.fallback_proof),larger_batch_trial_passed=False)
         (r/'dual-capacity-proof.json').write_text(json.dumps(proof,indent=2))
-        charged_capacity=ranks[0]['training_loop_seconds'] if a.include_capacity_in_budget else 0.
+        (r/'effective-training-settings.json').write_text(json.dumps(dict(batch_size=a.batch_size,
+            fallback_used=fallback_used,memory_budget_mib=a.memory_budget_mib),indent=2))
         remaining=a.minutes*60-a.previous_training_seconds-charged_capacity
         (r/'training-budget.json').write_text(json.dumps(dict(original_budget_seconds=a.minutes*60,
             previous_training_seconds=a.previous_training_seconds,charged_capacity_seconds=charged_capacity,
             remaining_formal_training_seconds=max(0.,remaining)),indent=2))
         if remaining<=0:raise RuntimeError('Original training budget consumed; no additional long fit launched')
-        stage('train_3h',common+['--checkpoint',ranks[0]['checkpoint'],'--phase','optimize',
+        stage('train_3h',common+['--checkpoint',fit_checkpoint,'--phase','optimize',
             '--minutes',str(remaining/60),'--proof',str(r/'dual-capacity-proof.json'),
             '--out',str(r/'train_3h')],a.gpus,remaining+600)
         final=rank_pair(r/'train_3h');checkpoint=final[0]['checkpoint'];gpu=a.gpus[0]

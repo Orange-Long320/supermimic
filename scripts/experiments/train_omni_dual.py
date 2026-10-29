@@ -24,9 +24,10 @@ def main():
     p.add_argument('--package-commit',required=True)
     p.add_argument('--num-envs',type=int,default=2048)
     p.add_argument('--batch-size',type=int,default=512)
+    p.add_argument('--torch-memory-fraction',type=float,default=.4)
     p.add_argument('--source-world-size',type=int,default=1,help='Normalize checkpoint LR before the existing trainer applies its world-size scaling')
     a=p.parse_args()
-    if not 0<a.minutes<=180 or a.num_envs<1 or a.batch_size<1:p.error('Bounded three-hour run required')
+    if not 0<a.minutes<=180 or a.num_envs<1 or a.batch_size<1 or not 0<a.torch_memory_fraction<=.8:p.error('Bounded three-hour run and explicit memory cap required')
     rank,local,world=int(os.environ.get('RANK','0')),int(os.environ.get('LOCAL_RANK','0')),int(os.environ.get('WORLD_SIZE','1'))
     visible=os.environ.get('CUDA_VISIBLE_DEVICES','').split(',')
     if world not in [1,2] or len(visible)!=world:raise ValueError('Explicit one GPU per rank required')
@@ -50,7 +51,7 @@ def main():
     for clip in manifest['clips']:
         if sha(a.dataset/'motions'/(clip['name']+'.npz'))!=clip['motion_sha256']:raise ValueError('Motion changed')
     torch.set_num_threads(2)
-    torch.cuda.set_per_process_memory_fraction(.4,0)
+    torch.cuda.set_per_process_memory_fraction(a.torch_memory_fraction,0)
     ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
     def restore(obj,data):
         for k,v in data.items():
@@ -94,6 +95,7 @@ def main():
         'pid':os.getpid(),'source_commit':a.source_commit,'package_commit':a.package_commit,
         'initial_checkpoint_sha256':sha(a.checkpoint),'initial_iteration':initial_iteration,'initial_updates':initial_updates,
         'terrain_sha256':manifest['terrain_sha256'],'num_envs_per_rank':a.num_envs,'batch_size_per_rank':a.batch_size,
+        'torch_memory_fraction':a.torch_memory_fraction,
         'incoming_checkpoint_world_size':incoming_world,'base_learning_rates':base_learning_rates,
         'cpu_affinity':sorted(os.sched_getaffinity(0)),'authorization':'User: single GPU three-hour continuation; latest instruction permits higher VRAM and batch1024',
         'scope':__doc__,'final_validation_approved':False}
