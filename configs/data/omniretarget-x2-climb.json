@@ -236,7 +236,11 @@
     "dual8192_capacity_new_updates": 24,
     "dual8192_capacity_checkpoint_sha256": "7352133a13d97644d09306a9b6b3208fe2e10a04533f5511d90fc89044149a99",
     "dual8192_actual_lr": 0.0002,
-    "dual8192_deadline_epoch": 1793247353.366828
+    "dual8192_deadline_epoch": 1793247353.366828,
+    "extra_three_hour_run": "omni_dual8192_extra3h_20261029_r1",
+    "extra_three_hour_queue_pid": 1630259,
+    "extra_three_hour_status": "queued_after_previous_actual_videos_and_audits",
+    "extra_three_hour_formal_budget_seconds": 10800
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
