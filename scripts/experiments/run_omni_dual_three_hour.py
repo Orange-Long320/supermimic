@@ -35,7 +35,7 @@ def main():
     p.add_argument('--queue-seconds',type=int,default=3600)
     a=p.parse_args()
     if (len(a.gpus) not in [1,2] or len(set(a.gpus))!=len(a.gpus) or not 0<a.minutes<=180
-        or not 0<a.memory_budget_mib<=22000 or a.batch_size<1 or a.num_envs_per_rank<1 or a.previous_training_seconds<0
+        or not 0<a.memory_budget_mib<=23500 or a.batch_size<1 or a.num_envs_per_rank<1 or a.previous_training_seconds<0
         or not 0<a.torch_memory_fraction<=.8):
         p.error('One/two distinct GPUs, <=3hours, bounded batch and memory with hardware headroom required')
     r=a.run;s=r/'source';py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python'
