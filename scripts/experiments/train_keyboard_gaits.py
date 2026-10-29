@@ -18,6 +18,7 @@ def main():
     p.add_argument('--proof',type=Path)
     p.add_argument('--hours',type=float,default=.5)
     p.add_argument('--quiet-stop-cost',action='store_true')
+    p.add_argument('--velocity-horizon',type=int,default=8,help='Velocity imagination horizon; measured against 8-step dynamics')
     p.add_argument('--weights-only',action='store_true',help='Import repaired velocity weights with fresh optimizers')
     p.add_argument('--paired-supervision', action=argparse.BooleanOptionalAction, default=True, help='Use tracking replay for persistent teacher alignment')
     a=p.parse_args()
@@ -39,6 +40,9 @@ def main():
     if a.quiet_stop_cost:
         from keyboard_supervision import install_quiet_stop_cost
         install_quiet_stop_cost()
+    if not 1 <= a.velocity_horizon <= 32:raise ValueError('Velocity horizon must be in [1,32]')
+    from keyboard_supervision import install_velocity_horizon
+    install_velocity_horizon(a.velocity_horizon)
     from supermimic.training.loop import Trainer
     from supermimic.training.distributed import broadcast_params
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():raise ValueError('Dedicated server interpreter required')
@@ -114,7 +118,7 @@ def main():
                 or proof['num_envs_per_rank']!=cfg.env.num_envs or proof['batch_size_per_rank']!=cfg.policy_trainer.batch_size):
             raise ValueError('Continuation capacity configuration mismatch')
         cfg.resume=a.checkpoint
-    record=dict(status='initializing',phase=a.phase,rank=rank,physical_gpu=gpu,pid=os.getpid(),checkpoint=str(a.checkpoint),checkpoint_sha256=sha(a.checkpoint),dataset_manifest_sha256=sha(a.dataset/'manifest.json'),omitted_unused_metadata=omitted,keyboard_validated=False,paired_supervision=a.paired_supervision,quiet_stop_cost=a.quiet_stop_cost)
+    record=dict(status='initializing',phase=a.phase,rank=rank,physical_gpu=gpu,pid=os.getpid(),checkpoint=str(a.checkpoint),checkpoint_sha256=sha(a.checkpoint),dataset_manifest_sha256=sha(a.dataset/'manifest.json'),omitted_unused_metadata=omitted,keyboard_validated=False,paired_supervision=a.paired_supervision,quiet_stop_cost=a.quiet_stop_cost,velocity_horizon=a.velocity_horizon)
     def save():(a.out/f'rank-{rank}.json').write_text(json.dumps(record,indent=2,default=str)+'\n')
     def hashes():
         result={}

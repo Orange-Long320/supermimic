@@ -79,3 +79,28 @@ def install_quiet_stop_cost():
         return original - cost * standing
 
     module.velocity_reward = reward
+
+
+def install_velocity_horizon(horizon=8):
+    """Keep velocity actor/critic updates within measured model accuracy.
+
+    Override the whole velocity update so actor normalization, rollout, and GAE
+    share the same horizon. Motion tracking retains its original configuration.
+    Install after the paired-supervision extension.
+    """
+    from dataclasses import replace
+    import supermimic.locomotion.trainer as module
+    if not isinstance(horizon, int) or horizon < 1:
+        raise ValueError('Velocity horizon must be a positive integer')
+    base = module.JointPolicyTrainer
+
+    class BoundedVelocityTrainer(base):
+        def _velocity_update(self, buffer):
+            previous = self.cfg
+            self.cfg = replace(previous, horizon=horizon)
+            try:
+                return super()._velocity_update(buffer)
+            finally:
+                self.cfg = previous
+
+    module.JointPolicyTrainer = BoundedVelocityTrainer
