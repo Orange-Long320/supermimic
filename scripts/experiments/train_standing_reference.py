@@ -7,6 +7,7 @@ def main():
  for k in ['checkpoint','dataset','out']:p.add_argument('--'+k,type=Path,required=True)
  p.add_argument('--iterations',type=int,default=80)
  p.add_argument('--reference',type=Path,required=True)
+ p.add_argument('--resume-state',action='store_true')
  p.add_argument('--sigma',type=float,default=.08)
  p.add_argument('--num-envs',type=int,default=1024)
  p.add_argument('--yaw-cost',type=float,default=40.)
@@ -53,7 +54,11 @@ def main():
  def value_features(xx):
   state=cmd.state_io.read()
   return torch.cat((xx*actor.obs_scale,10*measured_velocity(state),state[:,2:3],(env.episode_length_buf*env.step_dt/16)[:,None],state[:,:2]-anchor_xy,torch.atan2(torch.sin(heading_yaw(state[:,3:7])-anchor_yaw),torch.cos(heading_yaw(state[:,3:7])-anchor_yaw))[:,None],goal,(stop_age/16)[:,None]),-1)
- sigma=a.sigma;trace=[];beg=time.monotonic()
+ sigma=a.sigma;trace=[];beg=time.monotonic();total_falls=total_timeouts=0;parent_iterations=0
+ if a.resume_state:
+  source=torch.load(a.checkpoint,map_location='cpu',weights_only=False);assert source['standing_reference']['sha256']==hashlib.sha256(a.reference.read_bytes()).hexdigest();state=source['standing_ppo_state'];assert state['sigma']==sigma
+  opt.load_state_dict(state['actor_optimizer']);value.load_state_dict(state['value']);vopt.load_state_dict(state['value_optimizer']);parent_iterations=source['physical_stop']['iterations']
+  print(json.dumps(dict(resumed_training_state=True,parent_iterations=parent_iterations,simulation_state='fresh original initialization')),flush=True)
  try:
   for it in range(a.iterations):
    batch=[]
@@ -120,8 +125,9 @@ def main():
    # Recover from a one-off rollback instead of shrinking the learning rate forever.
    if actor_kls and sum(actor_kls)/len(actor_kls)<.01:
     for group in opt.param_groups:group['lr']=min(3e-5,max(1e-7,group['lr']*1.2))
+   total_falls+=int(torch.stack([b[7] for b in batch]).sum());total_timeouts+=int(torch.stack([b[8] for b in batch]).sum())
    if it%5==0:
-    row=dict(cuda_peak_allocated_mib=torch.cuda.max_memory_allocated()/1024**2,reference_action_rmse=float((actor(refhistory)-refaction).detach().square().mean().sqrt()),iteration=it,seconds=time.monotonic()-beg,arm_velocity_rms=float(arm_motion.mean().sqrt()),actor_kl_max=max(actor_kls,default=0),actor_lr=opt.param_groups[0]['lr'],accepted_actor_steps=accepted_steps,reward=float(torch.stack([b[4] for b in batch]).mean()),vx=float(speed[:,0].mean()),falls=int(torch.stack([b[7] for b in batch]).sum()),timeouts=int(torch.stack([b[8] for b in batch]).sum()))
+    row=dict(total_falls=total_falls,total_timeouts=total_timeouts,cuda_peak_allocated_mib=torch.cuda.max_memory_allocated()/1024**2,reference_action_rmse=float((actor(refhistory)-refaction).detach().square().mean().sqrt()),iteration=it,seconds=time.monotonic()-beg,arm_velocity_rms=float(arm_motion.mean().sqrt()),actor_kl_max=max(actor_kls,default=0),actor_lr=opt.param_groups[0]['lr'],accepted_actor_steps=accepted_steps,reward=float(torch.stack([b[4] for b in batch]).mean()),vx=float(speed[:,0].mean()),falls=int(torch.stack([b[7] for b in batch]).sum()),timeouts=int(torch.stack([b[8] for b in batch]).sum()))
     trace.append(row);print(json.dumps(row),flush=True)
    if (it+1)%20==0:
     ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
@@ -136,7 +142,7 @@ def main():
       cc=torch.tensor(query,device='cuda').expand(len(x),-1)
       baseline=policy.decoder(policy.encoders['velocity'](x,cc),x)
       assert torch.equal(baseline,policy.velocity_action(x,cc))
-    ck['physical_stop']=dict(iterations=it+1,source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),trace=trace,scope='Private standing expert; original moving core immutable; no environment state resume; physical acceptance required.')
+    ck['physical_stop']=dict(iterations=parent_iterations+it+1,parent_iterations=parent_iterations,source_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),trace=trace,scope='Private standing expert; original moving core immutable; no environment state resume; physical acceptance required.')
     target=a.out/f'candidate_{it+1}.pt';torch.save(ck,target);target.with_suffix('.ready').write_text(str(it+1))
    if time.monotonic()-beg>=a.hours*3600:break
   (a.out/'report.json').write_text(json.dumps(trace,indent=2)+'\n')

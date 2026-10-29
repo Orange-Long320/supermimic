@@ -40,12 +40,14 @@ def summarize(path, baseline=None, arm_target=None):
 def main():
  p=argparse.ArgumentParser(description=__doc__)
  for k in ['source','checkpoint','dataset','out','standing-pose','baseline0','baseline7','reference']:p.add_argument('--'+k,type=Path,required=True)
+ p.add_argument('--resume-state',action='store_true')
  p.add_argument('--gpu',type=int,default=2);p.add_argument('--iterations',type=int,default=800);p.add_argument('--hours',type=float,default=1.);p.add_argument('--source-commit',required=True)
  a=p.parse_args();a.out.mkdir(exist_ok=False)
  if subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-compute-apps=pid','--format=csv,noheader'],text=True).strip():raise RuntimeError('Requested GPU is not idle')
  env=os.environ.copy();env.pop('PYTHONHOME',None);env.update(CUDA_VISIBLE_DEVICES=str(a.gpu),PYTHONPATH=str(a.source/'src'),SM_ROBOT='x2_ultra',MUJOCO_GL='egl',OMP_NUM_THREADS='2',OPENBLAS_NUM_THREADS='2',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',XDG_CACHE_HOME=str(a.source.parent.parent/'cache'))
  py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python';entry=a.source/'scripts/train_standing_reference.py';ev=a.source/'scripts/evaluate_standing_skill.py'
  argv=[py,str(entry),'--checkpoint',str(a.checkpoint),'--dataset',str(a.dataset),'--standing-pose',str(a.standing_pose),'--out',str(a.out/'train'),'--iterations',str(a.iterations),'--hours',str(a.hours),'--sigma','.08','--reference',str(a.reference)]
+ if a.resume_state:argv+=['--resume-state']
  record=dict(status='initializing',pid=os.getpid(),gpu=a.gpu,source=str(a.source),source_commit=a.source_commit,reference=str(a.reference),reference_sha256=hashlib.sha256(a.reference.read_bytes()).hexdigest(),started_epoch=time.time(),checkpoint=str(a.checkpoint),checkpoint_sha256=hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),argv=argv,entry_sha256=hashlib.sha256(entry.read_bytes()).hexdigest(),evaluator_sha256=hashlib.sha256(ev.read_bytes()).hexdigest(),evaluations=[])
  def save():(a.out/'controller.json').write_text(json.dumps(record,indent=2)+'\n')
  save();log=open(a.out/'train.log','x');train=subprocess.Popen(argv,cwd=a.source,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True);record.update(status='training',train_pid=train.pid);save();checked=set();beg=time.monotonic()
