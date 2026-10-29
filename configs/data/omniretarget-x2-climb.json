@@ -193,14 +193,14 @@
     "batch4096_capacity_peak_mib": 24049,
     "batch4096_capacity_loop_seconds": 16.437980591785163,
     "current_formal_training_batch_size": 2048,
-    "current_formal_training_pid": 1626576,
-    "current_formal_training_run": "omni_dual8192_continuation_20261029_r2",
+    "current_formal_training_pid": 1633364,
+    "current_formal_training_run": "omni_dual8192_extra3h_20261029_r1",
     "current_remaining_formal_training_seconds_at_start": 357.3,
     "practical_reference_review": "omni_practical_reference_gate_20261029_r1/review.json",
     "practical_reference_contact_regression": "omni_practical_reference_gate_20261029_r1/selective-contact-regression.json",
     "practical_reference_input_accepted": true,
     "finite_solver_discrete_dynamics": "omni_practical_reference_gate_20261029_r1/discrete-dynamics/report.json",
-    "current_formal_training_status": "dual8192_capacity_passed_formal_running",
+    "current_formal_training_status": "authorized_extra3h_running",
     "latest_reference2048_run": "omni_latest_reference_batch2048_3h_20261029_r1",
     "latest_reference2048_driver_pid": 1468591,
     "latest_reference2048_capacity_pid": 1468614,
@@ -239,8 +239,17 @@
     "dual8192_deadline_epoch": 1793247353.366828,
     "extra_three_hour_run": "omni_dual8192_extra3h_20261029_r1",
     "extra_three_hour_queue_pid": 1630259,
-    "extra_three_hour_status": "queued_after_previous_actual_videos_and_audits",
-    "extra_three_hour_formal_budget_seconds": 10800
+    "extra_three_hour_status": "running",
+    "extra_three_hour_formal_budget_seconds": 10800,
+    "extra_three_hour_driver_pid": 1633329,
+    "extra_three_hour_rank_pids": [
+      1633398,
+      1633399
+    ],
+    "extra_three_hour_start_epoch": 1793247607.4269378,
+    "extra_three_hour_expected_end_epoch": 1793258407.4269378,
+    "previous_dual_final_checkpoint_sha256": "036d5b92340901a13c6fff4d7d2ec7484797750bb181901000198baa3534dad1",
+    "previous_dual_all_tasks_passed": false
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,

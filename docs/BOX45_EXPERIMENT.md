@@ -481,3 +481,10 @@
 - run_omni_dual_three_hour.py新增显式validated-resume-run：验证前轮实际新增更新/跨rank一致有限参数/最终checkpoint哈希、同world/env/batch/terrain/全部src Python字节、实际显存保护通过后，复用真实容量证据并从最终权重全状态继续，不重复同配置短测。默认路径不变，两入口静态编译及diff检查通过；新队列尚未启动。
 
 - 新三小时目录omni_dual8192_extra3h_20261029_r1已建立并部署332a4b9入口，queue1630259真实启动，queue-progress明确等待前轮训练/独立审计/实际录像完成；尚未启动下一轮正式训练。前轮12:14:38仍正常至7660/2888。原x2不存在后，本次按用户新定时续训授权已创建x2每15分钟安静跟进，只通知实质进展/完成/故障。新轮时间从其正式开始计180分钟，录像等待不扣，最终录像/审计后停止跟进。
+
+## 2026-10-29 12:22：前轮实际录像/验收失败，新授权三小时已启动
+
+- 前轮omni_dual8192_continuation_20261029_r2已完成训练和自动后处理，最终7720/2912，checkpoint SHA036d5b92340901a13c6fff4d7d2ec7484797750bb181901000198baa3534dad1。三任务独立audit均complete_task_verified=false/physical_checks_passed=false，源0初始化核验通过；不能以pipeline exit0称动作成功。手撑轨迹有实际手部支撑（峰竖直力0.781体重），但未完成翻越或稳定落地。
+- 三段同checkpoint实际纯策略录像已下载outputs/omniretarget_20261029/dual8192-first-final并查看缩略图：上箱3.04秒root_height/root_tilt；上下箱4.66秒root_height；手撑5.28秒root_height。上箱相比7200中途预览退步，最新不是最佳。独立capture与录像是分别实际执行，不混用各自持续时间和物理数值。
+- 队列1630259核验前轮视频/审计和最终SHA后已启动新driver1633329/torchrun1633364/ranks1633398,1633399。新run omni_dual8192_extra3h_20261029_r1，从前轮7720/2912完整恢复；实际training_started_at1793247607.4269378，即北京时间12:20:07.426938，正式max_hours=3.0，预计15:20:07左右结束（日志边界可能多几十秒），后处理另计。实时ps及CUDA进程均存活，GPU0/2各约22.2GiB，最新7820/2936、实际新增100步/24更新；GPU3另有进程，不干扰。
+- 同world2/env4096/batch1024/terrain及src字节对照通过、前轮真实显存与跨rank参数证据复用，未再次容量短测。继续用户已授权的完整3小时，原数据/物理/门槛不变。x2每30分钟跟进，新训练结束后实际验收/录像报告再停止，不追加下一轮。
