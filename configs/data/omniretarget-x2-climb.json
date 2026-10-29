@@ -160,7 +160,14 @@
     "anchored_dense_entry_physics": "omni_anchored_entry_20261029_r1/dense/report.json",
     "anchored_entry_actual_replay": "omni_anchored_entry_20261029_r1/native/independent-replay/report.json",
     "anchored_entry_training_approved": false,
-    "current_task_reference_previews": "omni_task_reference_videos_20261029_r1"
+    "current_task_reference_previews": "omni_task_reference_videos_20261029_r1",
+    "single_three_hour_run": "omni_single_three_hour_20261029_r1",
+    "single_three_hour_status": "capacity_running_not_formal_fit_yet",
+    "single_three_hour_initial_checkpoint_sha256": "56171954cc043456cc00ab239b34bacea6549f3bb27d211de11331df8cd5c44f",
+    "single_three_hour_gpu": 3,
+    "single_three_hour_memory_budget_mib": 12800,
+    "single_three_hour_requested_minutes": 180,
+    "single_three_hour_complete_task_verified": false
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
