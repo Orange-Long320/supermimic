@@ -30,6 +30,8 @@ def main():
     p.add_argument('--num-envs', type=int, default=64)
     p.add_argument('--fit-steps', type=int, default=128)
     p.add_argument('--batch-size', type=int, default=256)
+    p.add_argument('--windows-dir', type=Path, help='Reuse immutable train and held-out trajectories')
+    p.add_argument('--fit-arms', nargs='+', choices=('motion_only', 'mixed'), default=['motion_only', 'mixed'])
     a = p.parse_args()
     if not (64 <= a.steps <= 1500 and 8 <= a.num_envs <= 128 and 1 <= a.fit_steps <= 512):
         raise ValueError('Outside bounded audit limits')
@@ -111,8 +113,15 @@ def main():
         torch.cuda.empty_cache()
         return data
 
-    train = collect(0, 8, 4096)
-    test = collect(7, 32, 512)
+    if a.windows_dir:
+        train = torch.load(a.windows_dir / 'train-windows.pt', map_location='cuda:0', weights_only=True)
+        test = torch.load(a.windows_dir / 'heldout-windows.pt', map_location='cuda:0', weights_only=True)
+        results['reused_windows'] = {name: digest(a.windows_dir / name)
+                                    for name in ('train-windows.pt', 'heldout-windows.pt')}
+    else:
+        train = collect(0, 8, 4096)
+        test = collect(7, 32, 512)
+    results['status'] = 'fitting'
 
     def load_wm(checkpoint):
         missing, extra = wm.load_state_dict(checkpoint['wm'], strict=False)
@@ -120,12 +129,12 @@ def main():
             raise ValueError((missing, extra))
 
     @torch.no_grad()
-    def evaluate():
+    def evaluate(data_source=None):
         report = {}
-        for name, data in test.items():
+        for name, data in (test if data_source is None else data_source).items():
             pred = data['states'][0]
             row = {}
-            for j in range(32):
+            for j in range(data['actions'].shape[0]):
                 pred = wm.step(pred, data['actions'][j], data['xi'])
                 if j + 1 in (1, 8, 32):
                     actual = data['states'][j + 1]
@@ -138,6 +147,7 @@ def main():
 
     load_wm(ck)
     results['baselines']['original'] = evaluate()
+    results['train_baseline'] = evaluate(train)
     later = torch.load(a.later_checkpoint, map_location='cuda:0', weights_only=False)
     load_wm(later)
     results['baselines']['later_same_trajectories'] = dict(iteration=later['iteration'],
@@ -145,7 +155,7 @@ def main():
     del later
     save()
     print(json.dumps(dict(baselines=results['baselines'])), flush=True)
-    for arm in ('motion_only', 'mixed'):
+    for arm in a.fit_arms:
         load_wm(ck)
         torch.manual_seed(42)
         optimizer = torch.optim.Adam(wm.parameters(), lr=saved['wm_trainer']['lr'])
@@ -173,13 +183,14 @@ def main():
                 raise FloatingPointError('Nonfinite refit')
             optimizer.step()
             if update in (16, 64, a.fit_steps):
-                row = dict(updates=update, training_state_loss=float(loss), seconds=time.monotonic()-started,
+                row = dict(updates=update, training_state_loss=float(loss.detach()), seconds=time.monotonic()-started,
                            heldout=evaluate())
                 rows.append(row)
                 results['refits'][arm] = rows
                 save()
                 print(json.dumps(dict(arm=arm, **row)), flush=True)
         torch.save(dict(wm=wm.state_dict(), config=saved, protocol=provenance), a.out / (arm + '-wm-only.pt'))
+        results['refits'][arm][-1]['train_metrics'] = evaluate(train)
     results.update(status='complete', peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20)
     save()
 
