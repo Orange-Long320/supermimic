@@ -72,7 +72,7 @@ def main():
      oldx=x.clone();oldgoal=goal.clone();mean=policy.velocity_action(x,goal,feedback);dist=torch.distributions.Normal(mean,sigma)
      sampled=dist.sample();z=torch.where((goal.square().sum(-1)<.01)[:,None],sampled,mean);lp=dist.log_prob(z).sum(-1);vf=value_features(x);v=value(vf).squeeze(-1)
      action=z
-     nxt,_,term,tout,_=env.step(action);done=term|tout
+     nxt,_,term,tout,_=env.step(action);term=term.clone();tout=tout.clone();done=term|tout
      state=cmd.state_io.read();speed=measured_velocity(state)
      dq=state[:,NQ+6:];q=state[:,7:NQ]
      arm_motion=dq[:,arm_ids].square().mean(-1)
@@ -103,7 +103,7 @@ def main():
      c=cc[ids];mean=policy.velocity_action(xx[ids],c,ff[ids])
      lp=torch.distributions.Normal(mean,sigma).log_prob(zz[ids]).sum(-1)
      ratio=(lp-old[ids]).exp();eligible=(c.square().sum(-1)<.01).float();loss=-(torch.minimum(ratio*adv[ids],ratio.clamp(.8,1.2)*adv[ids])*eligible).sum()/eligible.sum().clamp_min(1)
-     loss+=.1*(actor(refhistory,torch.zeros(1,6,device=refhistory.device))-refaction).square().mean()
+     # The reference-trained base is frozen; learn only observable stop feedback.
      with torch.no_grad():current_kl=float((mean-old_mean[ids]).square().sum(-1).mean()/(2*sigma*sigma))
      if current_kl<.02:
       opt.zero_grad(set_to_none=True);loss.backward();torch.nn.utils.clip_grad_norm_(trainable,.5)
