@@ -11,9 +11,12 @@ def main():
     p.add_argument('--out',type=Path,required=True)
     p.add_argument('--playback-speed',type=float,default=.5)
     p.add_argument('--azimuth',type=float,default=90.)
+    p.add_argument('--label',default='RECORDED PHYSICS | FAILED CANDIDATE',help='Display label; does not change recorded motion')
+    p.add_argument('--distance',type=float,default=3.5)
     args=p.parse_args()
     if args.out.exists():p.error('Output already exists')
-    if not 0<args.playback_speed<=2:p.error('Invalid playback speed')
+    if not 0<args.playback_speed<=2 or args.distance<=0:p.error('Invalid playback speed or camera distance')
+    if any(c in args.label for c in "':\\"):p.error('Label cannot contain quotes, colon or backslash')
     os.environ.setdefault('MUJOCO_GL','egl')
     import mujoco
     import numpy as np
@@ -39,10 +42,10 @@ def main():
     m.vis.global_.offwidth=max(width,m.vis.global_.offwidth)
     m.vis.global_.offheight=max(height,m.vis.global_.offheight)
     cam=mujoco.MjvCamera();cam.type=mujoco.mjtCamera.mjCAMERA_FREE
-    cam.distance=3.5;cam.azimuth=args.azimuth;cam.elevation=-12
+    cam.distance=args.distance;cam.azimuth=args.azimuth;cam.elevation=-12
     cam.lookat[:]=np.r_[q[:,:2].mean(axis=0),.65]
     renderer=mujoco.Renderer(m,width=width,height=height)
-    label=f"drawtext=text='RECORDED PHYSICS | FAILED CANDIDATE | {args.playback_speed}x':x=15:y=15:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.7"
+    label=f"drawtext=text='{args.label} | {args.playback_speed}x':x=15:y=15:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.7"
     args.out.parent.mkdir(parents=True,exist_ok=True)
     writer=subprocess.Popen(['ffmpeg','-nostdin','-v','error','-f','rawvideo','-pix_fmt','rgb24',
         '-s',f'{width}x{height}','-r',str(fps*args.playback_speed),'-i','pipe:0','-an','-vf',label,
