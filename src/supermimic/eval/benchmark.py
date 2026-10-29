@@ -36,6 +36,9 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
     pc = ck["config"]["policy"]
     pcfg = PolicyCfg(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in pc.items()})
     policy = Policy(pcfg).to(device)
+    if "standing_skill" in ck:
+        from supermimic.policy.standing import attach_standing_skill
+        attach_standing_skill(policy,**ck["standing_skill"])
     policy.load_state_dict(ck["policy"])
     policy.eval()
     return policy, ck["config"]
