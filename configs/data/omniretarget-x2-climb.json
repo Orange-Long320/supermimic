@@ -199,7 +199,17 @@
     "practical_reference_review": "omni_practical_reference_gate_20261029_r1/review.json",
     "practical_reference_contact_regression": "omni_practical_reference_gate_20261029_r1/selective-contact-regression.json",
     "practical_reference_input_accepted": true,
-    "finite_solver_discrete_dynamics": "omni_practical_reference_gate_20261029_r1/discrete-dynamics/report.json"
+    "finite_solver_discrete_dynamics": "omni_practical_reference_gate_20261029_r1/discrete-dynamics/report.json",
+    "current_formal_training_status": "old_run_superseded_latest_reference2048_capacity_running",
+    "latest_reference2048_run": "omni_latest_reference_batch2048_3h_20261029_r1",
+    "latest_reference2048_driver_pid": 1468591,
+    "latest_reference2048_capacity_pid": 1468614,
+    "latest_reference2048_dataset": "omni_practical_reference_gate_20261029_r1/dataset",
+    "latest_reference2048_terrain_sha256": "8798780bfeb9a61a0457378f63dd9ae52d36427ac9d6d2068180a66b6e107a11",
+    "latest_reference2048_checkpoint_sha256": "c54c12f56e9eb416c379d8748e8ac2e0144eb52d53fb49d33a8830203afc8a24",
+    "latest_reference2048_equivalence_proof": "omni_latest_reference_batch2048_3h_20261029_r1/dataset-rebind/equivalence.json",
+    "latest_reference2048_formal_budget_seconds": 10800,
+    "latest_reference2048_short_tests_counted_in_budget": false
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
