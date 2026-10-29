@@ -53,7 +53,7 @@
       "keep each clip paired with its measured terrain and contact phases"
     ],
     "mixing_gate": "Final usable-reference acceptance still requires physical/continuous checks. Explicit user-authorized exploratory training may proceed after finite data, original joint/speed, scene geometry and single-GPU capacity checks; it does not waive final acceptance.",
-    "status": "User confirmed box-top standing and vault/landing tasks. A3-family1784-frame goal batch passed parent/model binding, dense geometry/speed and terminal reference support checks; actual policy acceptance remains pending. The2-family prefix course finished with improved but failed full-start results.",
+    "status": "User confirmed box-top standing and vault/landing tasks. The3-family1784-frame exploratory hour completed, with3/3 full-start task failures. Dense reference force checks also fail. A67-frame50Hz corrected window passes the unchanged force LP, including explicitly verified zero-contact flight; the full reference, C2dense interpolation and native compliant-contact inverse remain unapproved. Correct references before another unchanged long fit.",
     "height_selection_update": "Prioritize official ~46cm effective-rise hand climb before its failed ~69cm variant; retain other ~55cm/~60cm hand families and ~28cm/~39cm/~43cm step families. Variants are not counted as additional skills.",
     "confirmed_task_scope": [
       "box-top standing",
@@ -132,7 +132,24 @@
     "task_aligned_terrain_sha256": "e9314bba6da933f5ab2e065ceebb62705a105b40b667721c18c3c1111fcd828f",
     "actual_contact_readout_preflight": "omni_contact_record_preflight_20261029_r1/capture/result.json",
     "zero_anchor_fk_pair": "omni_zero_anchor_fk_20261029_r1/paired/progress.json",
-    "prefix_course_evaluation": "omni_prefix_curriculum_20261029_r1/progress.json"
+    "prefix_course_evaluation": "omni_prefix_curriculum_20261029_r1/progress.json",
+    "three_task_hour_run": "omni_three_task_train_20261029_r1",
+    "three_task_hour_checkpoint_sha256": "56171954cc043456cc00ab239b34bacea6549f3bb27d211de11331df8cd5c44f",
+    "three_task_hour_updates": 744,
+    "three_task_hour_new_updates": 720,
+    "three_task_hour_evaluation": "omni_three_task_train_20261029_r1/benchmark.json",
+    "three_task_hour_actual_task_audits": "omni_task_audit_followup_20261029_r1/results/progress.json",
+    "three_task_hour_complete_task_verified": false,
+    "three_task_midpoint_comparison": "omni_three_task_progress_eval_20261029_r1/comparison.json",
+    "task_reference_force_diagnostics": "omni_task_reference_forces_20261029_r1/results/progress.json",
+    "rejected_soft_contact_window": "omni_contact_window_20261029_r1/comparison.json",
+    "rigid_contact_window": "omni_contact_sqp_20261029_r4/result/progress.json",
+    "rigid_contact_window_force_check": "omni_flight_audit_regression_20261029_r1/flight-aware50/report.json",
+    "rigid_contact_window_scope": "Only50Hz frames90-156 pass67/67; full312 force samples remain unapproved",
+    "zero_contact_mechanics_regression": "omni_flight_audit_regression_20261029_r1/mechanics/report.json",
+    "native_compliance_and_dense_check": "omni_dense_dynamics_20261029_r1",
+    "corrected_dense_reference_passed": false,
+    "actual_contact_long_trace_consistency": "Failed strict readout consistency by0.0054-0.0242N; investigate raw solver Jacobian/forces and float32 reductions, no physical limit relaxation"
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
