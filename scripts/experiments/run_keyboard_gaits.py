@@ -5,7 +5,7 @@ from pathlib import Path
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    for n in ['source','dataset','checkpoint','out','entry','evaluator','tracking_eval']:p.add_argument('--'+n,type=Path,required=True)
+    for n in ['source','dataset','checkpoint','out','entry','evaluator','tracking_eval']:p.add_argument('--'+n.replace('_','-'),type=Path,required=True)
     a=p.parse_args();a.out.mkdir(exist_ok=False)
     state=dict(status='initializing',pid=os.getpid(),gpus=[0,2],phases=[])
     def save():(a.out/'controller.json').write_text(json.dumps(state,indent=2)+'\n')
