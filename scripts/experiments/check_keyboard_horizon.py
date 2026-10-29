@@ -9,11 +9,12 @@ def main():
     for name in ('checkpoint','dataset','out'):
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--control-prior',type=Path)
+    p.add_argument('--velocity-horizon',type=int,default=8)
     a=p.parse_args()
     if a.out.exists():raise FileExistsError(a.out)
     import torch
     from keyboard_supervision import install,install_quiet_stop_cost,install_velocity_horizon
-    install();install_quiet_stop_cost();install_velocity_horizon(8)
+    install();install_quiet_stop_cost();install_velocity_horizon(a.velocity_horizon)
     if a.control_prior:
         from keyboard_supervision import install_control_prior
         install_control_prior(a.control_prior)
@@ -58,9 +59,9 @@ def main():
             assert metrics['control_prior_action_mse']>0,metrics
             assert all(torch.equal(v,teacher_before[k]) for k,v in trainer.control_prior.state_dict().items())
             assert trainer.checkpoint_state()['control_prior']['weight']==10.
-        assert captured==dict(velocity_steps=8,state_count=9,horizon_during_update=8),captured
+        assert captured==dict(velocity_steps=a.velocity_horizon,state_count=a.velocity_horizon+1,horizon_during_update=a.velocity_horizon),captured
         assert trainer.cfg is original_cfg and trainer.cfg.horizon==32
-        assert trainer.checkpoint_state()['imagination_horizon']==8
+        assert trainer.checkpoint_state()['imagination_horizon']==a.velocity_horizon
         assert metrics['alignment']>0 and metrics['critic_loss']>=0
         assert all(torch.isfinite(torch.tensor(v)) for v in metrics.values())
         assert any(not torch.equal(v,before[k]) for k,v in t.policy.encoders['velocity'].state_dict().items())

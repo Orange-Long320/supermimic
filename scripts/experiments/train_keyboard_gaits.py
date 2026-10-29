@@ -18,7 +18,8 @@ def main():
     p.add_argument('--proof',type=Path)
     p.add_argument('--hours',type=float,default=.5)
     p.add_argument('--quiet-stop-cost',action='store_true')
-    p.add_argument('--velocity-horizon',type=int,default=8,help='Velocity imagination horizon; measured against 8-step dynamics')
+    p.add_argument('--velocity-horizon',type=int,default=32,help='Upstream horizon; 8 remains a diagnostic option')
+    p.add_argument('--wm-batches-per-update',type=int,default=20,help='20 batches preserve upstream fitting per new transition at 8192 environments')
     p.add_argument('--control-prior',type=Path,help='Frozen validated single-encoder checkpoint for counterfactual control retention')
     p.add_argument('--weights-only',action='store_true',help='Import repaired velocity weights with fresh optimizers')
     p.add_argument('--paired-supervision', action=argparse.BooleanOptionalAction, default=True, help='Use tracking replay for persistent teacher alignment')
@@ -41,6 +42,7 @@ def main():
     if a.quiet_stop_cost:
         from keyboard_supervision import install_quiet_stop_cost
         install_quiet_stop_cost()
+    if not 1 <= a.wm_batches_per_update <= 40:raise ValueError('WM batches must be in [1,40]')
     if not 1 <= a.velocity_horizon <= 32:raise ValueError('Velocity horizon must be in [1,32]')
     from keyboard_supervision import install_velocity_horizon
     install_velocity_horizon(a.velocity_horizon)
@@ -70,7 +72,7 @@ def main():
     cfg.data.npz_dir=a.dataset;cfg.data.clips=[c['name'] for c in manifest['clips']];cfg.data.manifest=None;cfg.data.library=None;cfg.data.limit=None
     cfg.env.num_envs=8192;cfg.env.replay_capacity=256;cfg.env.anchor_obs=True;cfg.env.episode_length_s=12
     cfg.env.action_noise_std=.1;cfg.env.obs_noise=cfg.env.reset_noise=cfg.env.domain_randomization=True
-    cfg.wm_trainer.batch_size=cfg.policy_trainer.batch_size=2048;cfg.wm_trainer.batches_per_update=2
+    cfg.wm_trainer.batch_size=cfg.policy_trainer.batch_size=2048;cfg.wm_trainer.batches_per_update=a.wm_batches_per_update
     cfg.wm_trainer.compile=cfg.policy_trainer.compile=None
     cfg.wm_trainer.lr=cfg.policy_trainer.lr=cfg.policy_trainer.critic_lr=2e-4/world**.5
     cfg.velocity.enabled=True;cfg.velocity.fraction=.5
