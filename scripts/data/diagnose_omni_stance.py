@@ -54,9 +54,25 @@ def main():
         hull = ConvexHull(np.array(points))
         com = d.subtree_com[m.body(prefix+'pelvis').id]
         margin = float(np.min(-(hull.equations[:, :2] @ com[:2] + hull.equations[:, 2])))
+        physical_margin = None
+        if not source:
+            contact_vertices = []
+            for side in ['left','right']:
+                body=m.body(prefix+side+'_ankle_roll_link').id
+                for gidx in range(m.ngeom):
+                    if m.geom_bodyid[gidx]!=body or not(m.geom_contype[gidx] or m.geom_conaffinity[gidx]):continue
+                    mesh=m.geom_dataid[gidx]
+                    if mesh<0:continue
+                    start,count=m.mesh_vertadr[mesh],m.mesh_vertnum[mesh]
+                    vertices=m.mesh_vert[start:start+count]@d.geom_xmat[gidx].reshape(3,3).T+d.geom_xpos[gidx]
+                    contact_vertices.extend(vertices[vertices[:,2]<=vertices[:,2].min()+.003,:2])
+            actual=ConvexHull(np.array(contact_vertices))
+            physical_margin=float(np.min(-(actual.equations[:,:2]@com[:2]+actual.equations[:,2])))
         return {'foot_yaw_relative_pelvis_deg': yaw, 'ankle_lateral_spacing_m': float((feet[0]-feet[1]) @ lateral),
                 'knee_lateral_spacing_m': float((knees[0]-knees[1]) @ lateral),
                 'com_projection_hull_margin_m': margin,
+                'com_projection_near_bottom_mesh_hull_margin_m': physical_margin,
+                'pelvis_world_yaw_deg': float(np.degrees(np.arctan2(forward[1],forward[0]))),
                 'joint_angles_deg': {m.joint(i).name: float(np.degrees(pose[m.jnt_qposadr[i]])) for i in range(1, m.njnt) if any(t in m.joint(i).name for t in ['hip_roll', 'hip_yaw', 'ankle_roll'])}}
 
     report = {}
