@@ -162,7 +162,7 @@
     "anchored_entry_training_approved": false,
     "current_task_reference_previews": "omni_task_reference_videos_20261029_r1",
     "single_three_hour_run": "omni_single_three_hour_20261029_r1",
-    "single_three_hour_status": "formal_train_3h_running",
+    "single_three_hour_status": "superseded_by_user_batch1024_change",
     "single_three_hour_initial_checkpoint_sha256": "56171954cc043456cc00ab239b34bacea6549f3bb27d211de11331df8cd5c44f",
     "single_three_hour_gpu": 3,
     "single_three_hour_memory_budget_mib": 12800,
@@ -174,10 +174,14 @@
     "single_three_hour_driver_pid": 1446022,
     "single_three_hour_training_pid": 1447603,
     "batch1024_requested_run": "omni_single_three_hour_batch1024_20261029_r1",
-    "batch1024_status": "waiting_for_next_numbered_checkpoint_before_measured_capacity",
-    "batch1024_transition_pid": 1455562,
+    "batch1024_status": "capacity_running_after_user_direct_switch",
+    "batch1024_transition_pid": 1456479,
     "batch1024_memory_budget_mib": 20000,
-    "batch1024_total_original_training_budget_minutes": 180
+    "batch1024_total_original_training_budget_minutes": 180,
+    "batch1024_driver_pid": 1456507,
+    "batch1024_capacity_pid": 1456525,
+    "batch1024_initial_checkpoint_sha256": "bc19fa62bc6de5ba98deb7a5cc9bc5a9c770de9f696adbc57cbac20ae196f498",
+    "batch1024_previous_training_seconds": 477.20760011672974
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
