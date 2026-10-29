@@ -87,3 +87,7 @@ root单卡r1实际800轮结束，controller状态not_accepted，未生成accepte
 40轮参考专训短试r2已覆盖25.6秒仿真（16秒回合发生自动重置后继续），训练输出正常，五移动核心逐张量/动作相等检查通过。PyTorch实际峰值分配959.29MiB（不是整卡总占用）；35轮参考动作RMSE0.699，未把监督误差当策略成功。独立20轮候选3秒/8环境冷启动无失败，最差平移0.03798m/s、手臂RMS0.07019rad/s，绝对yaw0.08759rad/s仍有超限，不采用。新的六样本所有SHA重新验证，站立500帧/50Hz及全部关节/身体目标速度为零核对通过。
 
 后续专训从40轮专训检查点续接模型及actor/value/optimizer，核对站立参考SHA与探索方差，仿真状态仍从原始起态新建，不冒称恢复了物理回放。每5轮增加累计falls/timeouts，防止回合重置恰好未落在打印间隔而漏记。最多1200轮/1小时，GPU2，完整独立物理门限和姿态约束保持。实际启动记录随后附加。
+
+### 参考站立专训已实际启动
+
+入口eb6a833，运行logs/keyboard_standing_reference_20261029_r1，tmux sm-standing-reference-r1，controller PID2056642、train PID2056646，显式GPU2。源为capacity_r2/candidate_40.pt，SHA991e2db0…；站立参考SHAb820fe5a…；已核验训练状态恢复，仿真原始起态重新初始化。launch.json保留完整argv、解释器、PyTorch/CUDA版本、所有实际src文件SHA及GPU清单；controller.json保留入口与评测SHA。5分钟内采样已多次跨越16秒重置，累计time_out按所有batch记录；已观察总占用2109MiB、PyTorch峰值962.74MiB，未将两者混称同一显存指标。60轮时累计falls=0、timeouts=2048，参考动作误差降至0.3179；这仍不是物理验收通过。每80轮冷启动双种子门检，再按通过情况追加20/66/42秒与手臂姿势检查。1200轮/1小时只是有界训练上限，未承诺到时一定收敛。
