@@ -2,7 +2,7 @@
   "exploratory_training_authorized": true,
   "authorization": "User explicitly requested these three and IMG_4881 jogging, one hour single GPU",
   "physics_validated": false,
-  "initialization": "fresh model; capacity checkpoint continued into one-hour fit",
+  "initialization": "fresh gait model; continue measured same-dataset capacity weights; no external pretrained model",
   "clips": [
     {
       "name": "walk",
@@ -24,5 +24,10 @@
       "source": "/home/2025-Long.xh/HHD/data/supermimic/data/video/gait_IMG4880_4883_20261029_r1/x2_candidates_r4/IMG_4881.npz",
       "sha256": "170f721735359b0101165af40238254bd5ad25dea6d913563ff80e98332fe2bf"
     }
-  ]
+  ],
+  "num_envs": 8192,
+  "world_model_batch_size": 2048,
+  "policy_batch_size": 2048,
+  "formal_training_hours": 1,
+  "physical_gpu": 1
 }
