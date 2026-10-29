@@ -155,7 +155,12 @@
     "raw_solver_contact_readout": "omni_solver_force_readout_20261029_r1/force-readout-analysis.json",
     "installed_solver_cache_path": "omni_solver_force_readout_20261029_r1/installed-solver-evidence.json",
     "native_hard_com_diagnostic": "omni_native_hardcom_diagnostic_20261029_r1/trace/result.json",
-    "native_hard_com_diagnostic_scope": "Rejected at0.025s with iteration limit; no proof of global infeasibility, no training approval"
+    "native_hard_com_diagnostic_scope": "Rejected at0.025s with iteration limit; no proof of global infeasibility, no training approval",
+    "anchored_dense_entry": "omni_anchored_entry_20261029_r1/result/result.json",
+    "anchored_dense_entry_physics": "omni_anchored_entry_20261029_r1/dense/report.json",
+    "anchored_entry_actual_replay": "omni_anchored_entry_20261029_r1/native/independent-replay/report.json",
+    "anchored_entry_training_approved": false,
+    "current_task_reference_previews": "omni_task_reference_videos_20261029_r1"
   },
   "adapter_options": {
     "joint_limit_factor": 0.9,
