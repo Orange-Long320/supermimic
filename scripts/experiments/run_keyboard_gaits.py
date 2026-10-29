@@ -10,7 +10,7 @@ def main():
     p.add_argument('--repaired-velocity',action='store_true')
     p.add_argument('--quiet-stop-cost',action='store_true')
     p.add_argument('--stop-evaluator',type=Path)
-    p.add_argument('--freeze-motion-expert',action='store_true')
+    p.add_argument('--freeze-motion-expert',action=argparse.BooleanOptionalAction,default=True,help='Keep the validated expert fixed; use --no-freeze-motion-expert only for joint-training comparisons')
     p.add_argument('--control-prior',type=Path)
     p.add_argument('--velocity-horizon',type=int,default=32)
     p.add_argument('--wm-batches-per-update',type=int,default=20)

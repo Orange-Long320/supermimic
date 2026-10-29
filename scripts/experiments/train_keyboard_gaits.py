@@ -20,7 +20,7 @@ def main():
     p.add_argument('--quiet-stop-cost',action='store_true')
     p.add_argument('--velocity-horizon',type=int,default=32,help='Upstream horizon; 8 remains a diagnostic option')
     p.add_argument('--wm-batches-per-update',type=int,default=20,help='20 batches preserve upstream fitting per new transition at 8192 environments')
-    p.add_argument('--freeze-motion-expert',action='store_true')
+    p.add_argument('--freeze-motion-expert',action=argparse.BooleanOptionalAction,default=True,help='Keep the validated expert fixed; use --no-freeze-motion-expert only for joint-training comparisons')
     p.add_argument('--control-prior',type=Path,help='Frozen validated single-encoder checkpoint for counterfactual control retention')
     p.add_argument('--weights-only',action='store_true',help='Import repaired velocity weights with fresh optimizers')
     p.add_argument('--paired-supervision', action=argparse.BooleanOptionalAction, default=True, help='Use tracking replay for persistent teacher alignment')
