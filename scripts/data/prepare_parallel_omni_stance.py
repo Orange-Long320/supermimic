@@ -8,17 +8,35 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ['model','template','out']:p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--support-height-m',type=float,required=True)
+    p.add_argument('--upright-torso',action='store_true',help='Neutral waist and head; preserve crouch')
+    p.add_argument('--knee-deg',type=float,help='Optional symmetric crouch angle, with hip pitch at minus half this angle')
+    p.add_argument('--neutral-arms',action='store_true',help='Use project default arm positions for symmetric load')
     a=p.parse_args()
     if a.out.exists():p.error('New output required')
+    if a.knee_deg is not None and not 20<=a.knee_deg<=55:p.error('Crouch angle must be 20–55 degrees')
     import mujoco
     import numpy as np
     from scipy.spatial.transform import Rotation
     m=mujoco.MjModel.from_binary_path(str(a.model));d=mujoco.MjData(m)
     original=np.load(a.template)['qpos'].copy();q=original.copy()
     def col(side,joint):return int(m.jnt_qposadr[m.joint('robot/'+side+'_'+joint+'_joint').id])
+    if a.upright_torso:
+        for j in range(1,m.njnt):
+            if any(k in m.joint(j).name for k in ['waist_','head_']):q[m.jnt_qposadr[j]]=0.
+    if a.neutral_arms:
+        from supermimic.robots.paths import select_robot
+        select_robot('x2_ultra',check_assets=True)
+        from supermimic.robots.dimensions import PROFILE
+        for j in range(1,m.njnt):
+            name=m.joint(j).name.removeprefix('robot/')
+            if any(k in name for k in ['shoulder_','elbow_','wrist_']):q[m.jnt_qposadr[j]]=PROFILE['default_joint_pos'][name]
     for joint in ['hip_pitch','knee']:
         value=float(np.mean([q[col(s,joint)] for s in ['left','right']]))
         for side in ['left','right']:q[col(side,joint)]=value
+    if a.knee_deg is not None:
+        for side in ['left','right']:
+            q[col(side,'knee')]=np.radians(a.knee_deg)
+            q[col(side,'hip_pitch')]=-np.radians(a.knee_deg)/2
     for side in ['left','right']:
         for joint in ['hip_roll','hip_yaw','ankle_roll']:q[col(side,joint)]=0.
         q[col(side,'ankle_pitch')]=-q[col(side,'hip_pitch')]-q[col(side,'knee')]
