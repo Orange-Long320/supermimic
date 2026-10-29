@@ -1,5 +1,5 @@
 {
-  "status": "recovery and retargeting pending; no training approval",
+  "status": "running: video recovery; retargeting and review pending",
   "sources": [
     {
       "file": "IMG_4880.MOV",
@@ -21,6 +21,6 @@
   "source_review": "4880/4881 approach camera; 4882 turns; 4883 side view. Direction labels require continuous motion review.",
   "pipeline": "pinned GEM-X raw world motion -> SOMA BVH -> existing X2 Ultra preset -> 50Hz bounded preparation",
   "gpu": 3,
-  "run": "gait_IMG4880_4883_20261029_r1",
+  "run": "gait_IMG4880_4883_20261029_r2",
   "limitation": "Monocular world translation and foot contacts require review; outputs are reference candidates."
 }

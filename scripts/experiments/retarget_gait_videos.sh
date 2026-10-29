@@ -24,7 +24,7 @@ cp "$D/logs/webster_gem_20261027_r2/config.json" "$O/config.json"
 cp "$D/assets/gem-x/READY.json" "$O/assets.json"
 date -Is
 nvidia-smi > "$O/gpu-before.txt"
-"$G/bin/python" -m pip freeze > "$O/gem-environment.txt"
+uv --no-config pip freeze --python "$G/bin/python" > "$O/gem-environment.txt"
 for N in 4880 4881 4882 4883; do
   C="$O/IMG_$N"
   mkdir "$C"
