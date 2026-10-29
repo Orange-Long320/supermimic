@@ -143,3 +143,5 @@ keyboard_control_complete_20261030_r1已实际结束，最终800轮检查点SHAd
 已实际启动logs/keyboard_control_precision_20261030_r1，独立源码logs/keyboard_control_precision_20261030_source，源261d67c（完整261d67c由Git保存）；tmux sm-control-precision-r1，controller PID2113907、train PID2113911，GPU2。从上述最终800轮检查点恢复全部既有训练状态，原始物理起态重建。1200轮/1小时上限，前400轮探索标准差0.08线性降到0.02，随后保持0.02；默认入口仍0.08。launch.json保留完整argv/解释器/PyTorch与CUDA/源码逐文件SHA/数据清单SHA/资源清单。启动前确认原控制器已not_accepted、GPU2无进程。30轮时跨16秒重置，累计falls=0/timeouts=1024、PyTorch峰值756.74MiB，尚无新的完整物理验收结论。
 
 另在同一GPU2检查进程归属后启动未采用800轮权重的66秒诊断录像，logs/keyboard_control_preview800_20261030_r1，render PID2114101。它用于观察尚存的连续控制问题；最终视频、帧数和失败状态以该目录control800.json为准，当前记录时尚未完成，不作为交付成功证据。
+
+800轮诊断录像已实际完成：control800.mp4为66秒、1650帧、1280×720、25fps；原始起态、零预热、零重置、未提前失败，SHA绑定上述最终800轮权重。ffprobe与2/7/12/32/47/62秒六帧检查完成。本地副本outputs/keyboard_control_preview800_20261030_r1/。它展示单个预定env0，不能替代失败的8环境完整门检，仍明确为未采用候选。
