@@ -1,4 +1,4 @@
-"""Queue measured dual-GPU Omni continuation, then evaluate actual full tasks.
+"""Queue measured one/two-GPU Omni continuation, then evaluate actual full tasks.
 
 Only vacant explicitly selected GPUs are used. Capacity and training own one
 distributed policy, not two independent trials. Original physics stays fixed.
@@ -20,17 +20,17 @@ def main():
     for name in ['run','dataset','initial-checkpoint']:p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--expected-checkpoint-sha256',required=True)
     p.add_argument('--source-commit',required=True)
-    p.add_argument('--gpus',type=int,nargs=2,default=[3,2])
+    p.add_argument('--gpus',type=int,nargs='+',default=[3,2])
     p.add_argument('--minutes',type=float,default=180.)
     p.add_argument('--memory-budget-mib',type=int,default=12800)
     p.add_argument('--queue-seconds',type=int,default=3600)
     a=p.parse_args()
-    if len(set(a.gpus))!=2 or not 0<a.minutes<=180 or not 0<a.memory_budget_mib<=12800:
-        p.error('Two distinct GPUs, <=3hours, <=12.5GiB per GPU required')
+    if len(a.gpus) not in [1,2] or len(set(a.gpus))!=len(a.gpus) or not 0<a.minutes<=180 or not 0<a.memory_budget_mib<=12800:
+        p.error('One/two distinct GPUs, <=3hours, <=12.5GiB per GPU required')
     r=a.run;s=r/'source';py='/home/2025-Long.xh/HHD/venvs/supermimic/bin/python'
     if (r/'progress.json').exists():p.error('Run already started')
     (r/'pid').write_text(str(os.getpid()))
-    if hasattr(os,'sched_getaffinity'):os.sched_setaffinity(0,sorted(os.sched_getaffinity(0))[-4:])
+    if hasattr(os,'sched_getaffinity'):os.sched_setaffinity(0,sorted(os.sched_getaffinity(0))[-2*len(a.gpus):])
     sha=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()
     env=os.environ.copy();env.update(SM_ROBOT='x2_ultra',PYTHONPATH=str(s/'src'),OMP_NUM_THREADS='2',
         OPENBLAS_NUM_THREADS='2',MKL_NUM_THREADS='2',PYTHONUNBUFFERED='1',MUJOCO_GL='egl')
@@ -87,10 +87,10 @@ def main():
         if code or over[0]:raise RuntimeError(f'{name} failed, exit={code}, memory_stop={over[0]}')
         return peaks
     def rank_pair(directory):
-        ranks=[json.loads((directory/f'rank-{i}.json').read_text()) for i in range(2)]
+        ranks=[json.loads((directory/f'rank-{i}.json').read_text()) for i in range(len(a.gpus))]
         if any(x['status']!='completed' or x['new_updates']<20 for x in ranks):raise RuntimeError('Both ranks must finish real parameter updates')
         for key in ['iteration','updates','initial_parameter_hashes','final_parameter_hashes','base_learning_rates']:
-            if ranks[0][key]!=ranks[1][key]:raise RuntimeError('Rank coherence mismatch: '+key)
+            if any(ranks[0][key]!=x[key] for x in ranks[1:]):raise RuntimeError('Rank coherence mismatch: '+key)
         if ranks[0]['final_parameter_hashes']==ranks[0]['initial_parameter_hashes']:raise RuntimeError('No parameter change')
         if ranks[0]['checkpoint_sha256']!=sha(ranks[0]['checkpoint']):raise RuntimeError('Final checkpoint changed')
         return ranks
@@ -101,17 +101,18 @@ def main():
         initial=r/'initial-weights.pt';shutil.copyfile(a.initial_checkpoint,initial)
         if sha(initial)!=a.expected_checkpoint_sha256:raise ValueError('Pinned weights changed')
         (r/'source-commit.txt').write_text(a.source_commit+'; package7568607 private copy\n')
-        (r/'resources.txt').write_text(f'Two-rank shared policy on explicit GPUs{a.gpus};2048env/512batch per rank;2CPUcores/2threads per rank;device budget{a.memory_budget_mib}MiB each;capacity100steps then{a.minutes}minutes;50% source0/50% return;original physics unchanged. User requested continuation despite unresolved reference dynamics.\n')
+        (r/'resources.txt').write_text(f'{len(a.gpus)}rank shared policy on explicit GPUs{a.gpus};2048env/512batch per rank;2CPUcores/2threads per rank;device budget{a.memory_budget_mib}MiB each;capacity100steps then{a.minutes}minutes;50% source0/50% return;original physics unchanged. User requested continuation despite unresolved reference dynamics.\n')
         wait_free(a.gpus,a.queue_seconds)
         (r/'gpu-preflight.txt').write_text(subprocess.check_output(['nvidia-smi'],text=True))
         (r/'process-preflight.txt').write_text(subprocess.check_output(['ps','-eo','pid,user,args'],text=True))
-        common=[py,'-m','torch.distributed.run','--standalone','--nproc-per-node','2',
+        launcher=[py,'-m','torch.distributed.run','--standalone','--nproc-per-node','2'] if len(a.gpus)==2 else [py]
+        common=launcher+[
             str(s/'scripts/experiments/train_omni_dual.py'),'--dataset',str(a.dataset),
             '--source-commit',a.source_commit,'--package-commit','7568607','--minutes',str(a.minutes)]
         peak=stage('capacity',common+['--checkpoint',str(initial),'--phase','capacity','--out',str(r/'capacity')],a.gpus,600)
         ranks=rank_pair(r/'capacity')
         if any(not 0<v<=a.memory_budget_mib for v in peak.values()):raise RuntimeError('Measured per-card capacity budget failed')
-        proof=dict(passed=True,world_size=2,num_envs_per_rank=2048,batch_size_per_rank=512,
+        proof=dict(passed=True,world_size=len(a.gpus),num_envs_per_rank=2048,batch_size_per_rank=512,
             checkpoint_sha256=ranks[0]['checkpoint_sha256'],terrain_sha256=manifest['terrain_sha256'],
             device_peaks_mib=peak,rank_records=ranks)
         (r/'dual-capacity-proof.json').write_text(json.dumps(proof,indent=2))

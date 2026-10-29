@@ -1,4 +1,4 @@
-"""Reviewed Omni continuation using the existing two-rank gradient averaging.
+"""Reviewed Omni continuation on one GPU or existing two-rank gradient averaging.
 
 Each GPU owns its simulator/replay; both ranks update one synchronized policy.
 Source-start and return sampling remain50/50. No robot physics or acceptance
@@ -27,14 +27,14 @@ def main():
     p.add_argument('--source-world-size',type=int,default=1,help='Normalize checkpoint LR before the existing trainer applies its world-size scaling')
     a=p.parse_args()
     if not 0<a.minutes<=180 or a.num_envs<1 or a.batch_size<1:p.error('Bounded three-hour run required')
-    rank,local,world=int(os.environ['RANK']),int(os.environ['LOCAL_RANK']),int(os.environ['WORLD_SIZE'])
+    rank,local,world=int(os.environ.get('RANK','0')),int(os.environ.get('LOCAL_RANK','0')),int(os.environ.get('WORLD_SIZE','1'))
     visible=os.environ.get('CUDA_VISIBLE_DEVICES','').split(',')
-    if world!=2 or len(visible)!=2:raise ValueError('Exactly two explicitly selected GPUs required')
+    if world not in [1,2] or len(visible)!=world:raise ValueError('Explicit one GPU per rank required')
     physical=visible[local]
     os.environ['CUDA_VISIBLE_DEVICES']=physical
     os.environ['SM_GPU_PINNED']='1'
     if hasattr(os,'sched_getaffinity'):
-        cores=sorted(os.sched_getaffinity(0));size=len(cores)//2
+        cores=sorted(os.sched_getaffinity(0));size=len(cores)//world
         if size<2:raise ValueError('Two CPU cores per rank required')
         os.sched_setaffinity(0,cores[local*size:(local+1)*size])
     import torch
@@ -58,7 +58,7 @@ def main():
             if is_dataclass(current):restore(current,v)
             else:setattr(obj,k,tuple(v) if isinstance(current,tuple) else v)
     cfg=TrainConfig();restore(cfg,ck['config'])
-    incoming_world=2 if a.phase=='optimize' else a.source_world_size
+    incoming_world=json.loads(a.proof.read_text())['world_size'] if a.phase=='optimize' and a.proof else a.source_world_size
     if incoming_world not in [1,2]:raise ValueError('Explicit known checkpoint world size required')
     cfg.wm_trainer.lr/=incoming_world**.5
     cfg.policy_trainer.lr/=incoming_world**.5
@@ -84,7 +84,7 @@ def main():
     if a.phase=='optimize':
         if a.proof is None:p.error('Optimization requires measured dual capacity proof')
         proof=json.loads(a.proof.read_text())
-        if (not proof['passed'] or proof['world_size']!=2 or proof['checkpoint_sha256']!=sha(a.checkpoint)
+        if (not proof['passed'] or proof['world_size']!=world or proof['checkpoint_sha256']!=sha(a.checkpoint)
             or proof['terrain_sha256']!=manifest['terrain_sha256'] or proof['num_envs_per_rank']!=a.num_envs
             or proof['batch_size_per_rank']!=a.batch_size):raise ValueError('Dual capacity proof mismatch')
     a.out.mkdir(parents=True,exist_ok=True)
@@ -95,7 +95,7 @@ def main():
         'initial_checkpoint_sha256':sha(a.checkpoint),'initial_iteration':initial_iteration,'initial_updates':initial_updates,
         'terrain_sha256':manifest['terrain_sha256'],'num_envs_per_rank':a.num_envs,'batch_size_per_rank':a.batch_size,
         'incoming_checkpoint_world_size':incoming_world,'base_learning_rates':base_learning_rates,
-        'cpu_affinity':sorted(os.sched_getaffinity(0)),'authorization':'User: two GPUs, three hours, about12GiB per GPU',
+        'cpu_affinity':sorted(os.sched_getaffinity(0)),'authorization':'User: three hours/about12GiB per GPU; latest instruction: use one vacant GPU first',
         'scope':__doc__,'final_validation_approved':False}
     def save():record_path.write_text(json.dumps(record,indent=2,default=str))
     trainer=None;started=time.monotonic()
@@ -116,7 +116,7 @@ def main():
             'reference_frames':trainer.command.forced_frame[:count].cpu()},a.out/f'start-reset-rank-{rank}.pt')
         record.update(status='running',configuration=asdict(cfg),pinned_start_environments=count,
             return_sampling_environments=cfg.env.num_envs-count,
-            distributed_backend=torch.distributed.get_backend(),
+            distributed_backend=torch.distributed.get_backend() if torch.distributed.is_initialized() else 'single-process',
             initial_parameter_hashes=parameter_hashes(),
             initial_parameter_checksums={key:float(sum(t.detach().double().sum() for t in module.parameters()))
                 for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]})
