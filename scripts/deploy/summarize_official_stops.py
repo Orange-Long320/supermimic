@@ -28,16 +28,19 @@ def main():
     ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n) for n in names]
     if any(i < 0 for i in ids): raise ValueError('joint missing from official model')
     qadr = [model.jnt_qposadr[i] for i in ids]
-    foot_geom = []
+    foot_geom = []; foot_bodies = []
     for side in ('left', 'right'):
         body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, side+'_ankle_roll_link')
         geom = [i for i in range(model.ngeom) if model.geom_bodyid[i] == body and model.geom_type[i] == mujoco.mjtGeom.mjGEOM_SPHERE and model.geom_contype[i]]
         if not geom: raise ValueError('no foot collision spheres')
         foot_geom.append(geom)
+        foot_bodies.append(body)
     gap = np.empty((len(rows), 2))
+    ankle_xy = np.empty((len(rows), 2, 2))
     for i in range(len(rows)):
         data.qpos[:7] = np.r_[xyz[i], quats[i]]; data.qpos[qadr] = joints[i]
         mujoco.mj_kinematics(model, data)
+        ankle_xy[i] = data.xpos[foot_bodies, :2]
         for j, ids in enumerate(foot_geom):
             gap[i,j] = np.min(data.geom_xpos[ids,2]-model.geom_size[ids,0])
     def nearest(x): return int(np.argmin(np.abs(t-x)))
@@ -67,6 +70,9 @@ def main():
                    'minimum_root_height_m': float(xyz[begin:,2].min()), 'min_foot_gap_m': gap[begin:].min(axis=0).tolist(),
                    'both_feet_near_ground_fraction': float(np.mean(np.all(gap[begin:] < .005, axis=1))),
                    'near_ground_rule': 'minimum official sphere gap below 5 mm, not force contact'}
+            speed = np.linalg.norm(np.diff(ankle_xy[begin:], axis=0), axis=2)/np.diff(t[begin:])[:, None]
+            near = (gap[begin+1:] < .005) & (gap[begin:-1] < .005)
+            stand['near_ground_ankle_speed_p95_m_s'] = [float(np.percentile(speed[:, i][near[:, i]], 95)) if np.any(near[:, i]) else None for i in range(2)]
     dt=np.diff(t)
     summary={'failure':result['failure'], 'resets_after_start':result['resets_after_start'], 'seconds':float(t[-1]-t[0]),
              'frames':len(rows), 'jog_brake_fade':result['jog_brake_fade'], 'stops':stops, 'stand':stand,

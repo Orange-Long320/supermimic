@@ -14,6 +14,8 @@ def main():
     p.add_argument('--profile', type=Path, required=True)
     p.add_argument('--scene', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--start', type=float, default=0.)
+    p.add_argument('--end', type=float, default=float('inf'))
     a = p.parse_args()
     if a.out.exists(): raise ValueError('output exists')
     spec = json.loads(a.profile.read_text()); names = spec['joint_names']; n = len(names)
@@ -24,7 +26,8 @@ def main():
         if joint < 0: raise ValueError('missing official model joint '+name)
         adr.append(model.jnt_qposadr[joint])
     default = np.asarray([spec['default_joint_pos'][name] for name in names])
-    frames = [json.loads(line) for line in a.trace.open()]
+    frames = [row for line in a.trace.open() if a.start <= (row := json.loads(line))['elapsed'] <= a.end]
+    if not frames: raise ValueError('no frames in requested interval')
     model.vis.global_.offwidth = 960; model.vis.global_.offheight = 720
     renderer = mujoco.Renderer(model, width=960, height=720)
     camera = mujoco.MjvCamera(); camera.type = mujoco.mjtCamera.mjCAMERA_FREE
@@ -35,7 +38,7 @@ def main():
     try:
         for frame in frames[::2]:
             data.qpos[:7] = np.r_[frame['root'], frame['q']]
-            data.qpos[adr] = np.asarray(frame['observation'][9*n:10*n])+default
+            data.qpos[adr] = frame['joint_pos'] if 'joint_pos' in frame else np.asarray(frame['observation'][9*n:10*n])+default
             mujoco.mj_forward(model, data)
             camera.lookat[:] = [frame['root'][0], frame['root'][1], frame['root'][2]+.1]
             renderer.update_scene(data, camera=camera)
