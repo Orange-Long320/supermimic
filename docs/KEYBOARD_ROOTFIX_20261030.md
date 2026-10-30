@@ -87,3 +87,7 @@ retained_r1已启动controller2257644/train2257688，tmux sm-stop-retained-1030�
 native motion-goal对照在GPU1实际完成两种子（full0/full7），不采用；seed0 8/8无失败但前进均速0.2029m/s，五运动后最差停止净位移0.1307/0.1137/0.0928/0.1030/0.1540m，多项停止yaw/平移失败，同状态新旧站立动作RMS差0.2287。原生目标接口可用不等于该站立目标已学会；直接换分支不构成缺尾因果修复。
 
 另准备移动稳态BPTT校准的固定原策略真实留出：原66秒调度，8环境，每10步及每近零斜坡步保留obs/实际command/feedback/完整原teacher动作，无摔倒/重置才导出。固定抽样集非全部状态，明确保留范围；helper同时约束零/近零/五动作/其余斜坡样本，默认只允许新velocity_feedback_weight变化，原站立和移动主体保持。稳态32步想象不宣称覆盖动态启停，后续仍需完整闭环门检。采集与训练入口当前尚未运行。
+
+retained_r1的candidate20在GPU1完成独立8环境seed23、20秒保持，原全部门限通过，summary在keyboard_movement_retention_20261030_source/retained20-hold20-summary.json；仅早期冷保持验证，不代表运动后停止。移动固定留出collector PID2260744已启动GPU1，纯原移动路径+源站立，无训练。
+
+新增移动校准入口静态完成：零初始化反馈严格动作相等、保存重载相等；只新velocity_feedback_weight可训练，全部standing和原moving tensor冻结。WM实际门检1/8/32步速度分别[.05,.05,.15]/[.10,.10,.15]/[.20,.20,.30]，32步位置/航向[.03,.08]；只真实非零状态作32步稳态BPTT。实际非零参数变化才计有效actor更新，保存完整metadata moving_feedback=True并重载留出动作严格相等。GPU短试尚未运行；不能由冻结或动作界声称移动或停止通过。
