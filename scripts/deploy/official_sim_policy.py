@@ -121,7 +121,14 @@ def main():
     if schedule and (schedule[0][0] != 0 or any(m not in valid for _, m in schedule) or any(schedule[i][0] >= schedule[i+1][0] for i in range(len(schedule)-1))):
         raise ValueError('Invalid schedule')
     keyboard = Keyboard(a.keyboard_port) if a.keyboard_port else None
-    initialized = False; control_started = None; records = []; failure = None; failure_context = None; started = time.monotonic(); next_tick = started
+    initialized = False; control_started = None; failure = None; failure_context = None
+    frame_count = 0; first_elapsed = None; last_elapsed = None; max_overlap_error = None
+    frame_log = (a.out/'frames.jsonl').open('x')
+    # Keep the already-initialized PyTorch/MuJoCo object graph out of later
+    # cyclic-GC scans. This bounded simulation process continues collecting
+    # newly created cycles; it is not a real-time or hardware guarantee.
+    gc.collect(); gc.freeze()
+    started = time.monotonic(); next_tick = started
     previous_window = None
     print('policy ready for simulator', flush=True)
     try:
@@ -208,7 +215,13 @@ def main():
                        'phase_source': tracker.scheduler.source, 'phase_index': tracker.scheduler.index,
                        'planned_frames': len(tracker.scheduler.plan)}
                 if not a.compact_log: row.update(observation=obs, goal=goal.tolist(), action=action)
-                records.append(row)
+                frame_log.write(json.dumps(row)+'\n')
+                frame_count += 1
+                first_elapsed = elapsed if first_elapsed is None else first_elapsed
+                last_elapsed = elapsed
+                max_overlap_error = overlap_error if max_overlap_error is None else max(max_overlap_error, overlap_error)
+                if frame_count % 50 == 0:
+                    frame_log.flush()
             except socket.timeout:
                 if not initialized:
                     send(stand)
@@ -217,18 +230,18 @@ def main():
     except Exception as exc:
         failure = str(exc)
     finally:
-        if not records and failure is None:
+        if not frame_count and failure is None:
             failure = 'no policy frames received before timeout'
-        (a.out/'frames.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in records))
-        report = {'frames': len(records), 'failure': failure, 'mode': a.mode,
+        frame_log.close()
+        report = {'frames': frame_count, 'failure': failure, 'mode': a.mode,
                   'failure_context': failure_context,
                   'elapsed': time.monotonic()-started, 'resets_after_start': 0,
-                  'control_seconds': records[-1]['elapsed']-records[0]['elapsed'] if len(records) > 1 else 0.,
+                  'control_seconds': last_elapsed-first_elapsed if frame_count > 1 else 0.,
                   'schedule': schedule, 'keyboard': bool(keyboard),
                   'jog_brake_fade': a.jog_brake_fade, 'phase_events': tracker.scheduler.events,
                   'stand_anchor_gain': a.stand_anchor_gain,
                   'stand_gain_quiet_time': a.stand_gain_quiet_time,
-                  'max_future_overlap_error': max((r['future_overlap_error'] for r in records), default=None),
+                  'max_future_overlap_error': max_overlap_error,
                   'scope': 'official simulator exploratory run, simulation odometry ground truth'}
         (a.out/'result.json').write_text(json.dumps(report, indent=2)+'\n')
         print(json.dumps(report, indent=2), flush=True)
