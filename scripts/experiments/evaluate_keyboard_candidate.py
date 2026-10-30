@@ -88,11 +88,37 @@ def main():
         import torch
         import numpy as np
         ck = torch.load(a.checkpoint, map_location='cpu', weights_only=False)
-        eligible = [(key, ck[key]) for key in ('supermimic_stop', 'supermimic_velocity_feedback')
+        eligible = [(key, ck[key]) for key in ('supermimic_stop', 'supermimic_velocity_feedback', 'supermimic_composed_feedback')
                     if isinstance(ck.get(key), dict) and ck[key].get('algorithm') == 'supermimic_bptt']
         if len(eligible) != 1:
             raise ValueError('Checkpoint must identify exactly one SuperMimic BPTT candidate type')
         kind, metadata = eligible[0]
+        if kind == 'supermimic_composed_feedback':
+            components = ck.get('composed_training')
+            if not isinstance(components, dict) or set(components) != {'stop', 'moving'}:
+                raise ValueError('Composed checkpoint requires both component training records')
+            stop, moving = components['stop'], components['moving']
+            if not isinstance(stop, dict) or not isinstance(moving, dict):
+                raise ValueError('Invalid composed component records')
+            common = metadata.get('source_common_sha')
+            reference = metadata.get('reference_sha256')
+            if not common or not reference or any(m.get('algorithm') != 'supermimic_bptt'
+                    or m.get('source_sha256') != common or m.get('reference_sha256') != reference
+                    or not isinstance(m.get('actor_updates'), int) or m['actor_updates'] <= 0 for m in (stop, moving)):
+                raise ValueError('Composed component algorithms, updates or source/reference provenance differ')
+            if metadata.get('actor_updates') != stop['actor_updates'] + moving['actor_updates']:
+                raise ValueError('Composed actor update count does not match components')
+            pose_hash = metadata.get('standing_pose_sha256')
+            evidence = metadata.get('stop_pose_evidence', {})
+            if (not pose_hash or moving.get('standing_pose_sha256') != pose_hash
+                    or (stop.get('standing_pose_sha256') and stop['standing_pose_sha256'] != pose_hash)
+                    or not isinstance(evidence, dict) or evidence.get('standing_pose_sha256') != pose_hash):
+                raise ValueError('Composed component standing-pose provenance differs')
+            sources = metadata.get('components', {})
+            if not isinstance(sources, dict) or not isinstance(sources.get('base'), dict) or sources['base'].get('sha256') != common:
+                raise ValueError('Composed base component hash does not match common source')
+            if ck.get('standing_reference', {}).get('sha256') != reference:
+                raise ValueError('Composed checkpoint reference differs from its training records')
         if not metadata.get('actor_updates', 0):
             raise ValueError('Candidate has no effective actor updates')
         if metadata.get('reference_sha256') != digest(a.reference):

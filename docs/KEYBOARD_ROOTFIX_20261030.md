@@ -95,3 +95,7 @@ retained_r1的candidate20在GPU1完成独立8环境seed23、20秒保持，原全
 移动留出已完成8环境66秒无失败/重置，2872条固定抽样，zero1160/nearzero296/五动作264、272、264、264、256，另其余斜坡96。移动BPTT capacity_r1在GPU1完成20轮/16次非零更新，原全部张量与保存重载逐动作相等，峰值549.99MiB；首个66秒full0 8/8存活但未通过，前进0.2577/vy-0.0546、小跑0.5744/yaw0.0737，多项停止和运动门限失败。未采用，不从小幅平均改善推断成功。
 
 核对native velocity_reward：平移exp使用0.5m/s尺度，单轴0.05误差只损失约0.0199奖励；不匹配严格0.05精度的优化强度。提交0182646新增默认关闭precision_weight选项，在原native reward后减weight×按[.05,.05,.08]归一的三轴误差平方，之后同乘dt。下一组拟固定20轮、weight1与显式lr0.002（只反馈小投影，回溯/累计动作界保持）检验精度梯度，非直接延长原配方；原capacity源不修改。新增独立7项物理验收入口，只有全部通过才能生成accepted.pt，当前尚无新accepted策略。
+
+precision_r1实际已在GPU1完成20轮/16次有效BPTT更新、无失败/重置，controller2264570，source keyboard_velocity_precision_20261030_source及bundle7a3de2f，独立full0评测进行中。停止retained_r1已越过66秒训练回合，114轮时无摔倒、128次预设回合timeout；timeout属于训练周期边界，不是独立连续验收通过。
+
+新增CPU合成器仅准备将共同cap20初始化的两处反馈投影合并；逐张量确认停止分支只改standing_skill.feedback_weight、移动分支只新增velocity_feedback_weight，所有其余旧策略张量与base逐位一致，绑定两组件BPTT/来源/参考/pose及stop launch证据，合成后明确仅candidate。独立验收器支持该合成类型；尚未合成，不据冻结推断闭环安全或接受。
