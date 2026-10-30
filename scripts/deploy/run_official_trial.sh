@@ -5,6 +5,8 @@ run=${1:?run directory}
 name=${2:?new trial name}
 seconds=${3:?wall duration}
 fade=${4:-baseline}
+gain=${5:-1.0}
+schedule=${6:-"$run/schedule.json"}
 trial="$run/$name"
 mkdir "$trial"
 source "$run/ros-env.sh"
@@ -33,7 +35,7 @@ if [[ "$fade" != baseline ]]; then args+=(--jog-brake-fade "$fade"); fi
   export SM_ROBOT=x2_ultra PYTHONPATH="$source_root/src" OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
   exec /home/2025-Long.xh/HHD/venvs/supermimic/bin/python scripts/deploy/official_sim_policy.py \
     --profile "$profile" --dataset "$dataset" --policy "$model" --out "$trial/policy" \
-    --state-port 19179 --command-port 19180 --seconds "$seconds" --schedule "$run/schedule.json" \
+    --state-port 19179 --command-port 19180 --seconds "$seconds" --schedule "$schedule" --stand-anchor-gain "$gain" \
     --compact-log --sim-only "${args[@]}"
 ) >"$trial/policy.log" 2>&1 & policy_pid=$!
 for i in $(seq 1 45); do

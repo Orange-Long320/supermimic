@@ -17,7 +17,7 @@ from supermimic.envs.mdp.motion_library import MotionLibrary
 
 class SkillGoal:
     def __init__(self, dataset, profile, root_position, root_quat_wxyz,
-                 *, sustained=True, straight=True, horizon=10, jog_brake_fade=None):
+                 *, sustained=True, straight=True, horizon=10, jog_brake_fade=None, stand_anchor_gain=1.):
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -51,6 +51,10 @@ class SkillGoal:
         self.scheduler = SkillPhase({n: clips[n] for n in names}, {n: clips[n+'_stop'] for n in names}, brake, self.nj, horizon=horizon, loops=loops, jog_brake_fade=jog_brake_fade)
         self.position = np.asarray(root_position, dtype=float).copy()
         self.yaw = self.rotation(root_quat_wxyz).as_euler('xyz')[2]
+        if not 1. <= stand_anchor_gain <= 2.:
+            raise ValueError('stand anchor gain must be between 1 and 2')
+        self.stand_anchor_gain = stand_anchor_gain
+        self.stand_gain = 1.
 
     @staticmethod
     def rotation(wxyz):
@@ -74,6 +78,12 @@ class SkillGoal:
         target_pos, target_rot = self.fk(self.reference, [*self.position[:2], g[-1]], quat, g[:self.nj]+self.default)
         actual_pos, actual_rot = self.fk(self.actual, position, quat_wxyz, joints)
         delta_pos = actual_rot.inv().apply(target_pos-actual_pos)
+        # Experimental feedback scaling once the complete committed window is
+        # standing. Ramped so an immediate mode change cannot jump the anchor.
+        stable_reference = mode == 'stand' and np.allclose(window, self.scheduler.stand, atol=1e-7)
+        target_gain = self.stand_anchor_gain if stable_reference else 1.
+        self.stand_gain += np.clip(target_gain-self.stand_gain, -.02, .02)
+        delta_pos[:2] *= self.stand_gain
         delta_rot = (actual_rot.inv()*target_rot).as_matrix()[:, :2].reshape(-1)
         return np.r_[window.reshape(-1), delta_pos, delta_rot].astype(np.float32)
 
