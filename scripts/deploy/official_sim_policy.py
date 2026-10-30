@@ -20,7 +20,13 @@ class Keyboard:
             def do_GET(self):
                 page = b'''<!doctype html><meta charset="utf-8"><title>X2 official simulation</title><h1>X2 official simulation</h1><p>Focus this page: hold W/S/A/D; Shift+W jog. Release to stand.</p><p id="mode">stand</p><script>
 const keys=new Set();function current(){if(keys.has('KeyA'))return 'turn_left_inplace';if(keys.has('KeyD'))return 'turn_right_inplace';if(keys.has('KeyS'))return 'backward';if(keys.has('KeyW'))return keys.has('ShiftLeft')||keys.has('ShiftRight')?'jog':'walk';return 'stand'}
-function send(){let m=current();document.querySelector('#mode').textContent=m;fetch('/mode',{method:'POST',body:m}).catch(()=>{});}onkeydown=e=>{keys.add(e.code);send()};onkeyup=e=>{keys.delete(e.code);send()};function stop(){keys.clear();send()}onblur=stop;document.addEventListener('visibilitychange',()=>{if(document.hidden)stop()});setInterval(send,100);
+let inflight=false, pending=false;
+async function send(){pending=true;if(inflight)return;inflight=true;
+ while(pending){pending=false;let m=current();document.querySelector('#mode').textContent=m;
+  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),300);
+  try{await fetch('/mode',{method:'POST',body:m,signal:controller.signal,cache:'no-store'});}catch(_){}finally{clearTimeout(timer);}}
+ inflight=false;}
+onkeydown=e=>{keys.add(e.code);send()};onkeyup=e=>{keys.delete(e.code);send()};function stop(){keys.clear();send()}onblur=stop;document.addEventListener('visibilitychange',()=>{if(document.hidden)stop()});setInterval(send,100);
 </script>'''
                 self.send_response(200); self.send_header('Content-Length', str(len(page))); self.end_headers(); self.wfile.write(page)
             def do_POST(self):
