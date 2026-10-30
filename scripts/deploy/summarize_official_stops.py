@@ -68,6 +68,7 @@ def main():
             if start+seconds <= t[-1]:
                 end=nearest(start+seconds)
                 item[f'displacement_{seconds}s_m'] = float(np.linalg.norm(xyz[end,:2]-xyz[index,:2]))
+                item[f'max_excursion_{seconds}s_m'] = float(np.linalg.norm(xyz[index:end+1,:2]-xyz[index,:2], axis=1).max())
                 item[f'yaw_{seconds}s_deg'] = float(np.degrees(yaw[end]-yaw[index]))
         end=nearest(min(start+5,t[-1]))+1
         item['min_root_height_m']=float(xyz[index:end,2].min())
