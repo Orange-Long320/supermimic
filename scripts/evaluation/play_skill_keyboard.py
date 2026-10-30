@@ -33,6 +33,8 @@ def main():
     p.add_argument('--gpu', type=int, required=True)
     p.add_argument('--viewer-port', type=int, default=18080)
     p.add_argument('--keyboard-port', type=int, default=18081)
+    p.add_argument('--loop-profile', choices=['baseline', 'sustained'], default='baseline')
+    p.add_argument('--straight-heading', action='store_true')
     a = p.parse_args()
     import os
     if os.environ.get('CUDA_VISIBLE_DEVICES') != str(a.gpu):
@@ -72,7 +74,7 @@ def main():
         @torch.no_grad()
         def __call__(self, obs):
             if self.tracker is None:
-                self.tracker = SkillTracker(env, a.dataset, cfg)
+                self.tracker = SkillTracker(env, a.dataset, cfg, loop_profile=a.loop_profile, straight_heading=a.straight_heading)
             goal = self.tracker.goal(mailbox.mode())
             action = policy(obs['policy'], goal)
             self.tracker.advance()
