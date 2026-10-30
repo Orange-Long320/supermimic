@@ -115,3 +115,7 @@ stop_base_r1实际完成：GPU1预检被其他用户占用拦下、未启动；�
 实际约束缺口：teacher累计界此前只保护cold，单次动作界是整批RMS；运动后少数状态可能越过模型数据支持范围，cold保持及平均WM误差通过并不证明新动作可靠。新helper要求固定完整control留出（真实66秒五运动及松键过渡），重算完整初始化策略动作≤2e-5；对fixed control与全部真实/反事实初态都检查每样本累计RMS≤0.03/最大元素≤0.15，单步改为最差样本RMS≤0.02；保留cold800、原Adam回溯，并增加全部状态teacher prior。纯运动留出动作须逐位一致。训练/控制器必需--control-retention，不允许遗漏。尚未做新GPU验证，不据此宣布修复。
 
 collector新增保留BPTT moving projection模式和完整真实转移raw.pt：state_before、原动作/实际执行动作、command/feedback、时间/阶段/终止、末state及固定xi，逐步核对xi未变，保留输入/产物SHA。仅采样930维obs进入retention，不把每步obs大文件保存。raw供后续分阶段1/8/32模型和动作梯度核验，当前未改WM训练目标。代码静态通过，新的完整control采集待执行。
+
+controlguard_r1已启动GPU2，tmux sm-stop-controlguard-1030，wrapper2277635、collector2277643、train2278317，固定source5910e77及bundle；完整source合成策略的66秒采集已完成3300步/8环境，无终止，保存raw与2872条control留出，进入新的有界20轮。保留同源20秒cold留出，模型/门限/训练周期不延长。
+
+新增两个服务器CPU离线审计入口，尚未执行：audit_control_action_change比较旧失败fullbase与source在同一真实控制输入上的逐状态/逐阶段动作偏移，先校验source重算动作，不将相关性当唯一因果；audit_control_world_model按11阶段对新完整raw做1/8/32步预测和原模型门限，检查全局均值是否掩盖阶段失败。采集seed只在raw/report SHA与来源绑定后采用，训练seed缺失如实null，不声称统计独立，也不生成accepted。
