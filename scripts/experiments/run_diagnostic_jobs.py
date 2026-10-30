@@ -29,6 +29,17 @@ def main():
         argv = job['argv']
         if Path(argv[0]).resolve() != (expected/'bin/python').resolve() or Path(argv[1]).resolve().parent != source:
             raise ValueError('Only diagnostic entries in this pinned source folder may run')
+        gpu = env.get('CUDA_VISIBLE_DEVICES', '')
+        if not gpu or len(gpu.split(',')) != 1:
+            raise ValueError('Select one explicit GPU for the diagnostic sequence')
+        active = subprocess.check_output(['nvidia-smi', '-i', gpu, '--query-compute-apps=pid',
+                                          '--format=csv,noheader'], text=True).strip()
+        job['gpu_compute_processes_before'] = active
+        if active:
+            job.update(status='gpu_busy_not_started', finished_epoch=time.time())
+            record.update(status='gpu_busy_not_started', finished_epoch=time.time())
+            save()
+            raise RuntimeError('Diagnostic GPU is occupied; this job was not started')
         job.update(started_epoch=time.time(), status='running')
         with (source/(job['name']+'.log')).open('x') as output:
             child = subprocess.Popen(argv, env=env, stdout=output, stderr=subprocess.STDOUT)
