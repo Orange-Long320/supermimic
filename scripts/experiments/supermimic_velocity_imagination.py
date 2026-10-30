@@ -5,6 +5,7 @@ physical acceptance belong to the caller. This module uses deterministic actions
 """
 
 import copy
+import math
 import warnings
 
 import torch
@@ -23,9 +24,11 @@ class VelocityFeedbackImaginationTrainer:
     """Optimize only a new six-input velocity projection; retain a fixed teacher."""
 
     def __init__(self, policy, wm, default_joint_pos, soft_joint_limits, nominal_height,
-                 velocity_cfg, history, dt, lr=3e-5, horizon=32):
+                 velocity_cfg, history, dt, lr=3e-5, horizon=32, precision_weight=0.0):
         if history <= 0 or horizon <= 0 or dt <= 0 or lr <= 0:
             raise ValueError('history, horizon, dt and lr must be positive')
+        if not math.isfinite(precision_weight) or precision_weight < 0:
+            raise ValueError('precision_weight must be finite and nonnegative')
         if abs(float(wm.spec.dt) - float(dt)) > 1e-8:
             raise ValueError('World-model and collection time steps differ')
         if not hasattr(policy, 'standing_skill') or policy.standing_skill.mode != 'expert' or policy.standing_skill.feedback_dim != 6:
@@ -44,6 +47,7 @@ class VelocityFeedbackImaginationTrainer:
         if self.default_joint_pos.ndim != 1 or self.soft_joint_limits.shape != (len(self.default_joint_pos), 2):
             raise ValueError('Invalid joint positions or soft joint limits')
         self.nominal_height = float(nominal_height)
+        self.precision_weight = float(precision_weight)
         self.velocity_cfg, self.history, self.dt, self.horizon, self.lr = velocity_cfg, history, float(dt), horizon, float(lr)
         self.cfg = PolicyTrainerCfg(horizon=horizon, history=history, lr=lr)
         prototype = torch.zeros(1, STATE_DIM, device=self.device, dtype=self.dtype)
@@ -151,7 +155,11 @@ class VelocityFeedbackImaginationTrainer:
                 teacher_costs.append((new_latent - latent).square().mean(-1) + (action - target).square().mean(-1))
                 state = self.wm.step(state, action, xi)
                 reward = velocity_reward(state, command, action, previous, self.soft_joint_limits,
-                                         self.nominal_height, self.default_joint_pos) * self.dt
+                                         self.nominal_height, self.default_joint_pos)
+                if self.precision_weight:
+                    scale = state.new_tensor([.05, .05, .08])
+                    reward = reward - self.precision_weight * ((measured_velocity(state) - command) / scale).square().sum(-1)
+                reward = reward * self.dt
                 _, soft = fall_signals(state, self.nominal_height, self.velocity_cfg)
                 imagined_states.append(state)
                 imagined_actions.append(action)
@@ -161,6 +169,7 @@ class VelocityFeedbackImaginationTrainer:
                 obs_history = obs_history[1:] + [analytic_observation(state, action, xi, self.default_joint_pos)]
                 previous = action
             ss, aa, rr = torch.stack(imagined_states), torch.stack(imagined_actions), torch.stack(rewards)
+            imagined_velocity_rmse = (measured_velocity(ss[1:]) - command).square().mean((0, 1)).sqrt().detach()
             dhat, alive = torch.stack(terminations), torch.stack(survival)
             command_sequence = command.expand(self.horizon + 1, -1, -1)
             rollout = ImagRollout(states=ss, actions=aa, rewards=rr, dhat=dhat, survival=alive,
@@ -259,6 +268,8 @@ class VelocityFeedbackImaginationTrainer:
                     raise FloatingPointError('Non-finite critic gradients')
                 self.value_opt.step()
         return {'objective': float(objective.detach()), 'reward_mean': float(rr.detach().mean()),
+                'precision_weight': self.precision_weight,
+                'imagined_velocity_rmse_before_actor_step': imagined_velocity_rmse.cpu().tolist(),
                 'survival_final': float(alive[-1].detach().mean()), 'projection_grad_norm': float(grad_norm),
                 'imagined_teacher_loss': float(imagined_cost.detach()), 'retention_teacher_loss': float(retained_cost.detach()),
                 'step_accepted': accepted, 'step_attempts': attempt + 1, 'step_lr': used_lr,
@@ -273,4 +284,4 @@ class VelocityFeedbackImaginationTrainer:
         return copy.deepcopy({'velocity_feedback_weight': self.projection.detach().clone(),
                               'projection_optimizer': self.projection_opt.state_dict(),
                               'value': self.value.state_dict(), 'value_optimizer': self.value_opt.state_dict(),
-                              'retention': self.retention})
+                              'retention': self.retention, 'precision_weight': self.precision_weight})

@@ -31,6 +31,7 @@ def main():
     p.add_argument('--iterations', type=int, default=120)
     p.add_argument('--hours', type=float, default=.5)
     p.add_argument('--lr', type=float, default=None)
+    p.add_argument('--precision-weight', type=float, default=0.)
     a = p.parse_args()
     gpu = os.environ.get('CUDA_VISIBLE_DEVICES', '')
     if Path(sys.prefix).resolve() != Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve() or not gpu or len(gpu.split(',')) != 1:
@@ -44,6 +45,8 @@ def main():
             p.error(f'Missing input: {path}')
     import numpy as np
     import torch
+    if not np.isfinite(a.precision_weight) or a.precision_weight < 0:
+        p.error('Precision weight must be finite and nonnegative')
     from supermimic.envs import SuperMimicEnvCfgArgs, make_env
     from supermimic.eval.benchmark import load_policy_from_checkpoint
     from supermimic.kinematics.rotations import heading_yaw
@@ -99,7 +102,7 @@ def main():
     ref = np.load(a.reference)
     trainer = VelocityFeedbackImaginationTrainer(policy, wm, cmd.library.default_joint_pos,
         env.scene['robot'].data.soft_joint_pos_limits[0], float(ref['body_pos_w'][0, 0, 2]),
-        VelocityCfg(**saved['velocity']), saved['policy']['history'], env.step_dt, lr=lr, horizon=32)
+        VelocityCfg(**saved['velocity']), saved['policy']['history'], env.step_dt, lr=lr, horizon=32, precision_weight=a.precision_weight)
     trainer.set_retention(*(retention[k].to('cuda:0') for k in ('obs', 'command', 'feedback', 'source_action')))
     actual_trainable = {name for name, param in policy.named_parameters() if param.requires_grad}
     if actual_trainable != {'velocity_feedback_weight'}:
@@ -155,7 +158,7 @@ def main():
                 raise AssertionError('Initial checkpoint roundtrip changed actions')
     del initial_loaded, initial_ck
     initial_path.unlink()
-    runtime_config = dict(algorithm='supermimic_bptt', actor_lr=lr,
+    runtime_config = dict(algorithm='supermimic_bptt', actor_lr=lr, precision_weight=a.precision_weight,
         actor_lr_source='checkpoint.config.policy_trainer.lr' if a.lr is None else 'explicit_override',
         imagination_horizon=32, history=history, dt=env.step_dt, wm_window=32,
         wm_batches_per_update=a.wm_batches, wm_batch=a.wm_batch, actor_batch=a.batch,
@@ -175,7 +178,7 @@ def main():
         source_sha256=sha(a.checkpoint), reference_sha256=sha(a.reference), standing_pose_sha256=sha(a.standing_pose),
         walk_sha256=sha(a.dataset / 'walk.npz'), retention_sha256=sha(a.moving_retention), entry_sha256=sha(__file__),
         helper_sha256=sha(Path(__file__).with_name('supermimic_velocity_imagination.py')),
-        source_commit=os.environ.get('SM_SOURCE_COMMIT', 'unspecified'), actor_lr=lr,
+        source_commit=os.environ.get('SM_SOURCE_COMMIT', 'unspecified'), actor_lr=lr, precision_weight=a.precision_weight,
         lr_source='checkpoint.config.policy_trainer.lr' if a.lr is None else 'explicit_override',
         zero_projection_equivalent=True, initial_checkpoint_roundtrip=True, frozen_policy_tensors=sorted(frozen), control_matmul_precision='ieee',
         scope='deterministic moving steady-state BPTT; no near-zero counterfactual training or physical acceptance'), indent=2)+'\n')
