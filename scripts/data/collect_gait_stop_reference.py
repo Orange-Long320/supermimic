@@ -106,28 +106,40 @@ def main():
         cmd.force_standing_reset = False
         cmd.forced_frame[:] = 0
         observations, _ = env.reset()
-        if not (cmd.frame == 0).all() or not (cmd.library.last_frame_of(cmd.frame) == frame_count - 1).all():
-            raise ValueError('Single-clip frame indexing differs from the source clip')
         robot = env.scene['robot']
         limits = robot.data.soft_joint_pos_limits.clone()
+        initial = cmd.state_io.read().clone()
+        states.append(initial.cpu())
+        report['first_goal_frame'] = cmd.frame.cpu().tolist()
+        report['last_goal_frame'] = cmd.library.last_frame_of(cmd.frame).cpu().tolist()
+        # The pinned env.reset writes physical frame 0, then computes the next
+        # target at dt=0. First action therefore targets frame 1, not frame 0.
+        if not (cmd.frame == 1).all() or not (cmd.library.last_frame_of(cmd.frame) == frame_count - 1).all():
+            raise ValueError('Pinned next-frame goal indexing differs from expected reset flow')
+        initial_ref = cmd.library.ref(torch.zeros_like(cmd.frame))
+        expected_joint = initial_ref.joint_pos.clamp(limits[..., 0], limits[..., 1])
+        if not torch.allclose(initial[:, 7:NQ], expected_joint, atol=1e-6, rtol=0):
+            raise ValueError('Physical initialization does not match reference frame 0')
+        tracking_steps = frame_count - 1
+        report['tracking_steps'] = tracking_steps
+        report['initial_physical_reference_frame'] = 0
         if limits.shape[1] != len(names):
             raise ValueError('Joint limit shape differs from source joint order')
         context = StandingContext(cmd, env)
         zero = torch.zeros(a.num_envs, 3, device='cuda')
-        states.append(cmd.state_io.read().clone().cpu())
         stop_steps = round(a.stop_seconds / env.step_dt)
         if abs(stop_steps * env.step_dt - a.stop_seconds) > 1e-6:
             raise ValueError('Stop duration must be an integer number of control steps')
         with torch.no_grad():
-            for step in range(frame_count + stop_steps):
-                tracking = step < frame_count
+            for step in range(tracking_steps + stop_steps):
+                tracking = step < tracking_steps
                 if tracking:
-                    if not (cmd.frame == step).all():
+                    if not (cmd.frame == step + 1).all():
                         raise RuntimeError('Tracking frame advanced unexpectedly')
                     action = policy(observations['policy'], observations['goal'])
                     label = reference_commands(cmd.library, cmd.frame).clone()
                 else:
-                    if step == frame_count:
+                    if step == tracking_steps:
                         cmd.is_velocity[:] = True
                         cmd.set_manual_command((0., 0., 0.))
                     action = standing_action(policy, observations['policy'], zero, context)
@@ -143,11 +155,11 @@ def main():
         s = torch.stack(states)
         act = torch.stack(actions)
         torch.save(dict(states=s, actions=act, phase=torch.tensor(phases), commands=torch.stack(commands),
-                        stop_start_index=frame_count, failures=failures), a.out / 'raw.pt')
+                        stop_start_index=tracking_steps, failures=failures), a.out / 'raw.pt')
         report['raw_sha256'] = digest(a.out / 'raw.pt')
         report['steps_completed'] = len(actions)
         report['failures'] = failures
-        if failures or len(actions) != frame_count + stop_steps:
+        if failures or len(actions) != tracking_steps + stop_steps:
             report['status'] = 'rejected_failure'
         else:
             x = s.to('cuda')
@@ -159,7 +171,7 @@ def main():
                 raise ValueError('Standing reference joint order differs from clip')
             ref_arm = torch.as_tensor(ref['joint_pos'][0], device='cuda')[
                 [i for i, n in enumerate(names) if any(k in n for k in ('shoulder', 'elbow', 'wrist'))]]
-            start = frame_count
+            start = tracking_steps
             one = start + round(1 / env.step_dt)
             late = x[-(round(3 / env.step_dt) + 1):]
             speed = measured_velocity(late)
