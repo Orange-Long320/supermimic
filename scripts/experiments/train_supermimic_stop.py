@@ -20,6 +20,14 @@ def sha(path):
     return h.hexdigest()
 
 
+def sampleable_start_mask(replay, history):
+    """Use the same ring-history protection for readiness and actual sampling."""
+    import torch
+    safe = replay.valid & ~replay.terminal
+    tgrid = torch.arange(replay.T, device=replay.device)[None, :]
+    return safe & ((replay.ptr[:, None]-tgrid-1) % replay.T < replay.T-history-1)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     for key in ('checkpoint', 'dataset', 'reference', 'standing-pose', 'out'):
@@ -162,10 +170,7 @@ def main():
         return replay.s[ee, tt], replay.a_exec[ee[:-1], tt[:-1]], replay.xi[e, t]
 
     def starts(mask, n):
-        safe = replay.valid & ~replay.terminal
-        tgrid = torch.arange(T, device='cuda')[None, :]
-        safe &= (replay.ptr[:, None] - tgrid - 1) % T < T - history - 1
-        e, t = replay._sample_from_mask(safe & mask, n)
+        e, t = replay._sample_from_mask(sampleable_start_mask(replay, history) & mask, n)
         tt = (t[None] + torch.arange(history, device='cuda')[:, None] - (history - 1)) % T
         ee = e[None].expand(history, -1)
         same = (replay.ep_id[ee, tt] == replay.ep_id[e, t][None]) & replay.valid[ee, tt]
@@ -177,7 +182,7 @@ def main():
         return e, t, replay.s[ee, tt], actions
 
     def actor_batch():
-        eligible = train_env[:, None] & replay.valid & ~replay.terminal
+        eligible = train_env[:, None] & sampleable_start_mask(replay, history)
         after_mask = eligible & meta_stop & ~meta_cold
         cold_mask = eligible & meta_stop & meta_cold
         move_mask = eligible & ~meta_stop & ~meta_cold
@@ -308,8 +313,12 @@ def main():
                 row['model_gate'] = (all(x < y for x, y in zip(metrics['8'], (.10, .10, .15)))
                     and all(x < y for x, y in zip(metrics['32'], (.20, .20, .30)))
                     and all(x < y for x, y in zip(pose_metrics['32'], (.03, .08))))
-                actor_ready = (bool((replay.valid & ~replay.terminal & train_env[:, None] & meta_stop & meta_cold).any())
-                    and bool((replay.valid & ~replay.terminal & train_env[:, None] & meta_stop & ~meta_cold).any()))
+                actor_eligible = sampleable_start_mask(replay, history) & train_env[:, None]
+                cold_starts = int((actor_eligible & meta_stop & meta_cold).sum())
+                after_starts = int((actor_eligible & meta_stop & ~meta_cold).sum())
+                row['sampleable_cold_starts'] = cold_starts
+                row['sampleable_post_motion_stop_starts'] = after_starts
+                actor_ready = cold_starts > 0 and after_starts > 0
                 row['actor_samples_ready'] = actor_ready
                 if row['model_gate'] and actor_ready:
                     wm.requires_grad_(False)
