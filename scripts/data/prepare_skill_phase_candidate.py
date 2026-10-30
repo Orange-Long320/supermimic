@@ -19,8 +19,9 @@ def main():
     p.add_argument('--loops', type=int, default=3)
     p.add_argument('--stop-frames', type=int, default=75)
     p.add_argument('--hold-frames', type=int, default=250)
+    p.add_argument('--release-lead', type=int, default=0, help='Commit continuation frames after release before braking')
     a = p.parse_args()
-    if a.out.exists() or not (0 < a.loop_start < a.loop_end and a.join_frames >= 3 and a.loops >= 1 and a.stop_frames >= 4 and a.hold_frames >= 1):
+    if a.out.exists() or not (0 < a.loop_start < a.loop_end and a.join_frames >= 3 and a.loops >= 1 and a.stop_frames >= 4 and a.hold_frames >= 1 and 0 <= a.release_lead <= a.join_frames):
         p.error('Invalid bounds or output already exists')
     from supermimic.data.motion_convert import load_g1_model, convert_csv_to_npz
     model = load_g1_model()
@@ -56,8 +57,15 @@ def main():
     loop_tail.extend(bridge(prev,dest,velocity(a.loop_end),velocity(a.loop_start),a.join_frames))
     for row in original[a.loop_start+1:a.loop_end+1]:
         x=row.copy();x[:2]+=offset;loop_tail.append(x)
-    start=seq[-1].copy();end=original[10].copy();end[:2]=start[:2]+velocity(a.loop_end)[:2]*a.stop_frames/fps*.5
-    for i,row in enumerate(bridge(start,end,velocity(a.loop_end),np.zeros_like(end),a.stop_frames)):
+    for row in loop_tail[:a.release_lead]:
+        seq.append(row.copy());phases.append('committed_walk')
+    start=seq[-1].copy();end=original[10].copy()
+    start_v=(seq[-1]-seq[-2])*fps if a.release_lead else velocity(a.loop_end)
+    end[:2]=start[:2]+start_v[:2]*a.stop_frames/fps*.5
+    # Bound joint tangents to a monotone cubic, avoiding Hermite limit overshoot.
+    delta=end[7:]-start[7:]; duration=a.stop_frames/fps
+    start_v[7:]=np.where(start_v[7:]*delta>0,np.sign(delta)*np.minimum(abs(start_v[7:]),3*abs(delta)/duration),0.)
+    for i,row in enumerate(bridge(start,end,start_v,np.zeros_like(end),a.stop_frames)):
         seq.append(row);phases.append('brake' if i<a.stop_frames//2 else 'settle')
     for _ in range(a.hold_frames):seq.append(end.copy());phases.append('stand')
     a.out.mkdir(parents=True)
