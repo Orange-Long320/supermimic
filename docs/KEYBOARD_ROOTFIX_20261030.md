@@ -77,3 +77,9 @@ walk bridge_r2已真实完成203步原动作+300步停止，2/2无失败/重置�
 五动作连续停止诊断已启动：tmux sm-gait-five-1030，controller2255755，GPU2，固定源码838a2b4及bundle保存在gait_stop_bridge_five_20261030_source；每段2环境seed0，原完整跟踪后零指令6秒。显式hard gate仅用于物理候选审计，soft越界仍报告；原reset会裁soft边界但保留速度，因此hard-only候选尚不视为训练兼容，不直接加入训练。
 
 下轮SuperMimic修正为默认只训练standing_skill.feedback_weight，冻结站立encoder/decoder及全部运动张量。必需输入上述实测通过的800行站立留出集，初始化权重/参考/姿态SHA三重绑定，teacher重算动作误差≤2e-5。固定留出与实际cold状态均约束相对原teacher的累计最大单样本动作RMS≤0.03、最大元素差≤0.15；每步动作RMS变化≤0.02，回溯同时恢复Adam。学习率默认读取原checkpoint policy_trainer.lr，实测2e-4；不是沿用未经核对的3e-6。默认在线7项物理门检，EMA成对测试仅显式--compare-ema启用。以上实现静态通过，物理效果待新短试。
+
+五段诊断完成（原跟踪→停止，各2环境）：walk/backward全部物理末段门检通过；left在一环境末帧yaw0.118rad/s/full dq0.569rad/s失败，right停止1秒后最大位移0.0629m失败，jog0.0766/0.0582m失败，均不作为训练参考。全部晚3秒平均平移≤0.01275m/s、无重置；只能说明多数可趋静，不能证明任意相位键盘停止。
+
+retained_r1已启动controller2257644/train2257688，tmux sm-stop-retained-1030，GPU2，128环境/120周期/30分钟上限，固定源444effc及bundle在keyboard_supermimic_retained_20261030_source。采用feedback-only及固定真实cold留出，不接入hard-only桥接候选。
+
+新增独立native_stand_goal诊断入口：原velocity移动路径保留，近零分支以原motion encoder+静态站立NPZ原生goal替代独立站立expert，锚定当前停止位置和航向，原10帧obs历史保持，记录同状态新旧动作差与全部失败。该分支仅诊断，无训练、无PPO；报告明确override，不可当accepted。片尾数据不被当前velocity推理直接读取，故必须经过训练/教师对齐或显式motion-goal分支才可能影响键盘结果。静态通过，实际结果待执行。
