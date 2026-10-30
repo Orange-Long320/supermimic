@@ -20,6 +20,7 @@ def main():
     p.add_argument('--hours', type=float, default=.2)
     p.add_argument('--lr', type=float, default=3e-6)
     p.add_argument('--sigma', type=float, default=.04)
+    p.add_argument('--probe-only', action='store_true', help='Record first-rollout likelihood consistency without optimizing')
     a = p.parse_args()
     expected = '/home/2025-Long.xh/HHD/venvs/supermimic/bin/python'
     if Path(sys.prefix).resolve() != Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve() or os.path.realpath(sys.executable) != os.path.realpath(expected):
@@ -260,7 +261,24 @@ def main():
             if iteration == 1:
                 with torch.no_grad():
                     check_ids = eligible_ids[:128]
-                    logp = torch.distributions.Normal(actor(xx[check_ids], ff[check_ids]), a.sigma).log_prob(uu[check_ids]).sum(-1)
+                    small_mean = actor(xx[check_ids], ff[check_ids])
+                    logp = torch.distributions.Normal(small_mean, a.sigma).log_prob(uu[check_ids]).sum(-1)
+                    saved_logp = torch.distributions.Normal(old_mean[check_ids], a.sigma).log_prob(uu[check_ids]).sum(-1)
+                    same_mean = actor(xx[:a.num_envs], ff[:a.num_envs])
+                    same_logp = torch.distributions.Normal(same_mean, a.sigma).log_prob(uu[:a.num_envs]).sum(-1)
+                    probe = dict(saved_mean_logp_max_error=float((saved_logp-old_lp[check_ids]).abs().max()),
+                        same_batch_mean_max_error=float((same_mean-old_mean[:a.num_envs]).abs().max()),
+                        same_batch_logp_max_error=float((same_logp-old_lp[:a.num_envs]).abs().max()),
+                        subset_mean_max_error=float((small_mean-old_mean[check_ids]).abs().max()),
+                        subset_logp_max_error=float((logp-old_lp[check_ids]).abs().max()),
+                        initial_group_kl=grouped_kl(), matmul_precision=torch.get_float32_matmul_precision(),
+                        cuda_matmul_allow_tf32=torch.backends.cuda.matmul.allow_tf32)
+                    (a.out / 'likelihood_probe.json').write_text(json.dumps(probe, indent=2) + '\n')
+                    torch.save(dict(obs=xx[:a.num_envs],feedback=ff[:a.num_envs],sampled=uu[:a.num_envs],
+                                    old_logp=old_lp[:a.num_envs],old_mean=old_mean[:a.num_envs]), a.out/'likelihood_probe.pt')
+                    print(json.dumps(dict(likelihood_probe=probe)), flush=True)
+                    if a.probe_only:
+                        return
                     assert torch.allclose(logp, old_lp[check_ids], atol=1e-4, rtol=1e-5), 'PPO branch labels changed before update'
                     assert max(grouped_kl().values(), default=0.) < 1e-8
                     verify_core(xx[:128])
