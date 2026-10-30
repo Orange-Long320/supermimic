@@ -11,6 +11,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--dataset',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True);p.add_argument('--gpu',type=int,required=True)
+    p.add_argument('--mode',choices=['all','walk','jog'],default='all');p.add_argument('--hold-seconds',type=float,default=20.)
     a=p.parse_args()
     import os
     if a.out.exists() or os.environ.get('CUDA_VISIBLE_DEVICES')!=str(a.gpu):
@@ -34,12 +35,17 @@ def main():
     env=ManagerBasedRlEnv(env_cfg,device='cuda:0')
     cmd=env.command_manager.get_term('motion');cmd.forced_frame[:]=initial
     schedule=[(0.,'stand'),(3.,'walk'),(7.,'stand'),(11.,'backward'),(15.,'stand'),(19.,'turn_left_inplace'),(23.,'stand'),(27.,'turn_right_inplace'),(31.,'stand'),(35.,'jog'),(39.,'stand')]
+    duration=45.
+    if a.mode!='all':
+        if a.hold_seconds<5:raise ValueError('Hold must be at least 5 seconds')
+        schedule=[(0.,'stand'),(3.,a.mode),(3.+a.hold_seconds,'stand')]
+        duration=3.+a.hold_seconds+5.
     a.out.mkdir(parents=True)
     try:
         obs,_=env.reset();origin=env.scene.env_origins[0].cpu().numpy();tracker=SkillTracker(env,a.dataset,cfg)
         states=[]; goals=[]; modes=[];failures=[];overlap=[]; previous=None
         with torch.no_grad():
-            for step in range(50*45):
+            for step in range(round(50*duration)):
                 time=step*.02
                 mode=next(v for t,v in reversed(schedule) if time>=t)
                 goal=tracker.goal(mode);window=tracker.scheduler.window()

@@ -24,6 +24,7 @@ class SkillPhase:
         self.source = 'stand'
         self.index = 0
         self.events = []
+        self.steps = 0
 
     def _blend(self, source, template):
         """Correct a target trajectory to match the published tail and tangent."""
@@ -88,6 +89,10 @@ class SkillPhase:
             score += .0025*np.mean((candidates[:, self.nj:2*self.nj]-tail[self.nj:2*self.nj])**2, axis=1)
             start = lo+int(np.argmin(score))
             end = min(start+15, len(clip)-1)
+            self.events.append({'kind':'loop_seam', 'skill':self.source, 'scheduler_step':self.steps,
+                'from_frame':len(clip)-1, 'to_frame':start, 'bridge_end_frame':end,
+                'joint_position_rms_rad':float(np.sqrt(np.mean((tail[:self.nj]-clip[start,:self.nj])**2))),
+                'joint_velocity_rms_rad_s':float(np.sqrt(np.mean((tail[self.nj:2*self.nj]-clip[start,self.nj:2*self.nj])**2)))})
             self.plan.extend(self._blend(tail, clip[start:end+1]))
             self.index = end+1
             return self.plan.popleft()
@@ -101,3 +106,4 @@ class SkillPhase:
     def advance(self):
         self.queue.popleft()
         self.queue.append(self._next())
+        self.steps += 1
