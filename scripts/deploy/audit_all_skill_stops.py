@@ -59,7 +59,9 @@ def main():
         raise ValueError('release event count mismatch')
     stops = []
     for idx, event in zip(changes, events):
-        end = int(np.searchsorted(t, t[idx] + 5., side='right'))
+        next_motion = np.flatnonzero(modes[idx:] != 'stand')
+        next_motion_idx = idx + int(next_motion[0]) if len(next_motion) else len(rows)
+        end = min(int(np.searchsorted(t, t[idx] + 5., side='right')), next_motion_idx)
         segment = slice(idx, end)
         dist = np.linalg.norm(pos[segment, :2] - pos[idx, :2], axis=1)
         item = {'skill': str(modes[idx-1]), 'release_time_s': float(t[idx]),
@@ -69,10 +71,10 @@ def main():
                 'min_root_height_5s_m': float(pos[segment, 2].min()),
                 'max_tilt_5s_deg': float(tilt[segment].max()),
                 'min_foot_gaps_5s_m': gap[segment].min(axis=0).tolist()}
-        if t[idx] + 4 <= t[-1]:
+        if t[idx] + 4 <= t[end-1]:
             at4 = min(int(np.searchsorted(t, t[idx] + 4)), len(t)-1)
             item['displacement_4s_m'] = float(np.linalg.norm(pos[at4, :2] - pos[idx, :2]))
-            after = (t >= t[idx] + 4) & (t < t[idx] + 5)
+            after = (t >= t[idx] + 4) & (t < t[idx] + 5) & (np.arange(len(t)) < end)
             if np.any(after):
                 item['toe_offset_abs_p95_4_to_5s_m'] = float(np.percentile(abs(toe_delta[after]), 95))
         stops.append(item)
