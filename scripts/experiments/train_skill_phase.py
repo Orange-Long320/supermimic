@@ -26,7 +26,7 @@ def main():
         from supermimic.data.motion_convert import load_g1_model
         m=load_g1_model();root=Path('/home/2025-Long.xh/HHD/data/supermimic')
         base=root/'data/video/gait_five_train_20261029_r1';existing=json.loads((base/'manifest.json').read_text())
-        candidates=[root/'logs/skill_contact_project110_20261030_r2',root/'logs/skill_contact_projectoff14_20261030_r1']
+        candidates=[root/'logs/skill_user_pose_fast06_20261030_r1']
         if a.dataset.exists():raise ValueError('Dataset exists')
         a.dataset.mkdir(parents=True);clips=[]
         for c in existing['clips']:
@@ -34,17 +34,23 @@ def main():
             if sha(source)!=c['sha256']:raise ValueError('Source hash mismatch')
             shutil.copy2(source,a.dataset/(c['name']+'.npz'));clips.append({'name':c['name'],'source':str(source),'sha256':sha(source),'type':'prior_gait'})
         for i,folder in enumerate(candidates):
-            meta=json.loads((folder/'manifest.json').read_text());source=folder/'candidate.npz'
-            if sha(source)!=meta['candidate_sha256'] or meta['contact_projection']['support_max_ankle_target_error_m']>.001:raise ValueError('Reference provenance or support residual failed')
-            name=f'staged_stop_{i}';stand=meta['phases'].index('stand');length=stand+200
+            meta=json.loads((folder/'manifest.json').read_text());source=folder/'natural-stop.npz'
+            if sha(source)!=meta['stop_sha256'] or meta['stop_frames']!=30 or not meta['entry_velocity_matched']:
+                raise ValueError('Confirmed 0.6s reference provenance mismatch')
+            name='confirmed_stop';stand=int(meta['standing_frame']);length=stand+200
             with np.load(source,allow_pickle=False) as z:
-                arrays={k:(z[k][:length].copy() if k in ('joint_pos','joint_vel','body_pos_w','body_quat_w','body_lin_vel_w','body_ang_vel_w') else z[k].copy()) for k in z.files}
-            if len(arrays['joint_pos'])!=length or float(arrays['fps'][0])!=50:raise ValueError('Invalid reference length or fps')
+                arrays={k:z[k].copy() for k in z.files}
+            if float(arrays['fps'][0])!=50 or stand>=len(arrays['joint_pos']):raise ValueError('Invalid reference length or fps')
+            frame_keys=('joint_pos','joint_vel','body_pos_w','body_quat_w','body_lin_vel_w','body_ang_vel_w')
+            for key in frame_keys:
+                values=arrays[key]
+                if np.max(np.abs(values[stand:]-values[stand]))>1e-5:raise ValueError('Expected stationary final reference: '+key)
+                arrays[key]=np.concatenate([values[:stand],np.repeat(values[stand:stand+1],200,axis=0)],axis=0)
             q=arrays['joint_pos'];hard=float(np.maximum(np.maximum(m.jnt_range[1:,0]-q,q-m.jnt_range[1:,1]),0).max())
             if hard>1e-4 or not all(np.isfinite(v).all() for v in arrays.values() if np.issubdtype(v.dtype,np.number)):raise ValueError('Input check failed')
             out=a.dataset/(name+'.npz');np.savez(out,**arrays)
-            clips.append({'name':name,'source':str(source),'source_sha256':sha(source),'sha256':sha(out),'frames':length,'stand_frames':200,'hard_limit_excess_rad':hard,'type':'exploratory_contact_projected_stop'})
-        manifest={'clips':clips,'scope':'exploratory; reference dynamics and stop acceptance not validated','excluded':'28-frame release candidate failed stance constraint','initial_checkpoint_sha256':sha(a.checkpoint)}
+            clips.append({'name':name,'source':str(source),'source_sha256':sha(source),'sha256':sha(out),'frames':length,'brake_frames':30,'stand_frames':200,'hard_limit_excess_rad':hard,'type':'user_confirmed_exploratory_stop'})
+        manifest={'clips':clips,'scope':'User requested exploratory training; reference dynamics and stop acceptance not validated','initial_checkpoint_sha256':sha(a.checkpoint)}
         (a.dataset/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');print(json.dumps(manifest,indent=2));return
     if os.environ.get('CUDA_VISIBLE_DEVICES')!=str(a.gpu):raise ValueError('Explicit physical GPU required')
     busy=subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-compute-apps=pid','--format=csv,noheader,nounits'],text=True).strip()
