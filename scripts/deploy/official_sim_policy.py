@@ -53,6 +53,7 @@ def main():
     p.add_argument('--mode', choices=('stand', 'walk', 'jog'), default='stand')
     p.add_argument('--schedule', type=Path, help='JSON array of [seconds, skill]')
     p.add_argument('--keyboard-port', type=int)
+    p.add_argument('--jog-brake-fade', type=float, help='Experimental root-velocity fade duration in seconds')
     p.add_argument('--seconds', type=float, default=10.)
     p.add_argument('--sim-only', action='store_true', required=True)
     a = p.parse_args()
@@ -85,7 +86,7 @@ def main():
         commands.sendto(json.dumps({'target': target}, allow_nan=False).encode(), ('127.0.0.1', a.command_port))
     a.out.mkdir(parents=True)
     history, previous = deque(maxlen=10), (0.,)*n
-    tracker = SkillGoal(a.dataset, a.profile, [0., 0., .65], [1., 0., 0., 0.])
+    tracker = SkillGoal(a.dataset, a.profile, [0., 0., .65], [1., 0., 0., 0.], jog_brake_fade=a.jog_brake_fade)
     schedule = json.loads(a.schedule.read_text()) if a.schedule else None
     valid = ('stand', 'walk', 'jog', 'backward', 'turn_left_inplace', 'turn_right_inplace')
     if schedule and (schedule[0][0] != 0 or any(m not in valid for _, m in schedule) or any(schedule[i][0] >= schedule[i+1][0] for i in range(len(schedule)-1))):
@@ -141,7 +142,9 @@ def main():
                 target = [d+s*v for d, s, v in zip(default, scale, action)]
                 send(target); previous = action; tracker.advance()
                 records.append({'elapsed': elapsed, 'mode': mode, 'root': position, 'q': quat,
-                                'target': target, 'observation': obs, 'goal': goal.tolist(), 'action': action})
+                                'target': target, 'observation': obs, 'goal': goal.tolist(), 'action': action,
+                                'phase_source': tracker.scheduler.source, 'phase_index': tracker.scheduler.index,
+                                'planned_frames': len(tracker.scheduler.plan)})
             except socket.timeout:
                 if not initialized:
                     send(stand)
@@ -157,6 +160,7 @@ def main():
                   'elapsed': time.monotonic()-started, 'resets_after_start': 0,
                   'control_seconds': records[-1]['elapsed']-records[0]['elapsed'] if len(records) > 1 else 0.,
                   'schedule': schedule, 'keyboard': bool(keyboard),
+                  'jog_brake_fade': a.jog_brake_fade, 'phase_events': tracker.scheduler.events,
                   'scope': 'official simulator exploratory run, simulation odometry ground truth'}
         (a.out/'result.json').write_text(json.dumps(report, indent=2)+'\n')
         print(json.dumps(report, indent=2), flush=True)

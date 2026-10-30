@@ -9,12 +9,15 @@ import numpy as np
 
 
 class SkillPhase:
-    def __init__(self, gaits, stops, brake_start, joint_count, horizon=10, dt=.02, loops=None):
+    def __init__(self, gaits, stops, brake_start, joint_count, horizon=10, dt=.02, loops=None, jog_brake_fade=None):
         self.gaits = {k: np.asarray(v, dtype=np.float32) for k, v in gaits.items()}
         self.stops = {k: np.asarray(v, dtype=np.float32) for k, v in stops.items()}
         self.brake_start = brake_start
         self.nj, self.horizon, self.dt = joint_count, horizon, dt
         self.loops = loops or {}
+        if jog_brake_fade is not None and not 0.1 <= jog_brake_fade <= .6:
+            raise ValueError('jog brake fade must be within 0.1–0.6 seconds')
+        self.jog_brake_fade = jog_brake_fade
         for name, (start, end) in self.loops.items():
             if name not in self.gaits or not (0 <= start < end < len(self.gaits[name]) and end-start >= 20):
                 raise ValueError('Invalid gait cycle bounds')
@@ -58,13 +61,23 @@ class SkillPhase:
         if mode == self.requested:
             return
         tail = self.queue[-1].copy()
+        old_source, old_index = self.source, self.index
         self.plan.clear()
         previous = self.requested
         if previous != 'stand':
             stop = self.stops[previous][self.brake_start[previous]:]
             # The trained stop has a 30-frame brake followed by a static hold.
             brake = stop[:31]
-            for row in self._blend(tail, brake):
+            rows = self._blend(tail, brake)
+            if previous == 'jog' and self.jog_brake_fade is not None:
+                # Leave the already published horizon untouched. Blend the root
+                # linear velocity smoothly to zero after that horizon; the
+                # virtual reference position integrates this same velocity.
+                # Joint/contact feasibility requires physical verification.
+                t = np.clip(np.arange(1, len(rows)+1)*self.dt/self.jog_brake_fade, 0., 1.)
+                fade = 1. - (3*t*t-2*t*t*t)
+                rows[:, 2*self.nj+6:2*self.nj+9] *= fade[:, None]
+            for row in rows:
                 self.plan.append(row)
             tail = self.plan[-1].copy()
         if mode != 'stand':
@@ -76,7 +89,9 @@ class SkillPhase:
         else:
             self.source, self.index = 'stand', 0
         self.requested = mode
-        self.events.append({'from': previous, 'to': mode, 'committed_frames': self.horizon, 'planned_frames': len(self.plan)})
+        self.events.append({'from': previous, 'to': mode, 'scheduler_step': self.steps,
+                            'source_at_selection': old_source, 'next_frame_at_selection': old_index,
+                            'committed_frames': self.horizon, 'planned_frames': len(self.plan)})
 
     def _next(self):
         if self.plan:

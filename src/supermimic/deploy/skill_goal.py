@@ -17,7 +17,7 @@ from supermimic.envs.mdp.motion_library import MotionLibrary
 
 class SkillGoal:
     def __init__(self, dataset, profile, root_position, root_quat_wxyz,
-                 *, sustained=True, straight=True, horizon=10):
+                 *, sustained=True, straight=True, horizon=10, jog_brake_fade=None):
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -48,7 +48,7 @@ class SkillGoal:
                 clips[name][:, 2*self.nj+5] = 0.
                 clips[name+'_stop'][:, 2*self.nj+5] = 0.
         loops = {n: choose_cycle(dataset/(n+'.npz'), speed) for n, speed in [('walk', .22), ('jog', .5)]} if sustained else {}
-        self.scheduler = SkillPhase({n: clips[n] for n in names}, {n: clips[n+'_stop'] for n in names}, brake, self.nj, horizon=horizon, loops=loops)
+        self.scheduler = SkillPhase({n: clips[n] for n in names}, {n: clips[n+'_stop'] for n in names}, brake, self.nj, horizon=horizon, loops=loops, jog_brake_fade=jog_brake_fade)
         self.position = np.asarray(root_position, dtype=float).copy()
         self.yaw = self.rotation(root_quat_wxyz).as_euler('xyz')[2]
 

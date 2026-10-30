@@ -39,3 +39,25 @@ def test_configured_loop_restarts_before_slow_clip_tail():
     seams = [e for e in scheduler.events if e.get('kind') == 'loop_seam']
     assert len(seams) >= 2
     assert all(e['from_frame'] == 55 and e['to_frame'] == 25 for e in seams)
+
+
+def test_jog_brake_fade_preserves_committed_window_and_other_features():
+    nj = 2
+    clip = np.zeros((100, 2*nj+10), dtype=np.float32)
+    clip[:, 2*nj+2] = -1.
+    clip[:, 2*nj+6] = 1.
+    stops = clip.copy(); stops[-1, 2*nj+6] = 0.
+    args = ({'walk': clip, 'jog': clip}, {'walk': stops, 'jog': stops}, {'walk': 0, 'jog': 0}, nj)
+    baseline = SkillPhase(*args)
+    candidate = SkillPhase(*args, jog_brake_fade=.4)
+    for scheduler in (baseline, candidate):
+        scheduler.select('jog')
+        for _ in range(50): scheduler.advance()
+        before = scheduler.window().copy()
+        scheduler.select('stand')
+        np.testing.assert_array_equal(scheduler.window(), before)
+    b, c = np.stack(baseline.plan), np.stack(candidate.plan)
+    np.testing.assert_allclose(b[:, :2*nj+6], c[:, :2*nj+6])
+    np.testing.assert_allclose(b[:, 2*nj+9:], c[:, 2*nj+9:])
+    assert 0 < c[0, 2*nj+6] < b[0, 2*nj+6]
+    np.testing.assert_allclose(c[19:, 2*nj+6:2*nj+9], 0, atol=1e-7)
