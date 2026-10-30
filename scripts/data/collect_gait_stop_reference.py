@@ -28,6 +28,8 @@ def main():
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--stop-seconds', type=float, default=6.)
     p.add_argument('--num-envs', type=int, default=2)
+    p.add_argument('--limit-gate', choices=('soft', 'hard'), default='soft',
+                   help='Always enforce mechanical limits; optionally also require the narrower training margin')
     a = p.parse_args()
     expected = Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve()
     gpu = os.environ.get('CUDA_VISIBLE_DEVICES', '')
@@ -94,6 +96,7 @@ def main():
         gpu=gpu, seed=a.seed, num_envs=a.num_envs, native_clip_end_timeout_removed=True,
         scope='Simulated policy-generated reference, not a human original or an accepted training input',
         reset_count=0, fps=fps, frame_count=frame_count, stop_seconds=a.stop_seconds,
+        joint_limit_gate=a.limit_gate,
         command_labels='tracking: reference velocity at the current clip frame; stop: zero',
         contact_scope='CPU geometric contact audit, not a measurement of contact force or stability')
     states, actions, phases, commands = [], [], [], []
@@ -193,6 +196,18 @@ def main():
                 raise ValueError('CPU contact model does not match collected robot state')
             if not torch.isfinite(x).all():
                 raise ValueError('Collected physical state contains non-finite values')
+            joint_ids = [int(model.actuator_trnid[i, 0]) for i in range(model.nu)]
+            mapped_names = [model.joint(i).name.rsplit('/', 1)[-1] for i in joint_ids]
+            if mapped_names != names:
+                raise ValueError('Mechanical-limit actuator order differs from exported joints')
+            hard = torch.as_tensor(model.jnt_range[joint_ids].copy(), device=x.device, dtype=x.dtype)
+            limited = torch.as_tensor(model.jnt_limited[joint_ids].copy(), device=x.device).bool()
+            hard_excess = torch.maximum(hard[:, 0]-q, q-hard[:, 1]).clamp_min(0)*limited
+            hard_violation = hard_excess.amax((0, 2)) > 1e-6
+            report['joint_limits'] = dict(names=names, hard=hard.cpu().tolist(),
+                soft=limits[0].cpu().tolist(), mechanically_limited=limited.cpu().tolist(),
+                max_hard_excess_rad=hard_excess.amax((0, 2)).cpu().tolist(),
+                soft_margin_is_training_range=True, hard_tolerance_rad=1e-6)
             data = mujoco.MjData(model)
             pattern = re.compile(PROFILE['foot_geom_regex'])
             foot = {'left': set(), 'right': set()}
@@ -240,6 +255,7 @@ def main():
                 transition_max_displacement=transition_pos.max(0).values.tolist(),
                 transition_max_heading_change=transition_yaw.max(0).values.tolist(),
                 soft_limit_violation=violation.tolist(), final_planar_speed=final_speed[..., :2].norm(dim=-1).tolist(),
+                hard_limit_violation=hard_violation.tolist(),
                 final_abs_yaw=final_speed[..., 2].abs().tolist(),
                 final_arm_velocity_rms=final_dq[..., arms].square().mean(-1).sqrt().tolist(),
                 final_joint_velocity_rms=final_dq.square().mean(-1).sqrt().tolist())
@@ -250,7 +266,8 @@ def main():
                 (metrics['final_arm_velocity_rms'], .12), (metrics['final_joint_velocity_rms'], .3),
                 (metrics['late_net_displacement'], .03), (metrics['late_heading_change'], .08),
                 (metrics['transition_max_displacement'], .05), (metrics['transition_max_heading_change'], .1)]
-            passed = all(all(v <= limit for v in values) for values, limit in checks) and not any(metrics['soft_limit_violation']) and bool((contact_fraction >= .95).all()) and bool(counts[-1].all())
+            limit_passed = not any(metrics['hard_limit_violation']) and (a.limit_gate=='hard' or not any(metrics['soft_limit_violation']))
+            passed = all(all(v <= limit for v in values) for values, limit in checks) and limit_passed and bool((contact_fraction >= .95).all()) and bool(counts[-1].all())
             report['status'] = 'validated_candidate' if passed else 'rejected_metrics'
             if passed:
                 fk = G1Kinematics(load_g1_model(), device='cuda')
