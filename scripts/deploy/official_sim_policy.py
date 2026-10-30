@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class Keyboard:
     def __init__(self, port):
-        self.mode, self.when = 'stand', 0.
+        self.mode, self.when, self.ready = 'stand', 0., False
         self.lock = threading.Lock()
         mailbox = self
         class Handler(BaseHTTPRequestHandler):
@@ -24,7 +24,7 @@ let inflight=false, pending=false;
 async function send(){pending=true;if(inflight)return;inflight=true;
  while(pending){pending=false;let m=current();document.querySelector('#mode').textContent=m;
   const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),300);
-  try{await fetch('/mode',{method:'POST',body:m,signal:controller.signal,cache:'no-store'});}catch(_){}finally{clearTimeout(timer);}}
+  try{const r=await fetch('/mode',{method:'POST',body:m,signal:controller.signal,cache:'no-store'});document.querySelector('#mode').textContent=r.status===409?'Waiting for simulation state':r.ok?m:'Connection error';}catch(_){document.querySelector('#mode').textContent='Connection error';}finally{clearTimeout(timer);}}
  inflight=false;}
 onkeydown=e=>{keys.add(e.code);send()};onkeyup=e=>{keys.delete(e.code);send()};function stop(){keys.clear();send()}onblur=stop;document.addEventListener('visibilitychange',()=>{if(document.hidden)stop()});setInterval(send,100);
 </script>'''
@@ -36,12 +36,19 @@ onkeydown=e=>{keys.add(e.code);send()};onkeyup=e=>{keys.delete(e.code);send()};f
                     if not 0 < length < 32: raise ValueError()
                     mode = self.rfile.read(length).decode('ascii')
                     if mode not in ('stand', 'walk', 'jog', 'backward', 'turn_left_inplace', 'turn_right_inplace'): raise ValueError()
-                    with mailbox.lock: mailbox.mode, mailbox.when = mode, time.monotonic()
+                    with mailbox.lock:
+                        if not mailbox.ready:
+                            self.send_error(409, 'Simulation state not ready'); return
+                        mailbox.mode, mailbox.when = mode, time.monotonic()
                 except (ValueError, UnicodeError): self.send_error(400); return
                 self.send_response(204); self.end_headers()
             def log_message(self, *args): pass
         self.server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def mark_ready(self):
+        with self.lock:
+            self.ready = True
 
     def read(self):
         with self.lock:
@@ -145,7 +152,9 @@ def main():
                 if len(history) < 10:
                     send(stand)
                     continue
-                if control_started is None: control_started = now
+                if control_started is None:
+                    control_started = now
+                    if keyboard: keyboard.mark_ready()
                 elapsed = now-control_started
                 mode = keyboard.read() if keyboard else (next(m for t, m in reversed(schedule) if elapsed >= t) if schedule else (a.mode if 3. <= elapsed < a.seconds-3. else 'stand'))
                 goal = tracker.goal(position, quat, q, mode)

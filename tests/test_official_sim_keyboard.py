@@ -14,6 +14,9 @@ class SimKeyboardTest(unittest.TestCase):
             return urlopen(Request(url, data=value, method='POST'), timeout=2)
         try:
             self.assertEqual(keyboard.read(), 'stand')
+            with self.assertRaises(HTTPError) as error: post(b'walk')
+            self.assertEqual(error.exception.code, 409)
+            keyboard.mark_ready()
             with post(b'walk') as response: self.assertEqual(response.status, 204)
             self.assertEqual(keyboard.read(), 'walk')
             with post(b'stand'): pass
