@@ -17,16 +17,21 @@ def main():
         raise ValueError('New output directory and explicit GPU required')
     import torch
     from supermimic.control.skill_tracker import SkillTracker
-    from supermimic.envs import SuperMimicEnvCfgArgs,make_env
+    from mjlab.envs import ManagerBasedRlEnv
+    from supermimic.envs import SuperMimicEnvCfgArgs,make_env_cfg
     from supermimic.eval.benchmark import load_policy_from_checkpoint
     torch.set_num_threads(2)
     policy,cfg=load_policy_from_checkpoint(a.checkpoint,'cuda:0')
     stand_file=a.dataset/'walk_stop.npz'
     with np.load(stand_file) as z:initial=len(z['joint_pos'])-1
-    env=make_env(SuperMimicEnvCfgArgs(npz_files=[str(stand_file)],num_envs=1,seed=0,
+    env_cfg=make_env_cfg(SuperMimicEnvCfgArgs(npz_files=[str(stand_file)],num_envs=1,seed=0,
         future_frames=cfg['env']['future_frames'],episode_length_s=1000.,action_noise_std=0.,obs_noise=False,
-        reset_noise=False,domain_randomization=False,record_transitions=False,sampling_mode='start',anchor_obs=True),device='cuda:0')
-    env.cfg.auto_reset=False
+        reset_noise=False,domain_randomization=False,record_transitions=False,sampling_mode='start',anchor_obs=True))
+    env_cfg.auto_reset=False
+    # The backing stand clip is deliberately frozen; its clip-end timeout is
+    # irrelevant to the scheduled goals. Physical termination terms remain.
+    del env_cfg.terminations['clip_end']
+    env=ManagerBasedRlEnv(env_cfg,device='cuda:0')
     cmd=env.command_manager.get_term('motion');cmd.forced_frame[:]=initial
     schedule=[(0.,'stand'),(3.,'walk'),(7.,'stand'),(11.,'backward'),(15.,'stand'),(19.,'turn_left_inplace'),(23.,'stand'),(27.,'turn_right_inplace'),(31.,'stand'),(35.,'jog'),(39.,'stand')]
     a.out.mkdir(parents=True)
@@ -44,8 +49,6 @@ def main():
                 q=env.sim.data.qpos[0].cpu().numpy().copy();q[:3]-=origin
                 states.append(np.r_[q,env.sim.data.qvel[0].cpu().numpy()].copy());goals.append(goal[0].cpu().numpy().copy());modes.append(mode)
                 obs,_,terminated,timeout,_=env.step(action)
-                # The fixed backing reference ends immediately: its clip_end is
-                # not a physical failure. Record the actual height/tilt terms.
                 physical={n:bool(env.termination_manager.get_term(n)[0]) for n in ('root_height','root_tilt') if n in env.termination_manager.active_terms}
                 if len(physical)!=2:raise RuntimeError('Expected physical termination terms')
                 if any(physical.values()):failures.append({'step':step,'time_s':time,'terms':physical});break

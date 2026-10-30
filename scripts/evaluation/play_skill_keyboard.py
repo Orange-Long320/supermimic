@@ -43,17 +43,20 @@ def main():
     from mjlab.rl import RslRlVecEnvWrapper
     from mjlab.viewer import ViserPlayViewer
     from supermimic.control.skill_tracker import SkillTracker
-    from supermimic.envs import SuperMimicEnvCfgArgs, make_env
+    from mjlab.envs import ManagerBasedRlEnv
+    from supermimic.envs import SuperMimicEnvCfgArgs, make_env_cfg
     from supermimic.eval.benchmark import load_policy_from_checkpoint
     torch.set_num_threads(2)
     policy, cfg = load_policy_from_checkpoint(a.checkpoint, 'cuda:0')
     stand = a.dataset / 'walk_stop.npz'
     with np.load(stand) as z:
         initial = len(z['joint_pos'])-1
-    env = make_env(SuperMimicEnvCfgArgs(npz_files=[str(stand)], num_envs=1, seed=0,
+    env_cfg = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=[str(stand)], num_envs=1, seed=0,
         future_frames=cfg['env']['future_frames'], episode_length_s=1000., action_noise_std=0., obs_noise=False,
-        reset_noise=False, domain_randomization=False, record_transitions=False, sampling_mode='start', anchor_obs=True), device='cuda:0')
-    env.cfg.auto_reset = False
+        reset_noise=False, domain_randomization=False, record_transitions=False, sampling_mode='start', anchor_obs=True))
+    env_cfg.auto_reset = False
+    del env_cfg.terminations['clip_end']
+    env = ManagerBasedRlEnv(env_cfg, device='cuda:0')
     cmd = env.command_manager.get_term('motion')
     cmd.forced_frame[:] = initial
     mailbox = Mailbox()
@@ -61,6 +64,8 @@ def main():
     server = viser.ViserServer(host='127.0.0.1', port=a.viewer_port, label='X2 skill phase - experimental')
     class Controller:
         tracker = None
+        def reset(self):
+            self.tracker = None
         @torch.no_grad()
         def __call__(self, obs):
             if self.tracker is None:
