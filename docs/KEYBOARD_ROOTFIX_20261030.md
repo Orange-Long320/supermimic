@@ -91,3 +91,7 @@ native motion-goal对照在GPU1实际完成两种子（full0/full7），不采�
 retained_r1的candidate20在GPU1完成独立8环境seed23、20秒保持，原全部门限通过，summary在keyboard_movement_retention_20261030_source/retained20-hold20-summary.json；仅早期冷保持验证，不代表运动后停止。移动固定留出collector PID2260744已启动GPU1，纯原移动路径+源站立，无训练。
 
 新增移动校准入口静态完成：零初始化反馈严格动作相等、保存重载相等；只新velocity_feedback_weight可训练，全部standing和原moving tensor冻结。WM实际门检1/8/32步速度分别[.05,.05,.15]/[.10,.10,.15]/[.20,.20,.30]，32步位置/航向[.03,.08]；只真实非零状态作32步稳态BPTT。实际非零参数变化才计有效actor更新，保存完整metadata moving_feedback=True并重载留出动作严格相等。GPU短试尚未运行；不能由冻结或动作界声称移动或停止通过。
+
+移动留出已完成8环境66秒无失败/重置，2872条固定抽样，zero1160/nearzero296/五动作264、272、264、264、256，另其余斜坡96。移动BPTT capacity_r1在GPU1完成20轮/16次非零更新，原全部张量与保存重载逐动作相等，峰值549.99MiB；首个66秒full0 8/8存活但未通过，前进0.2577/vy-0.0546、小跑0.5744/yaw0.0737，多项停止和运动门限失败。未采用，不从小幅平均改善推断成功。
+
+核对native velocity_reward：平移exp使用0.5m/s尺度，单轴0.05误差只损失约0.0199奖励；不匹配严格0.05精度的优化强度。提交0182646新增默认关闭precision_weight选项，在原native reward后减weight×按[.05,.05,.08]归一的三轴误差平方，之后同乘dt。下一组拟固定20轮、weight1与显式lr0.002（只反馈小投影，回溯/累计动作界保持）检验精度梯度，非直接延长原配方；原capacity源不修改。新增独立7项物理验收入口，只有全部通过才能生成accepted.pt，当前尚无新accepted策略。
