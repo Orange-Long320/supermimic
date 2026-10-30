@@ -157,6 +157,7 @@ def main():
                        'joint_pos': q, 'joint_vel': qvel, 'target': target,
                        'goal_current': window[0].tolist(), 'anchor': goal[-9:].tolist(),
                        'future_overlap_error': overlap_error,
+                       'stand_gain': tracker.stand_gain, 'stand_quiet_steps': tracker.stand_quiet_steps,
                        'phase_source': tracker.scheduler.source, 'phase_index': tracker.scheduler.index,
                        'planned_frames': len(tracker.scheduler.plan)}
                 if not a.compact_log: row.update(observation=obs, goal=goal.tolist(), action=action)
