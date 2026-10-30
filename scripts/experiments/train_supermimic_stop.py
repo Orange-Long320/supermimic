@@ -1,0 +1,299 @@
+"""Fit a real-transition world model and train only the standing expert in imagination.
+
+The model gate is diagnostic and never constitutes physical policy acceptance.
+"""
+from pathlib import Path
+import argparse
+import copy
+import hashlib
+import json
+import os
+import sys
+import time
+
+
+def sha(path):
+    h = hashlib.sha256()
+    with Path(path).open('rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    for key in ('checkpoint', 'dataset', 'reference', 'standing-pose', 'out'):
+        p.add_argument('--' + key, type=Path, required=True)
+    p.add_argument('--num-envs', type=int, default=256)
+    p.add_argument('--batch', type=int, default=128)
+    p.add_argument('--wm-batch', type=int, default=128)
+    p.add_argument('--wm-batches', type=int, default=20)
+    p.add_argument('--iterations', type=int, default=120)
+    p.add_argument('--hours', type=float, default=.25)
+    p.add_argument('--lr', type=float, default=3e-6)
+    a = p.parse_args()
+    expected = Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve()
+    gpu = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+    if Path(sys.prefix).resolve() != expected or not gpu or len(gpu.split(',')) != 1:
+        p.error('Use the dedicated server environment and explicitly select one GPU')
+    if not 8 <= a.num_envs <= 1024 or min(a.batch, a.wm_batch, a.wm_batches, a.iterations) < 1 or a.iterations > 1200 or not 0 < a.hours <= 1 or a.lr <= 0:
+        p.error('Invalid training bounds')
+    if a.out.exists():
+        p.error('Output directory already exists')
+
+    import numpy as np
+    import torch
+    from supermimic.envs import SuperMimicEnvCfgArgs, make_env
+    from supermimic.eval.benchmark import load_policy_from_checkpoint
+    from supermimic.kinematics.rotations import heading_yaw
+    from supermimic.locomotion.config import VelocityCfg
+    from supermimic.locomotion.task import measured_velocity
+    from supermimic.policy.standing import StandingContext
+    from supermimic.robots.dimensions import PROFILE
+    from supermimic.world_model.state_spec import StateSpecCfg
+    from supermimic.world_model.world_model import WorldModel, WorldModelCfg
+    from supermimic_stop_imagination import StopImaginationTrainer
+
+    torch.set_num_threads(2)
+    torch.manual_seed(29)
+    policy, saved = load_policy_from_checkpoint(a.checkpoint, 'cuda:0')
+    source = torch.load(a.checkpoint, map_location='cpu', weights_only=False)
+    if not hasattr(policy, 'standing_skill') or policy.standing_skill.mode != 'expert' or policy.standing_skill.feedback_dim != 6:
+        raise ValueError('Six-input standing expert required')
+    if source.get('standing_reference', {}).get('sha256') != sha(a.reference):
+        raise ValueError('Reference mismatch')
+    if hasattr(policy, 'velocity_feedback_weight'):
+        delattr(policy, 'velocity_feedback_weight')
+    policy.requires_grad_(False)
+    frozen = {k: v.detach().cpu().clone() for k, v in policy.state_dict().items() if not k.startswith('standing_skill.')}
+    wc = copy.deepcopy(saved['world_model'])
+    wc['state_spec'] = StateSpecCfg(**wc['state_spec'])
+    wm = WorldModel(WorldModelCfg(**wc), None, 'cuda:0')
+    missing, extra = wm.load_state_dict(source['wm'], strict=False)
+    if missing or any(not k.startswith('heads.') for k in extra):
+        raise ValueError(f'Unexpected world model keys: {missing}, {extra}')
+    wm_opt = torch.optim.Adam(wm.dynamics.parameters(), lr=saved['wm_trainer']['lr'])
+    cfg = SuperMimicEnvCfgArgs(npz_files=[str(a.dataset / 'walk.npz')], num_envs=a.num_envs,
+        seed=29, future_frames=saved['env']['future_frames'], episode_length_s=66.,
+        action_noise_std=0., obs_noise=False, reset_noise=False, domain_randomization=False,
+        record_transitions=True, replay_capacity=256, anchor_obs=saved['env']['anchor_obs'],
+        velocity=VelocityCfg(**saved['velocity']))
+    env = make_env(cfg, device='cuda:0')
+    # make_env configures the backend; force IEEE precision after that configuration.
+    torch.backends.cuda.matmul.fp32_precision = 'ieee'
+    torch.backends.cudnn.fp32_precision = 'ieee'
+    env.cfg.auto_reset = False
+    cmd = env.command_manager.get_term('motion')
+    cmd.is_velocity[:] = True
+    cmd.force_standing_reset = True
+    cmd.set_manual_command((0., 0., 0.))
+    obs, _ = env.reset()
+    context = StandingContext(cmd, env)
+    replay = env.recorder_manager.get_term('replay').buffer
+    ref = np.load(a.reference)
+    if len(ref['joint_pos']) < 500 or np.max(np.abs(ref['joint_vel'])) >= 1e-6:
+        raise ValueError('Reference must be static')
+    qref = torch.as_tensor(ref['joint_pos'][0], device='cuda', dtype=obs['policy'].dtype)
+    arm_ids = [i for i, n in enumerate(PROFILE['joint_names']) if any(k in n for k in ('shoulder', 'elbow', 'wrist'))]
+    pose = json.loads(a.standing_pose.read_text())['joint_positions_rad']
+    arm_target = torch.tensor([pose[PROFILE['joint_names'][i]] for i in arm_ids], device='cuda', dtype=qref.dtype)
+    trainer = StopImaginationTrainer(policy, wm, cmd.library.default_joint_pos, qref, arm_ids, arm_target,
+        float(ref['body_pos_w'][0, 0, 2]), VelocityCfg(**saved['velocity']), saved['policy']['history'], env.step_dt,
+        lr=a.lr, horizon=32)
+    E, T = replay.E, replay.T
+    meta_xy = torch.zeros(E, T, 2, device='cuda')
+    meta_yaw = torch.zeros(E, T, device='cuda')
+    meta_age = torch.zeros(E, T, device='cuda')
+    meta_cold = torch.zeros(E, T, device='cuda', dtype=torch.bool)
+    meta_stop = torch.zeros(E, T, device='cuda', dtype=torch.bool)
+    ids = torch.arange(E, device='cuda')
+    train_env = ids % 4 != 3
+    # Both disjoint train and held-out environments include permanent standing.
+    cold = (ids // 4) % 4 == 0
+    choices = torch.tensor([[.3, 0., 0.], [-.2, 0., 0.], [0., 0., .4], [0., 0., -.4], [.6, 0., 0.]], device='cuda')
+    offset = (ids // 2) % 5
+    rates = torch.tensor([1., 1., 1.5], device='cuda') * env.step_dt
+    goal = cmd.velocity_command.clone()
+    stop_age = torch.zeros(E, device='cuda')
+    ever_moved = torch.zeros(E, device='cuda', dtype=torch.bool)
+    history = saved['policy']['history']
+    trace = []
+    total_falls = total_timeouts = actor_updates = 0
+    started = time.monotonic()
+    a.out.mkdir(parents=True, exist_ok=False)
+    (a.out / 'launch.json').write_text(json.dumps(dict(argv=sys.argv, gpu=gpu, checkpoint_sha256=sha(a.checkpoint),
+        reference_sha256=sha(a.reference), pose_sha256=sha(a.standing_pose), walk_sha256=sha(a.dataset / 'walk.npz'),
+        entry_sha256=sha(__file__), model_gate='diagnostic only; physical policy acceptance required'), indent=2) + '\n')
+
+    def verify_core(x):
+        for key, old in frozen.items():
+            if not torch.equal(policy.state_dict()[key].detach().cpu(), old):
+                raise AssertionError(f'Moving core changed: {key}')
+        with torch.no_grad():
+            for c in choices:
+                c = c.expand(len(x), -1)
+                original = policy.decoder(policy.encoders['velocity'](x, c), x)
+                actual = policy.velocity_action(x, c, torch.zeros(len(x), 6, device=x.device))
+                if not torch.equal(original, actual):
+                    raise AssertionError('Moving action changed')
+
+    def sample_windows(mask, n):
+        e, t = replay._sample_from_mask(replay.window_mask(32) & mask[:, None], n)
+        tt = (t[None] + torch.arange(33, device='cuda')[:, None]) % T
+        ee = e[None].expand(33, -1)
+        return replay.s[ee, tt], replay.a_exec[ee[:-1], tt[:-1]], replay.xi[e, t]
+
+    def starts(mask, n):
+        safe = replay.valid & ~replay.terminal
+        tgrid = torch.arange(T, device='cuda')[None, :]
+        safe &= (replay.ptr[:, None] - tgrid - 1) % T < T - history - 1
+        e, t = replay._sample_from_mask(safe & mask, n)
+        tt = (t[None] + torch.arange(history, device='cuda')[:, None] - (history - 1)) % T
+        ee = e[None].expand(history, -1)
+        same = (replay.ep_id[ee, tt] == replay.ep_id[e, t][None]) & replay.valid[ee, tt]
+        first = same.float().argmax(0)
+        tt = torch.where(same, tt, tt[first, torch.arange(n, device='cuda')][None].expand_as(tt))
+        prev = (tt - 1) % T
+        prev_ok = (replay.ep_id[ee, prev] == replay.ep_id[e, t][None]) & replay.valid[ee, prev] & ~replay.ep_start[ee, tt]
+        actions = torch.where(prev_ok[..., None], replay.a[ee, prev], torch.zeros_like(replay.a[ee, prev]))
+        return e, t, replay.s[ee, tt], actions
+
+    def actor_batch():
+        eligible = train_env[:, None] & replay.valid & ~replay.terminal
+        after_mask = eligible & meta_stop & ~meta_cold
+        cold_mask = eligible & meta_stop & meta_cold
+        move_mask = eligible & ~meta_stop & ~meta_cold
+        nmove = a.batch // 2 if move_mask.any() else 0
+        nafter = (a.batch-nmove)//2
+        ncold = a.batch-nmove-nafter
+        parts = [starts(after_mask, nafter), starts(cold_mask, ncold)]
+        if nmove:
+            parts.append(starts(move_mask, nmove))
+        nstop = nafter+ncold
+        e = torch.cat([v[0] for v in parts]); t = torch.cat([v[1] for v in parts])
+        hs = torch.cat([v[2] for v in parts], dim=1); ha = torch.cat([v[3] for v in parts], dim=1)
+        xy = meta_xy[e, t].clone(); yaw = meta_yaw[e, t].clone(); age = meta_age[e, t].clone()
+        xy[nstop:] = hs[-1, nstop:, :2]; yaw[nstop:] = heading_yaw(hs[-1, nstop:, 3:7]); age[nstop:] = 0
+        return dict(hist_states=hs, hist_actions=ha, xi=replay.xi[e, t], anchor_xy=xy,
+                    anchor_yaw=yaw, stop_age=age, is_cold=meta_cold[e, t])
+
+    @torch.no_grad()
+    def heldout():
+        states, actions, xi = sample_windows(~train_env, a.wm_batch)
+        pred = states[0]; out = {}; pose_error = {}
+        for j in range(32):
+            pred = wm.step(pred, actions[j], xi)
+            if j + 1 in (1, 8, 32):
+                out[str(j + 1)] = (measured_velocity(pred) - measured_velocity(states[j + 1])).square().mean(0).sqrt().tolist()
+                delta_yaw = heading_yaw(pred[:, 3:7])-heading_yaw(states[j+1, :, 3:7])
+                delta_yaw = torch.atan2(torch.sin(delta_yaw), torch.cos(delta_yaw))
+                pose_error[str(j+1)] = [float((pred[:, :2]-states[j+1, :, :2]).square().sum(-1).mean().sqrt()),
+                                        float(delta_yaw.square().mean().sqrt())]
+        return out, pose_error
+
+    def save(iteration):
+        verify_core(obs['policy'][:128])
+        ck = copy.deepcopy(source)
+        ck['policy'] = {k: v.detach().cpu() for k, v in policy.state_dict().items()}
+        ck['standing_skill'] = dict(ck['standing_skill'], moving_feedback=False)
+        ck['wm'].update({k: v.detach().cpu() for k, v in wm.state_dict().items()})
+        for key in ('standing_ppo_state', 'transition_ppo_state', 'physical_stop', 'control_feedback', 'standing_feedback', 'transition_standing',
+                    'wm_opt', 'policy_opt', 'critic_opt', 'velocity_training'):
+            ck.pop(key, None)
+        ck['supermimic_stop'] = dict(algorithm='supermimic_bptt', iteration=iteration, source_sha256=sha(a.checkpoint), reference_sha256=sha(a.reference),
+            entry_sha256=sha(__file__), config={k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()},
+            trace=trace, wm_optimizer=wm_opt.state_dict(), actor_state=trainer.save_state(),
+            actor_updates=actor_updates, control_matmul_precision='ieee', source_commit=os.environ.get('SM_SOURCE_COMMIT', 'unspecified'),
+            validation='model gate only; policy physical acceptance pending')
+        path = a.out / f'candidate_{iteration}.pt'
+        torch.save(ck, path)
+        path.with_suffix('.ready').write_text(str(iteration))
+
+    try:
+        last_saved = 0
+        for iteration in range(1, a.iterations + 1):
+            with torch.no_grad():
+                for _ in range(32):
+                    age = env.episode_length_buf * env.step_dt
+                    desired = torch.zeros_like(goal)
+                    for j, start in enumerate((3., 15., 27., 39., 51.)):
+                        active = ~cold & (age >= start) & (age < start + 7.)
+                        desired[active] = choices[(offset[active] + j) % 5]
+                    goal = goal + (desired - goal).clamp(-rates, rates)
+                    cmd.manual_command = goal
+                    cmd._refresh_velocity()
+                    zero = goal.square().sum(-1) < 1e-6
+                    stop_age = torch.where(zero, stop_age + env.step_dt, torch.zeros_like(stop_age))
+                    feedback = context.features(goal)
+                    ever_moved |= goal.square().sum(-1) >= policy.standing_skill.radius ** 2
+                    gate = policy.standing_skill.gate(goal)
+                    base = policy.decoder(policy.encoders['velocity'](obs['policy'], goal), obs['policy'])
+                    stand = policy.standing_skill(obs['policy'], feedback)
+                    action = (1 - gate[:, None]) * base + gate[:, None] * (stand + .03 * torch.randn_like(stand))
+                    ptr = replay.ptr.clone()
+                    before_state = cmd.state_io.read().clone() if iteration == 1 else None
+                    meta_xy[ids, ptr] = context.anchor_xy
+                    meta_yaw[ids, ptr] = context.anchor_yaw
+                    meta_age[ids, ptr] = stop_age
+                    meta_cold[ids, ptr] = ~ever_moved
+                    meta_stop[ids, ptr] = zero
+                    obs, _, term, tout, _ = env.step(action)
+                    done = term.clone() | tout.clone()
+                    total_falls += int(term.sum()); total_timeouts += int(tout.sum())
+                    if before_state is not None and (~done).any():
+                        check_ids = (~done).nonzero().squeeze(-1)
+                        assert torch.equal(replay.s[check_ids, ptr[check_ids]], before_state[check_ids]), 'Replay metadata points to a different physical state'
+                    if done.any():
+                        reset_ids = done.nonzero().squeeze(-1)
+                        goal[reset_ids] = 0; stop_age[reset_ids] = 0; ever_moved[reset_ids] = False
+                        obs, _ = env.reset(env_ids=reset_ids)
+                        context.reset(reset_ids)
+            row = dict(iteration=iteration, seconds=time.monotonic()-started, replay_rows=replay.size,
+                       actor_updated=False, model_gate=False, total_falls=total_falls, total_timeouts=total_timeouts)
+            mask = replay.window_mask(32)
+            if iteration >= 2 and (mask & train_env[:, None]).any() and (mask & ~train_env[:, None]).any():
+                if iteration == 2:
+                    row['heldout_before_first_fit'] = heldout()
+                wm.requires_grad_(True)
+                for _ in range(a.wm_batches):
+                    states, actions, xi = sample_windows(train_env, a.wm_batch)
+                    pred = states[0]; loss = 0.
+                    for j in range(32):
+                        pred = wm.step(pred, actions[j], xi)
+                        loss = loss + wm.spec.error_vector(pred, states[j+1]).square().sum(-1).mean() / 32
+                    wm_opt.zero_grad(set_to_none=True); loss.backward()
+                    norm = torch.nn.utils.clip_grad_norm_(wm.dynamics.parameters(), saved['wm_trainer']['grad_clip'])
+                    if not torch.isfinite(loss) or not torch.isfinite(norm):
+                        raise FloatingPointError('Nonfinite world model loss or gradient')
+                    wm_opt.step()
+                row['wm_loss'] = float(loss.detach())
+                metrics, pose_metrics = heldout(); row['heldout_velocity_rmse'] = metrics; row['heldout_pose_rmse'] = pose_metrics
+                row['model_gate'] = (all(x < y for x, y in zip(metrics['8'], (.10, .10, .15)))
+                    and all(x < y for x, y in zip(metrics['32'], (.20, .20, .30)))
+                    and all(x < y for x, y in zip(pose_metrics['32'], (.03, .08))))
+                actor_ready = (bool((replay.valid & ~replay.terminal & train_env[:, None] & meta_stop & meta_cold).any())
+                    and bool((replay.valid & ~replay.terminal & train_env[:, None] & meta_stop & ~meta_cold).any()))
+                row['actor_samples_ready'] = actor_ready
+                if row['model_gate'] and actor_ready:
+                    wm.requires_grad_(False)
+                    row['actor_result'] = trainer.update(actor_batch())
+                    row['actor_updated'] = row['actor_result']['actor_step_accepted']
+                    actor_updates += int(row['actor_updated'])
+            row['actor_updates'] = actor_updates
+            row['cuda_peak_allocated_mib'] = torch.cuda.max_memory_allocated()/2**20
+            trace.append(row)
+            print(json.dumps(row), flush=True)
+            if iteration % 20 == 0:
+                save(iteration); last_saved = iteration
+            if time.monotonic() - started >= a.hours * 3600:
+                break
+        if iteration != last_saved:
+            save(iteration)
+        (a.out/'report.json').write_text(json.dumps(dict(status='completed_candidate', algorithm='supermimic_bptt',
+            iterations=iteration, actor_updates=actor_updates, trace=trace), indent=2)+'\n')
+    finally:
+        env.close()
+
+
+if __name__ == '__main__':
+    main()
