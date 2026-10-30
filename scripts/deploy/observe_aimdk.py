@@ -8,6 +8,7 @@ def main():
     args = parser.parse_args()
     import rclpy
     from rclpy.node import Node
+    from rclpy.executors import ExternalShutdownException
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
     from aimdk_msgs.msg import JointStateArray
     from sensor_msgs.msg import Imu
@@ -16,7 +17,7 @@ def main():
         def __init__(self):
             super().__init__('supermimic_readonly_observer')
             joint_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
-                                   durability=DurabilityPolicy.TRANSIENT_LOCAL)
+                                   durability=DurabilityPolicy.VOLATILE)
             imu_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
                                  durability=DurabilityPolicy.VOLATILE)
             self.seen = set()
@@ -42,9 +43,11 @@ def main():
     node = Observer()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':
