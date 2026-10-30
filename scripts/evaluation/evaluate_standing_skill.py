@@ -5,6 +5,7 @@ from pathlib import Path
 
 def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, teacher_still_arms: bool = False, extended_stop: bool = False, standing_only: bool = False, disable_standing_feedback: bool = False, disable_moving_feedback: bool = False, direct_switches: bool = False, ieee: bool = False):
     import json
+    import hashlib
     from dataclasses import asdict
 
     import torch
@@ -75,6 +76,8 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
     stop_count = torch.zeros(num_envs, device=device)
     try:
         observations, _ = env.reset()
+        initial_state_sha256 = hashlib.sha256(cmd.state_io.read().detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+        initial_observation_sha256 = hashlib.sha256(observations['policy'].detach().cpu().contiguous().numpy().tobytes()).hexdigest()
         with torch.no_grad():
             for step in range(round(seconds / env.step_dt)):
                 elapsed = step * env.step_dt
@@ -116,6 +119,8 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
                     observations, _ = env.reset(env_ids=done)
                     context.reset(done)
         result = {
+            "initial_state_sha256": initial_state_sha256,
+            "initial_observation_sha256": initial_observation_sha256,
             "control_matmul_precision": torch.backends.cuda.matmul.fp32_precision,
             "teacher_action_override": teacher_still_arms, "standing_feedback_disabled":disable_standing_feedback, "moving_feedback_disabled":disable_moving_feedback,
             "arm_joint_names": arm_names,

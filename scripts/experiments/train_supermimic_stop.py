@@ -31,6 +31,7 @@ def main():
     p.add_argument('--iterations', type=int, default=120)
     p.add_argument('--hours', type=float, default=.25)
     p.add_argument('--lr', type=float, default=3e-6)
+    p.add_argument('--ema-decay', type=float, default=.99)
     a = p.parse_args()
     expected = Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve()
     gpu = os.environ.get('CUDA_VISIBLE_DEVICES', '')
@@ -40,6 +41,8 @@ def main():
         p.error('Invalid training bounds')
     if a.out.exists():
         p.error('Output directory already exists')
+    if not 0 <= a.ema_decay < 1:
+        p.error('EMA decay must be in [0, 1)')
 
     import numpy as np
     import torch
@@ -53,6 +56,7 @@ def main():
     from supermimic.world_model.state_spec import StateSpecCfg
     from supermimic.world_model.world_model import WorldModel, WorldModelCfg
     from supermimic_stop_imagination import StopImaginationTrainer
+    from supermimic_stop_ema import StandingEMA
 
     torch.set_num_threads(2)
     torch.manual_seed(29)
@@ -100,6 +104,7 @@ def main():
     trainer = StopImaginationTrainer(policy, wm, cmd.library.default_joint_pos, qref, arm_ids, arm_target,
         float(ref['body_pos_w'][0, 0, 2]), VelocityCfg(**saved['velocity']), saved['policy']['history'], env.step_dt,
         lr=a.lr, horizon=32)
+    ema = StandingEMA(policy.standing_skill, a.ema_decay)
     E, T = replay.E, replay.T
     meta_xy = torch.zeros(E, T, 2, device='cuda')
     meta_yaw = torch.zeros(E, T, device='cuda')
@@ -123,7 +128,9 @@ def main():
     a.out.mkdir(parents=True, exist_ok=False)
     (a.out / 'launch.json').write_text(json.dumps(dict(argv=sys.argv, gpu=gpu, checkpoint_sha256=sha(a.checkpoint),
         reference_sha256=sha(a.reference), pose_sha256=sha(a.standing_pose), walk_sha256=sha(a.dataset / 'walk.npz'),
-        entry_sha256=sha(__file__), model_gate='diagnostic only; physical policy acceptance required'), indent=2) + '\n')
+        entry_sha256=sha(__file__), ema=ema.metadata(),
+        ema_helper_sha256=sha(Path(__file__).with_name('supermimic_stop_ema.py')),
+        model_gate='diagnostic only; physical policy acceptance required'), indent=2) + '\n')
 
     def verify_core(x):
         for key, old in frozen.items():
@@ -205,8 +212,26 @@ def main():
             trace=trace, wm_optimizer=wm_opt.state_dict(), actor_state=trainer.save_state(),
             actor_updates=actor_updates, control_matmul_precision='ieee', source_commit=os.environ.get('SM_SOURCE_COMMIT', 'unspecified'),
             validation='model gate only; policy physical acceptance pending')
+        ck['policy_ema'] = dict(ema.metadata(), variant='online',
+                                shadow_state={k: v.detach().cpu().clone() for k, v in ema.model.state_dict().items()})
         path = a.out / f'candidate_{iteration}.pt'
-        torch.save(ck, path)
+        temporary = path.with_suffix('.pt.tmp')
+        torch.save(ck, temporary)
+        temporary.replace(path)
+        ema_ck = dict(ck)
+        ema_ck['policy'] = ema.policy_state(ck['policy'])
+        ema_ck['policy_ema'] = dict(ema.metadata(), variant='ema', paired_online_sha256=sha(path))
+        # An EMA export is an evaluation artifact, not an optimizer continuation.
+        ema_ck['supermimic_stop'] = {k: v for k, v in ck['supermimic_stop'].items()
+                                    if k not in ('wm_optimizer', 'actor_state')}
+        ema_dir = a.out / 'ema'
+        ema_dir.mkdir(exist_ok=True)
+        ema_path = ema_dir / path.name
+        temporary = ema_path.with_suffix('.pt.tmp')
+        torch.save(ema_ck, temporary)
+        temporary.replace(ema_path)
+        (ema_dir / path.with_suffix('.ready').name).write_text(str(iteration))
+        # Publish the online marker only after the complete pair is available.
         path.with_suffix('.ready').write_text(str(iteration))
 
     try:
@@ -277,9 +302,12 @@ def main():
                 if row['model_gate'] and actor_ready:
                     wm.requires_grad_(False)
                     row['actor_result'] = trainer.update(actor_batch())
-                    row['actor_updated'] = row['actor_result']['actor_step_accepted']
+                    row['actor_updated'] = (row['actor_result']['actor_step_accepted']
+                                            and row['actor_result']['actor_parameter_change_l2'] > 0)
+                    ema.update(policy.standing_skill, changed=row['actor_updated'])
                     actor_updates += int(row['actor_updated'])
             row['actor_updates'] = actor_updates
+            row['ema_updates'] = ema.updates
             row['cuda_peak_allocated_mib'] = torch.cuda.max_memory_allocated()/2**20
             trace.append(row)
             print(json.dumps(row), flush=True)
@@ -290,7 +318,7 @@ def main():
         if iteration != last_saved:
             save(iteration)
         (a.out/'report.json').write_text(json.dumps(dict(status='completed_candidate', algorithm='supermimic_bptt',
-            iterations=iteration, actor_updates=actor_updates, trace=trace), indent=2)+'\n')
+            iterations=iteration, actor_updates=actor_updates, ema=ema.metadata(), trace=trace), indent=2)+'\n')
     finally:
         env.close()
 
