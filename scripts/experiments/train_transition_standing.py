@@ -65,6 +65,10 @@ def main():
         domain_randomization=False, record_transitions=False,
         anchor_obs=saved['env']['anchor_obs'], velocity=VelocityCfg(**saved['velocity']))
     env = make_env(cfg, device='cuda:0')
+    # mjlab selects TF32 at environment construction. Small-sigma PPO needs
+    # consistent likelihoods when rollout and update use different batch shapes.
+    torch.backends.cuda.matmul.fp32_precision = 'ieee'
+    torch.backends.cudnn.fp32_precision = 'ieee'
     env.cfg.auto_reset = False
     cmd = env.command_manager.get_term('motion')
     cmd.is_velocity[:] = True
@@ -164,6 +168,7 @@ def main():
             'episode_seconds': 66, 'sigma': a.sigma, 'gamma': gamma, 'gae_lambda': lam,
             'position_cost': 200., 'heading_cost': 40., 'cold_action_prior_weight': .1,
             'validation': 'pending physical acceptance',
+            'control_matmul_precision': 'ieee',
             'config': {k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()},
             'source_commit': os.environ.get('SM_SOURCE_COMMIT', 'unspecified'),
             'entry_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

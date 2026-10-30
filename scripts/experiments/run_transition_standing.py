@@ -57,6 +57,7 @@ def main():
     record = {'status': 'initializing', 'controller_pid': os.getpid(), 'started_epoch': time.time(),
               'controller_argv': sys.argv, 'source': str(a.source), 'source_commit': a.source_commit,
               'gpu': a.gpu, 'evaluations': [], 'scope': 'bounded experimental validation; physical acceptance required'}
+    record['control_matmul_precision'] = 'ieee'
     train = None
     log = None
 
@@ -155,7 +156,7 @@ def main():
                 raise RuntimeError('Final checkpoint changed after training')
             result_path = a.out / f'{ck.stem}-{name}.json'
             args = [str(py), str(evaluator), '--ckpt', str(ck), '--npz-dir', str(a.dataset), '--out', str(result_path),
-                    '--seconds', str(seconds), '--num-envs', '8', '--seed', str(seed), *flags]
+                    '--seconds', str(seconds), '--num-envs', '8', '--seed', str(seed), '--ieee', *flags]
             item = {'name': name, 'argv': args, 'checkpoint_sha256': checkpoint_sha, 'status': 'running'}
             record['evaluations'].append(item)
             save()

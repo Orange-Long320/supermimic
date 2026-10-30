@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, teacher_still_arms: bool = False, extended_stop: bool = False, standing_only: bool = False, disable_standing_feedback: bool = False, disable_moving_feedback: bool = False, direct_switches: bool = False):
+def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device: str = "cuda:0", seed: int = 0, npz_dir: Path | None = None, teacher_still_arms: bool = False, extended_stop: bool = False, standing_only: bool = False, disable_standing_feedback: bool = False, disable_moving_feedback: bool = False, direct_switches: bool = False, ieee: bool = False):
     import json
     from dataclasses import asdict
 
@@ -37,6 +37,9 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
     config = make_env_cfg(args)
     config.auto_reset = False
     env = ManagerBasedRlEnv(config, device=device)
+    if ieee:
+        torch.backends.cuda.matmul.fp32_precision = 'ieee'
+        torch.backends.cudnn.fp32_precision = 'ieee'
     cmd = env.command_manager.get_term("motion")
     cmd.is_velocity[:] = True
     cmd.force_standing_reset = True
@@ -113,6 +116,7 @@ def main(ckpt: Path, out: Path, seconds: float = 60., num_envs: int = 8, device:
                     observations, _ = env.reset(env_ids=done)
                     context.reset(done)
         result = {
+            "control_matmul_precision": torch.backends.cuda.matmul.fp32_precision,
             "teacher_action_override": teacher_still_arms, "standing_feedback_disabled":disable_standing_feedback, "moving_feedback_disabled":disable_moving_feedback,
             "arm_joint_names": arm_names,
             "action_joint_names": action_joint_names,

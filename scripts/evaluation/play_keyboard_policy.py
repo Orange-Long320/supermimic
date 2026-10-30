@@ -53,6 +53,8 @@ def main(acceptance:Path,npz_dir:Path,viewer_port:int=18080,keyboard_port:int=18
  policy,saved=load_policy_from_checkpoint(checkpoint,device)
  cfg=SuperMimicEnvCfgArgs(npz_files=[str(npz_dir/'walk.npz')],num_envs=2,future_frames=saved['env']['future_frames'],episode_length_s=1e5,action_noise_std=0.,obs_noise=False,reset_noise=False,domain_randomization=False,record_transitions=False,anchor_obs=saved['env']['anchor_obs'],velocity=VelocityCfg(**saved['velocity']))
  env=make_env(cfg,device=device);command=env.command_manager.get_term('motion');command.is_velocity[:]=True;command.force_standing_reset=True;command.set_manual_command(COMMANDS['stand']);mailbox=CommandMailbox();controls=start_controls(mailbox,keyboard_port,viewer_port);viewer_server=viser.ViserServer(host='127.0.0.1',port=viewer_port,label='X2 keyboard policy')
+ if report.get('control_matmul_precision')=='ieee':
+  torch.backends.cuda.matmul.fp32_precision='ieee';torch.backends.cudnn.fp32_precision='ieee'
  context=StandingContext(command,env)
  class Controller:
   @torch.no_grad()
