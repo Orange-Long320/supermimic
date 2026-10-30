@@ -94,7 +94,7 @@ def main():
     if schedule and (schedule[0][0] != 0 or any(m not in valid for _, m in schedule) or any(schedule[i][0] >= schedule[i+1][0] for i in range(len(schedule)-1))):
         raise ValueError('Invalid schedule')
     keyboard = Keyboard(a.keyboard_port) if a.keyboard_port else None
-    initialized = False; control_started = None; records = []; failure = None; started = time.monotonic(); next_tick = started
+    initialized = False; control_started = None; records = []; failure = None; failure_context = None; started = time.monotonic(); next_tick = started
     previous_window = None
     print('policy ready for simulator', flush=True)
     try:
@@ -119,8 +119,13 @@ def main():
                 state = State(tuple(joints), tuple(stamps), data['imu']['time'], tuple(data['imu']['q']), tuple(data['imu']['w']))
                 ordered = order_and_validate(state, contract, time.monotonic())
                 odom = data['odom']; position, quat = odom['position'], odom['q']
-                if time.monotonic()-odom['time'] > .15 or not all(math.isfinite(x) for x in position+quat):
-                    raise ValueError('invalid simulator odometry')
+                odom_age = time.monotonic()-odom['time']
+                if not all(math.isfinite(x) for x in position+quat):
+                    failure_context = {'odometry_age_s': odom_age, 'odometry_finite': False}
+                    raise ValueError('non-finite simulator odometry')
+                if odom_age < 0 or odom_age > .15:
+                    failure_context = {'odometry_age_s': odom_age, 'odometry_finite': True}
+                    raise ValueError('stale or future simulator odometry')
                 q = tuple(j.position for j in ordered); qvel = tuple(j.velocity for j in ordered)
                 w, x, y, z = state.orientation_wxyz
                 gravity = (2*(w*y-x*z), -2*(w*x+y*z), -1+2*(x*x+y*y))
@@ -167,6 +172,7 @@ def main():
             failure = 'no policy frames received before timeout'
         (a.out/'frames.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in records))
         report = {'frames': len(records), 'failure': failure, 'mode': a.mode,
+                  'failure_context': failure_context,
                   'elapsed': time.monotonic()-started, 'resets_after_start': 0,
                   'control_seconds': records[-1]['elapsed']-records[0]['elapsed'] if len(records) > 1 else 0.,
                   'schedule': schedule, 'keyboard': bool(keyboard),
