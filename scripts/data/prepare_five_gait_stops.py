@@ -60,6 +60,14 @@ def main():
             step = np.sqrt(np.mean(np.diff(q, axis=0)**2, axis=1))
             if step[i] > 1.6 * step[i-1] + .005:
                 raise ValueError('First stop step discontinuity: ' + name)
+            root = list(z['body_names']).index('pelvis')
+            height = z['body_pos_w'][:, root, 2]
+            dh = np.diff(height)
+            if abs(dh[i] - dh[i-1]) > .005:
+                raise ValueError('First stop root height velocity discontinuity: ' + name)
+            audit['entry_root_height_step_m'] = float(dh[i])
+            audit['previous_root_height_step_m'] = float(dh[i-1])
+            audit['brake_max_root_height_step_m'] = float(np.max(np.abs(dh[i:meta['standing_frame']])))
         name_out = name + '_stop'
         shutil.copy2(result / 'natural-stop.npz', data / (name_out + '.npz'))
         clips.append({'name': name_out, 'sha256': sha(data / (name_out + '.npz')), 'source': str(source), 'source_sha256': sha(source), 'release_frame': release, 'audit': audit, 'type': 'exploratory_stop'})
