@@ -48,11 +48,18 @@ def main():
         shutil.copy2(source, entry / 'candidate.npz')
         (entry / 'manifest.json').write_text(json.dumps({'release_frame': release, 'parameters': {'release_lead': 10}}))
         result = a.out / (name + '-stop')
-        subprocess.run([sys.executable, str(scripts / 'data/build_natural_stop_preview.py'), '--walking', str(entry), '--pose', str(a.pose), '--out', str(result), '--stop-frames', '30', '--hold-frames', '200', '--match-entry-velocity'], check=True)
+        subprocess.run([sys.executable, str(scripts / 'data/build_natural_stop_preview.py'), '--walking', str(entry), '--pose', str(a.pose), '--out', str(result), '--stop-frames', '30', '--hold-frames', '200', '--match-entry-velocity', '--soft-entry'], check=True)
         subprocess.run([sys.executable, str(scripts / 'evaluation/audit_fast_stop_reference.py'), '--reference', str(result)], check=True)
         audit = json.loads((result / 'speed-audit.json').read_text())
         if audit['brake_max_hard_excess_rad'] > 1e-4 or audit['brake_max_speed_ratio'] > 1.0:
             raise ValueError('Stop fails hard limit or actuator speed screen: ' + name)
+        meta = json.loads((result / 'manifest.json').read_text())
+        with np.load(result / 'natural-stop.npz', allow_pickle=False) as z:
+            q = z['joint_pos']
+            i = meta['brake_start_frame']
+            step = np.sqrt(np.mean(np.diff(q, axis=0)**2, axis=1))
+            if step[i] > 1.6 * step[i-1] + .005:
+                raise ValueError('First stop step discontinuity: ' + name)
         name_out = name + '_stop'
         shutil.copy2(result / 'natural-stop.npz', data / (name_out + '.npz'))
         clips.append({'name': name_out, 'sha256': sha(data / (name_out + '.npz')), 'source': str(source), 'source_sha256': sha(source), 'release_frame': release, 'audit': audit, 'type': 'exploratory_stop'})

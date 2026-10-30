@@ -8,7 +8,7 @@ from scipy.spatial.transform import Rotation,Slerp
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--walking',type=Path,required=True);p.add_argument('--pose',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--stop-frames',type=int,default=100);p.add_argument('--hold-frames',type=int,default=150);p.add_argument('--match-entry-velocity',action='store_true',help='Match the preceding root, joint and foot velocities at transition entry');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--walking',type=Path,required=True);p.add_argument('--pose',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--stop-frames',type=int,default=100);p.add_argument('--hold-frames',type=int,default=150);p.add_argument('--match-entry-velocity',action='store_true',help='Match the preceding root, joint and foot velocities at transition entry');p.add_argument('--soft-entry',action='store_true',help='Gradually introduce contact fitting to avoid an initial IK jump');a=p.parse_args()
     if a.out.exists() or a.stop_frames<20 or a.hold_frames<2:raise ValueError('Invalid output or duration')
     from supermimic.data.motion_convert import load_g1_model
     from supermimic.data.physics_motion import export_qpos_motion
@@ -60,7 +60,8 @@ def main():
             q=raw.copy();q[:3]=x[:3];q[7+leg]=x[3:];pnow,rnow,h=solve_pose(q)
             orient=np.concatenate([Rotation.from_matrix(footrot[s].T@rnow[s]).as_rotvec() for s in range(2)])
             ground=np.array([h[s] if s==support else min(h[s],0.) for s in range(2)])
-            return np.r_[50*(pnow-wanted).ravel(),3*orient,100*ground,.15*(x[3:]-raw[7+leg]),.03*(x[3:]-prev),.5*(x[:3]-raw[:3])]
+            entry_weight=20*(1-u)**3 if a.soft_entry else 0.
+            return np.r_[50*(pnow-wanted).ravel(),3*orient,100*ground,(.15+entry_weight)*(x[3:]-raw[7+leg]),.03*(x[3:]-prev),(.5+entry_weight)*(x[:3]-raw[:3])]
         x=least_squares(residual,init,bounds=(lower,upper),max_nfev=25,ftol=1e-6,xtol=1e-6,gtol=1e-6).x
         residual(x);raw[:3]=x[:3];raw[7+leg]=x[3:];prev=x[3:];rows.append(raw);errs.append(np.linalg.norm(d.xpos[feet]-wanted,axis=1))
     poses=np.vstack([prefix,np.asarray(rows),np.repeat(end[None],a.hold_frames+1,axis=0)])
