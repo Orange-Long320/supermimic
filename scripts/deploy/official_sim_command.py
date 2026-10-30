@@ -42,7 +42,7 @@ def main():
             self.sock.bind(('127.0.0.1', a.port)); self.sock.setblocking(False)
             qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
                              durability=DurabilityPolicy.VOLATILE)
-            self.publishers = {g: self.create_publisher(JointCommandArray, f'/aima/hal/joint/{g}/command', qos)
+            self.pubs = {g: self.create_publisher(JointCommandArray, f'/aima/hal/joint/{g}/command', qos)
                                for g in ('leg', 'waist', 'head', 'arm')}
             self.target = None
             self.last = 0.
@@ -63,7 +63,7 @@ def main():
             if self.target is None:
                 return
             fresh = time.monotonic() - self.last < .1
-            for g, publisher in self.publishers.items():
+            for g, publisher in self.pubs.items():
                 msg = JointCommandArray()
                 for i, name in enumerate(names):
                     if group(name) != g: continue

@@ -7,6 +7,39 @@ import os
 from pathlib import Path
 import socket
 import time
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class Keyboard:
+    def __init__(self, port):
+        self.mode, self.when = 'stand', 0.
+        self.lock = threading.Lock()
+        mailbox = self
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                page = b'''<!doctype html><meta charset="utf-8"><title>X2 official simulation</title><h1>X2 official simulation</h1><p>Focus this page: hold W/S/A/D; Shift+W jog. Release to stand.</p><p id="mode">stand</p><script>
+const keys=new Set();function current(){if(keys.has('KeyA'))return 'turn_left_inplace';if(keys.has('KeyD'))return 'turn_right_inplace';if(keys.has('KeyS'))return 'backward';if(keys.has('KeyW'))return keys.has('ShiftLeft')||keys.has('ShiftRight')?'jog':'walk';return 'stand'}
+function send(){let m=current();document.querySelector('#mode').textContent=m;fetch('/mode',{method:'POST',body:m}).catch(()=>{});}onkeydown=e=>{keys.add(e.code);send()};onkeyup=e=>{keys.delete(e.code);send()};onblur=()=>{keys.clear();send()};setInterval(send,100);
+</script>'''
+                self.send_response(200); self.send_header('Content-Length', str(len(page))); self.end_headers(); self.wfile.write(page)
+            def do_POST(self):
+                try:
+                    if self.path != '/mode': raise ValueError()
+                    length = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < length < 32: raise ValueError()
+                    mode = self.rfile.read(length).decode('ascii')
+                    if mode not in ('stand', 'walk', 'jog', 'backward', 'turn_left_inplace', 'turn_right_inplace'): raise ValueError()
+                    with mailbox.lock: mailbox.mode, mailbox.when = mode, time.monotonic()
+                except (ValueError, UnicodeError): self.send_error(400); return
+                self.send_response(204); self.end_headers()
+            def log_message(self, *args): pass
+        self.server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def read(self):
+        with self.lock:
+            return self.mode if time.monotonic()-self.when < .5 else 'stand'
 
 
 def main():
@@ -18,9 +51,12 @@ def main():
     p.add_argument('--state-port', type=int, required=True)
     p.add_argument('--command-port', type=int, required=True)
     p.add_argument('--mode', choices=('stand', 'walk', 'jog'), default='stand')
+    p.add_argument('--schedule', type=Path, help='JSON array of [seconds, skill]')
+    p.add_argument('--keyboard-port', type=int)
     p.add_argument('--seconds', type=float, default=10.)
     p.add_argument('--sim-only', action='store_true', required=True)
     a = p.parse_args()
+    if a.schedule and a.keyboard_port: raise ValueError('Select schedule or keyboard, not both')
     if os.environ.get('ROS_LOCALHOST_ONLY') != '1' or os.environ.get('ROS_DOMAIN_ID') != '179':
         raise RuntimeError('Requires isolated simulation ROS domain 179 and ROS_LOCALHOST_ONLY=1')
     if a.out.exists() or a.seconds <= 0:
@@ -50,7 +86,13 @@ def main():
     a.out.mkdir(parents=True)
     history, previous = deque(maxlen=10), (0.,)*n
     tracker = SkillGoal(a.dataset, a.profile, [0., 0., .65], [1., 0., 0., 0.])
-    initialized = False; records = []; failure = None; started = time.monotonic(); next_tick = started
+    schedule = json.loads(a.schedule.read_text()) if a.schedule else None
+    valid = ('stand', 'walk', 'jog', 'backward', 'turn_left_inplace', 'turn_right_inplace')
+    if schedule and (schedule[0][0] != 0 or any(m not in valid for _, m in schedule) or any(schedule[i][0] >= schedule[i+1][0] for i in range(len(schedule)-1))):
+        raise ValueError('Invalid schedule')
+    keyboard = Keyboard(a.keyboard_port) if a.keyboard_port else None
+    initialized = False; control_started = None; records = []; failure = None; started = time.monotonic(); next_tick = started
+    print('policy ready for simulator', flush=True)
     try:
         while time.monotonic()-started < a.seconds:
             now = time.monotonic()
@@ -87,8 +129,9 @@ def main():
                 if len(history) < 10:
                     send(stand)
                     continue
-                elapsed = now-started
-                mode = a.mode if 3. <= elapsed < a.seconds-3. else 'stand'
+                if control_started is None: control_started = now
+                elapsed = now-control_started
+                mode = keyboard.read() if keyboard else (next(m for t, m in reversed(schedule) if elapsed >= t) if schedule else (a.mode if 3. <= elapsed < a.seconds-3. else 'stand'))
                 goal = tracker.goal(position, quat, q, mode)
                 if abs(float(goal[2*n+9])-position[2]) > .25 or abs(float(goal[2*n+2])-gravity[2]) > .8:
                     raise ValueError('root height or tilt termination')
@@ -114,6 +157,7 @@ def main():
         (a.out/'result.json').write_text(json.dumps(report, indent=2)+'\n')
         print(json.dumps(report, indent=2), flush=True)
         states.close(); commands.close()
+        if keyboard: keyboard.server.shutdown(); keyboard.server.server_close()
     if failure: raise SystemExit(1)
 
 
