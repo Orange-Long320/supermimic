@@ -34,11 +34,10 @@ def main():
     if sha(candidate)!=manifest['candidate_sha256']:raise ValueError('Candidate hash mismatch')
     torch.set_num_threads(2)
     policy,cfg=load_policy_from_checkpoint(a.checkpoint,'cuda:0')
-    if cfg['env'].get('anchor_obs',False):raise ValueError('Prototype needs a checkpoint without anchor goal terms')
     k=cfg['env']['future_frames']; release=int(manifest['release_frame'])
     env=make_env(SuperMimicEnvCfgArgs(npz_files=[str(candidate)],num_envs=1,seed=0,
         future_frames=k,episode_length_s=1000.,action_noise_std=0.,obs_noise=False,reset_noise=False,
-        domain_randomization=False,record_transitions=False,sampling_mode='start',anchor_obs=False),device='cuda:0')
+        domain_randomization=False,record_transitions=False,sampling_mode='start',anchor_obs=cfg['env'].get('anchor_obs',False)),device='cuda:0')
     env.cfg.auto_reset=False
     a.out.mkdir(parents=True)
     cmd=env.command_manager.get_term('motion');cmd.forced_frame[:]=0
@@ -62,7 +61,8 @@ def main():
             for step in range(len(manifest['phases'])-2):
                 step_index[0]=step
                 frame=int(cmd.frame[0]); source=alternative if frame<release else cmd.library
-                goal=source.goal_window(cmd.frame,k)
+                future=source.goal_window(cmd.frame,k)
+                goal=torch.cat([future,obs['goal'][:,future.shape[1]:]],dim=-1)
                 qpos=env.sim.data.qpos[0].cpu().numpy().copy();qpos[:3]-=env.scene.env_origins[0].cpu().numpy()
                 states.append(np.r_[qpos,env.sim.data.qvel[0].cpu().numpy()].copy());goals.append(goal[0].cpu().numpy().copy())
                 frames.append(frame);phases.append(manifest['phases'][frame]);action=policy(obs['policy'],goal)
