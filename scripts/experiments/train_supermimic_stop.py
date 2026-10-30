@@ -40,6 +40,7 @@ def main():
     p.add_argument('--hours', type=float, default=.25)
     p.add_argument('--lr', type=float, default=None, help='Override the native checkpoint policy learning rate')
     p.add_argument('--train-base', action='store_true', help='Explicitly train the full standing expert as a control')
+    p.add_argument('--preserve-moving-feedback', action='store_true', help='Preserve a validated-provenance BPTT movement projection')
     p.add_argument('--ema-decay', type=float, default=.99)
     a = p.parse_args()
     expected = Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve()
@@ -89,9 +90,46 @@ def main():
             raise ValueError(f'Standing retention {key} does not match this initialization')
     if any(key not in retention for key in ('obs', 'feedback', 'source_action', 'age')):
         raise ValueError('Standing retention is missing observations, feedback, source actions or ages')
-    if hasattr(policy, 'velocity_feedback_weight'):
+    moving_projection_sha = None
+    if a.preserve_moving_feedback:
+        if not hasattr(policy, 'velocity_feedback_weight') or source.get('standing_skill', {}).get('moving_feedback') is not True:
+            raise ValueError('Preserving movement requires a checkpoint with enabled velocity feedback')
+        records = [(key, source.get(key)) for key in ('supermimic_velocity_feedback', 'supermimic_composed_feedback')
+                   if isinstance(source.get(key), dict)]
+        if len(records) != 1:
+            raise ValueError('Expected exactly one BPTT movement or composed record')
+        kind, meta = records[0]
+        if (meta.get('algorithm') != 'supermimic_bptt' or not isinstance(meta.get('actor_updates'), int)
+                or meta['actor_updates'] <= 0 or meta.get('reference_sha256') != sha(a.reference)):
+            raise ValueError('Invalid movement BPTT provenance or reference')
+        if meta.get('standing_pose_sha256') != sha(a.standing_pose):
+            raise ValueError('Movement BPTT standing-pose provenance mismatch')
+        if kind == 'supermimic_composed_feedback':
+            components = source.get('composed_training')
+            if not isinstance(components, dict) or set(components) != {'stop', 'moving'}:
+                raise ValueError('Composed source lacks component training records')
+            common = meta.get('source_common_sha')
+            stop, moving = components['stop'], components['moving']
+            evidence = meta.get('stop_pose_evidence', {})
+            components_info = meta.get('components', {})
+            if (not common or any(not isinstance(v, dict) or v.get('algorithm') != 'supermimic_bptt'
+                    or v.get('source_sha256') != common or v.get('reference_sha256') != sha(a.reference)
+                    or not isinstance(v.get('actor_updates'), int) or v['actor_updates'] <= 0 for v in (stop, moving))
+                    or meta['actor_updates'] != stop['actor_updates'] + moving['actor_updates']
+                    or moving.get('standing_pose_sha256') != sha(a.standing_pose)
+                    or (stop.get('standing_pose_sha256') and stop['standing_pose_sha256'] != sha(a.standing_pose))
+                    or not isinstance(evidence, dict) or evidence.get('standing_pose_sha256') != sha(a.standing_pose)
+                    or not isinstance(components_info, dict) or not isinstance(components_info.get('base'), dict)
+                    or components_info['base'].get('sha256') != common):
+                raise ValueError('Invalid composed component provenance')
+        elif not meta.get('source_sha256'):
+            raise ValueError('Movement BPTT source hash missing')
+        moving_projection_sha = hashlib.sha256(policy.velocity_feedback_weight.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+    elif hasattr(policy, 'velocity_feedback_weight'):
         delattr(policy, 'velocity_feedback_weight')
     policy.requires_grad_(False)
+    initial_policy = copy.deepcopy(policy).requires_grad_(False)
+
     wc = copy.deepcopy(saved['world_model'])
     wc['state_spec'] = StateSpecCfg(**wc['state_spec'])
     wm = WorldModel(WorldModelCfg(**wc), None, 'cuda:0')
@@ -160,7 +198,9 @@ def main():
         collection_steps_per_update=32, episode_seconds=66., num_envs=E, replay_capacity=T,
         obs_noise=False, reset_noise=False, domain_randomization=False, stop_collection_noise=.03,
         movement_collection_noise=0., actual_stop_and_cold_stratified=True,
-        moving_core_frozen=True, moving_feedback=False, optimizer_initialization='fresh',
+        moving_core_frozen=True, moving_feedback=a.preserve_moving_feedback,
+        preserve_moving_feedback=a.preserve_moving_feedback, moving_projection_sha256=moving_projection_sha,
+        moving_source_sha256=sha(a.checkpoint), optimizer_initialization='fresh',
         control_matmul_precision='ieee', actor_update='deterministic BPTT through frozen world model',
         model_gate_velocity_8=[.10,.10,.15], model_gate_velocity_32=[.20,.20,.30],
         model_gate_position_heading_32=[.03,.08], actor_lr=a.lr, actor_lr_source=lr_source,
@@ -172,6 +212,7 @@ def main():
         reference_sha256=sha(a.reference), pose_sha256=sha(a.standing_pose), walk_sha256=sha(a.dataset / 'walk.npz'),
         entry_sha256=sha(__file__), standing_retention_sha256=sha(a.standing_retention),
         actor_lr=a.lr, actor_lr_source=lr_source, train_base=a.train_base,
+        preserve_moving_feedback=a.preserve_moving_feedback, moving_projection_sha256=moving_projection_sha,
         trainable_policy_parameters=sorted(trainable_keys), ema=ema.metadata(),
         ema_helper_sha256=sha(Path(__file__).with_name('supermimic_stop_ema.py')),
         model_gate='diagnostic only; physical policy acceptance required'), indent=2) + '\n')
@@ -182,10 +223,11 @@ def main():
             if not torch.equal(policy.state_dict()[key].detach().cpu(), old):
                 raise AssertionError(f'Frozen policy tensor changed: {key}')
         with torch.no_grad():
+            feedback = torch.zeros(len(x), 6, device=x.device, dtype=x.dtype)
             for c in choices:
                 c = c.expand(len(x), -1)
-                original = policy.decoder(policy.encoders['velocity'](x, c), x)
-                actual = policy.velocity_action(x, c, torch.zeros(len(x), 6, device=x.device))
+                original = initial_policy.velocity_action(x, c, feedback)
+                actual = policy.velocity_action(x, c, feedback)
                 if not torch.equal(original, actual):
                     raise AssertionError('Moving action changed')
 
@@ -244,12 +286,14 @@ def main():
         verify_core(obs['policy'][:128])
         ck = copy.deepcopy(source)
         ck['policy'] = {k: v.detach().cpu() for k, v in policy.state_dict().items()}
-        ck['standing_skill'] = dict(ck['standing_skill'], moving_feedback=False)
+        ck['standing_skill'] = dict(ck['standing_skill'], moving_feedback=a.preserve_moving_feedback)
         ck['wm'].update({k: v.detach().cpu() for k, v in wm.state_dict().items()})
         for key in ('standing_ppo_state', 'transition_ppo_state', 'physical_stop', 'control_feedback', 'standing_feedback', 'transition_standing',
-                    'wm_opt', 'policy_opt', 'critic_opt', 'velocity_training'):
+                    'wm_opt', 'policy_opt', 'critic_opt', 'velocity_training',
+                    'supermimic_velocity_feedback', 'supermimic_composed_feedback', 'composed_training'):
             ck.pop(key, None)
         ck['supermimic_stop'] = dict(algorithm='supermimic_bptt', iteration=iteration, source_sha256=sha(a.checkpoint), reference_sha256=sha(a.reference),
+            standing_pose_sha256=sha(a.standing_pose), standing_retention_sha256=sha(a.standing_retention),
             entry_sha256=sha(__file__), config={k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()},
             trace=trace, wm_optimizer=wm_opt.state_dict(), actor_state=trainer.save_state(),
             actor_updates=actor_updates, control_matmul_precision='ieee', source_commit=os.environ.get('SM_SOURCE_COMMIT', 'unspecified'),
@@ -298,9 +342,13 @@ def main():
                     feedback = context.features(goal)
                     ever_moved |= goal.square().sum(-1) >= policy.standing_skill.radius ** 2
                     gate = policy.standing_skill.gate(goal)
-                    base = policy.decoder(policy.encoders['velocity'](obs['policy'], goal), obs['policy'])
-                    stand = policy.standing_skill(obs['policy'], feedback)
-                    action = (1 - gate[:, None]) * base + gate[:, None] * (stand + .03 * torch.randn_like(stand))
+                    if a.preserve_moving_feedback:
+                        mean = policy.velocity_action(obs['policy'], goal, feedback)
+                        action = mean + gate[:, None] * .03 * torch.randn_like(mean)
+                    else:
+                        base = policy.decoder(policy.encoders['velocity'](obs['policy'], goal), obs['policy'])
+                        stand = policy.standing_skill(obs['policy'], feedback)
+                        action = (1 - gate[:, None]) * base + gate[:, None] * (stand + .03 * torch.randn_like(stand))
                     ptr = replay.ptr.clone()
                     before_state = cmd.state_io.read().clone() if iteration == 1 else None
                     meta_xy[ids, ptr] = context.anchor_xy

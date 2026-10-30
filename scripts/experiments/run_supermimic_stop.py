@@ -32,6 +32,7 @@ def main():
     p.add_argument('--hours', type=float, default=.25)
     p.add_argument('--lr', type=float, default=None, help='Override the native checkpoint policy learning rate')
     p.add_argument('--train-base', action='store_true', help='Explicit full-standing-expert control')
+    p.add_argument('--preserve-moving-feedback', action='store_true', help='Preserve a BPTT-trained movement projection')
     p.add_argument('--ema-decay', type=float, default=.99)
     p.add_argument('--compare-ema', action='store_true', help='Evaluate online and EMA checkpoints as a pair')
     a = p.parse_args()
@@ -69,6 +70,7 @@ def main():
     record['ema_decay'] = a.ema_decay
     record['compare_ema'] = a.compare_ema
     record['train_base'] = a.train_base
+    record['preserve_moving_feedback'] = a.preserve_moving_feedback
     record['actor_lr_override'] = a.lr
     record['standing_retention'] = str(a.standing_retention)
     record['standing_retention_sha256'] = digest(a.standing_retention)
@@ -132,6 +134,8 @@ def main():
             argv += ['--lr', str(a.lr)]
         if a.train_base:
             argv.append('--train-base')
+        if a.preserve_moving_feedback:
+            argv.append('--preserve-moving-feedback')
         record['training_argv'] = argv
         save()
         log = (a.out / 'train.log').open('x')

@@ -103,3 +103,9 @@ precision_r1实际已在GPU1完成20轮/16次有效BPTT更新、无失败/重置
 进一步CPU标签审计保存在服务器logs/reference_velocity_label_audit_20261030_125707_2266019.json，含原六NPZ/固定源码/precision1200 SHA。原25帧居中reference_command_table与bounded_reference的有效标签norm<0.1帧中，关节速度RMS>0.3比例左转37/90、右转38/91、小跑15/19；小跑位于开头，不只片尾。norm<0.02帧中左转13/66、右转7/60仍超过0.3；stand_bent500/500低于0.02且速度全零。precision1200配置data.clips只有五运动，没有stand_bent，reference_probability0.5、standing_probability0.25、alignment_weight0.1、stop_relabel_fraction0.25。源码允许有效reference_mode进入t=0的motion teacher→velocity encoder对齐，stop_relabel会去掉一部分；尚未证明历史抽样次数或教师输出，不能称唯一因果。已确认近零指令不唯一对应站立的数据语义缺口。
 
 feedback-only retained_r1已完成120轮/75次有效BPTT更新，物理采集76.8秒，训练无摔倒、128次预设66秒回合timeout，PyTorch峰值505.84MiB；开始在线7项独立物理验收，当前未有结果或accepted权重。
+
+retained120独立full0/full7均未通过；seed0五运动后最差停止净漂移0.0687/0.0819/0.0691/0.1135/0.0748m，arm RMS均≤0.098rad/s。hold20通过，cold0的yaw仍失败，其他case进行中；旧移动权重冻结也不保证闭环移动速度，因为站立后的实际起步状态改变，观察到move_regression仍保留拒绝。precision20独立full0也失败，前进0.2634/vy-0.0483、小跑0.5848，但部分环境和其他动作仍越门限；未采用。
+
+CPU实际合成retained120与precision20已通过全部共同来源和策略张量边界断言，candidate SHA 2c9fd4f82f5023b44aaccef4194eb422dc636b5ea4d49f8baf5da3102021bfeb，输出keyboard_composed_feedback_20261030_r1，source d351f37；GPU1 full0诊断进行中，非accepted。
+
+已准备显式--preserve-moving-feedback：只允许有效BPTT移动/合成权重保留新投影，采集走真实完整策略，冻结全部原移动张量并记录投影SHA。默认仍删除历史移动反馈，保持旧默认动作/噪声运算顺序；检查冻结动作时不改变context状态。新停止ck直接保存pose/retention SHA，清旧顶层组件元数据，来源以checkpoint SHA追溯。拟在必要时用--train-base开放独立站立encoder/decoder容量，固定真实cold留出及每样本累计动作界继续生效，原共享移动encoder/decoder及移动反馈均冻结；这是一项待验证容量对照，尚未启动。
