@@ -15,7 +15,7 @@ from supermimic.imagination.policy_trainer import PolicyTrainerCfg
 from supermimic.imagination.rollout import ImagRollout
 from supermimic.kinematics.rotations import heading_yaw, projected_gravity
 from supermimic.locomotion.task import fall_signals, measured_velocity
-from supermimic.robots.dimensions import NQ
+from supermimic.robots.dimensions import NQ, STATE_DIM
 from supermimic.world_model.heads import analytic_observation, flatten_history_term_major
 
 
@@ -51,7 +51,10 @@ class StopImaginationTrainer:
         self.velocity_cfg, self.history, self.dt, self.horizon, self.lr = velocity_cfg, history, float(dt), horizon, float(lr)
         self.cfg = PolicyTrainerCfg(horizon=horizon, history=history, lr=lr)
         # canonical state + six task inputs + normalized context + normalized stop age.
-        critic_dim = wm.spec.feature_dim + 6 + wm.spec.xi_offset.numel() + 1
+        prototype = torch.zeros(1, STATE_DIM, device=self.device, dtype=self.dtype)
+        prototype[:, 3] = 1.
+        feature_dim = wm.spec.canonical(prototype).shape[-1]
+        critic_dim = feature_dim + 6 + wm.spec.xi_offset.numel() + 1
         self.value = nn.Sequential(nn.Linear(critic_dim, 256), nn.Tanh(), nn.Linear(256, 128), nn.Tanh(), nn.Linear(128, 1)).to(device=self.device, dtype=self.dtype)
         # A fresh task critic starts at zero instead of injecting an arbitrary
         # terminal-state gradient into the first model-based actor update.
