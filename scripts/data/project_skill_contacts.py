@@ -66,8 +66,9 @@ def main():
                 orient=np.concatenate([Rotation.from_matrix(anchor_rot[s].T@d.xmat[feet[s]].reshape(3,3)).as_rotvec() if stance[s] else np.zeros(3) for s in range(2)])
                 smooth=np.zeros_like(x[1:]) if prev is None else .03*(x[1:]-prev[1:])
                 return np.r_[diff.ravel(),150*ground,4*orient,.04*(x[1:]-np.clip(q[i,leg],lo,hi)),smooth,.1*(x[0]-(pos[i,2]-rawsole.min()))]
-            fit=least_squares(residual,initial,bounds=(lower,upper),max_nfev=40,ftol=1e-7,xtol=1e-7,gtol=1e-7)
-            residual(fit.x);outp[i,2]=fit.x[0];outq[i,leg]=fit.x[1:];prev=fit.x
+            same=i>0 and np.array_equal(pos[i],pos[i-1]) and np.array_equal(quat[i],quat[i-1]) and np.array_equal(q[i],q[i-1]) and np.array_equal(stance,support[-1])
+            x=prev if same else least_squares(residual,initial,bounds=(lower,upper),max_nfev=40,ftol=1e-7,xtol=1e-7,gtol=1e-7).x
+            residual(x);outp[i,2]=x[0];outq[i,leg]=x[1:];prev=x
             errors.append(np.linalg.norm(d.xpos[feet]-target,axis=1));support.append(stance.copy());ground_shift.append(outp[i,2]-pos[i,2])
         return outp,outq,np.asarray(errors),np.asarray(support),np.asarray(ground_shift)
     # Project the full continuing path once; the candidate shares exactly the

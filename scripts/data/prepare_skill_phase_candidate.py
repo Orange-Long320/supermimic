@@ -20,8 +20,9 @@ def main():
     p.add_argument('--stop-frames', type=int, default=75)
     p.add_argument('--hold-frames', type=int, default=250)
     p.add_argument('--release-lead', type=int, default=0, help='Commit continuation frames after release before braking')
+    p.add_argument('--release-offset', type=int, default=0, help='Advance inside the next fixed gait cycle before release')
     a = p.parse_args()
-    if a.out.exists() or not (0 < a.loop_start < a.loop_end and a.join_frames >= 3 and a.loops >= 1 and a.stop_frames >= 4 and a.hold_frames >= 1 and 0 <= a.release_lead <= a.join_frames):
+    if a.out.exists() or not (0 < a.loop_start < a.loop_end and a.join_frames >= 3 and a.loops >= 1 and a.stop_frames >= 4 and a.hold_frames >= 1 and 0 <= a.release_lead <= a.join_frames and 0 <= a.release_offset < a.join_frames + a.loop_end-a.loop_start-a.release_lead):
         p.error('Invalid bounds or output already exists')
     from supermimic.data.motion_convert import load_g1_model, convert_csv_to_npz
     model = load_g1_model()
@@ -57,10 +58,14 @@ def main():
     loop_tail.extend(bridge(prev,dest,velocity(a.loop_end),velocity(a.loop_start),a.join_frames))
     for row in original[a.loop_start+1:a.loop_end+1]:
         x=row.copy();x[:2]+=offset;loop_tail.append(x)
+    for row in loop_tail[:a.release_offset]:
+        seq.append(row.copy());phases.append('loop')
+    release=len(seq)-1
+    loop_tail=loop_tail[a.release_offset:]
     for row in loop_tail[:a.release_lead]:
         seq.append(row.copy());phases.append('committed_walk')
     start=seq[-1].copy();end=original[10].copy()
-    start_v=(seq[-1]-seq[-2])*fps if a.release_lead else velocity(a.loop_end)
+    start_v=(seq[-1]-seq[-2])*fps if a.release_lead or a.release_offset else velocity(a.loop_end)
     end[:2]=start[:2]+start_v[:2]*a.stop_frames/fps*.5
     # Bound joint tangents to a monotone cubic, avoiding Hermite limit overshoot.
     delta=end[7:]-start[7:]; duration=a.stop_frames/fps
