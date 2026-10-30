@@ -145,6 +145,7 @@ def main():
     }, indent=2) + '\n')
     start_time = time.monotonic()
     total_falls = total_timeouts = 0
+    total_actor_steps = 0
     last_saved = 0
     trace = []
 
@@ -173,6 +174,7 @@ def main():
             'source_commit': os.environ.get('SM_SOURCE_COMMIT', 'unspecified'),
             'entry_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'trace': trace,
+            'accepted_actor_steps': total_actor_steps,
         }
         ck['transition_ppo_state'] = dict(actor_optimizer=opt.state_dict(), value=value.state_dict(),
                                          value_optimizer=vopt.state_dict(), sigma=a.sigma)
@@ -291,6 +293,8 @@ def main():
                                       source_sha256=source_hash)), flush=True)
 
             accepted = 0
+            proposed_kl_max = 0.
+            rejected_steps = 0
             for _ in range(4):
                 for ix in eligible_ids[torch.randperm(len(eligible_ids), device='cuda')].split(2048):
                     if not len(ix):
@@ -309,25 +313,50 @@ def main():
                     torch.nn.utils.clip_grad_norm_(params, .5)
                     backup = [v.detach().clone() for v in params]
                     optimizer_backup = copy.deepcopy(opt.state_dict())
-                    opt.step()
-                    kls = grouped_kl()
-                    if any(v > .03 for v in kls.values()):
+                    rate = opt.param_groups[0]['lr']
+                    step_accepted = False
+                    for attempt in range(8):
+                        if attempt:
+                            with torch.no_grad():
+                                for param, old_param in zip(params, backup):
+                                    param.copy_(old_param)
+                            opt.load_state_dict(copy.deepcopy(optimizer_backup))
+                        for param_group in opt.param_groups:
+                            param_group['lr'] = rate / 2**attempt
+                        opt.step()
+                        kls = grouped_kl()
+                        proposed_kl_max = max(proposed_kl_max, max(kls.values(), default=0.))
+                        if all(v <= .03 for v in kls.values()):
+                            step_accepted = True
+                            accepted += 1
+                            break
+                    if not step_accepted:
                         with torch.no_grad():
                             for param, old_param in zip(params, backup):
                                 param.copy_(old_param)
                         opt.load_state_dict(optimizer_backup)
-                    else:
-                        accepted += 1
+                        for param_group in opt.param_groups:
+                            param_group['lr'] = rate / 256
+                        rejected_steps += 1
                 for ix in torch.randperm(len(vv), device='cuda').split(2048):
                     vl = (value(vv[ix]).squeeze(-1) - returns[ix]).square().mean()
                     vopt.zero_grad(set_to_none=True)
                     vl.backward()
                     torch.nn.utils.clip_grad_norm_(value.parameters(), 1.)
                     vopt.step()
+            total_actor_steps += accepted
+            if max(grouped_kl().values(), default=0.) < .01:
+                for param_group in opt.param_groups:
+                    param_group['lr'] = min(a.lr, max(1e-9, param_group['lr']*1.2))
+            if iteration >= 5 and total_actor_steps == 0:
+                raise RuntimeError('No actor updates accepted; refuse to continue a no-op training run')
             if iteration % 5 == 0 or iteration == 1:
                 row = {'iteration': iteration, 'seconds': time.monotonic() - start_time,
                                   'eligible': int(eligible.sum()), 'group_counts': {str(g): int((eligible & (group == g)).sum()) for g in range(3)},
                                   'group_kl': grouped_kl(), 'accepted_actor_steps': accepted,
+                                  'total_accepted_actor_steps': total_actor_steps,
+                                  'proposed_kl_max': proposed_kl_max, 'rejected_actor_steps': rejected_steps,
+                                  'actor_lr': opt.param_groups[0]['lr'],
                                   'falls': total_falls, 'timeouts': total_timeouts,
                                   'reward': float(torch.stack([b[5] for b in batch]).mean()),
                                   'cuda_peak_allocated_mib': torch.cuda.max_memory_allocated() / 1024**2}
