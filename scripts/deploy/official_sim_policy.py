@@ -124,6 +124,7 @@ def main():
                     except BlockingIOError: break
                 states.settimeout(.1)
                 data = json.loads(raw)
+                sample_now = time.monotonic()
                 joints, stamps = [], []
                 for group in ('leg', 'waist', 'head', 'arm'):
                     block = data['groups'][group]
@@ -131,14 +132,19 @@ def main():
                     for name, q, v, err in block['joints']:
                         joints.append(JointSample(name, q, v, err)); stamps.append(block['time'])
                 state = State(tuple(joints), tuple(stamps), data['imu']['time'], tuple(data['imu']['q']), tuple(data['imu']['w']))
-                ordered = order_and_validate(state, contract, time.monotonic())
+                ordered = order_and_validate(state, contract, sample_now)
                 odom = data['odom']; position, quat = odom['position'], odom['q']
-                odom_age = time.monotonic()-odom['time']
+                odom_age = sample_now-odom['time']
                 if not all(math.isfinite(x) for x in position+quat):
                     failure_context = {'odometry_age_s': odom_age, 'odometry_finite': False}
                     raise ValueError('non-finite simulator odometry')
                 if odom_age < 0 or odom_age > .15:
-                    failure_context = {'odometry_age_s': odom_age, 'odometry_finite': True}
+                    failure_context = {'odometry_age_s': odom_age, 'odometry_finite': True,
+                                       'joint_group_age_s': {g: sample_now-data['groups'][g]['time']
+                                                             for g in ('leg', 'waist', 'head', 'arm')},
+                                       'imu_age_s': sample_now-data['imu']['time'],
+                                       'packet_age_s': sample_now-data['time'],
+                                       'receive_wait_s': sample_now-now}
                     raise ValueError('stale or future simulator odometry')
                 q = tuple(j.position for j in ordered); qvel = tuple(j.velocity for j in ordered)
                 w, x, y, z = state.orientation_wxyz
@@ -169,6 +175,8 @@ def main():
                 target = [d+s*v for d, s, v in zip(default, scale, action)]
                 send(target); previous = action; tracker.advance()
                 row = {'elapsed': elapsed, 'mode': mode, 'root': position, 'q': quat,
+                       'odom_age_s': odom_age,
+                       'packet_age_s': sample_now-data['time'],
                        'joint_pos': q, 'joint_vel': qvel, 'target': target,
                        'goal_current': window[0].tolist(), 'anchor': goal[-9:].tolist(),
                        'future_overlap_error': overlap_error,
