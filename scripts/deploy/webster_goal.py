@@ -13,7 +13,7 @@ class WebsterGoal:
         self.default = np.array([spec['default_joint_pos'][n] for n in self.names], dtype=np.float32)
         with np.load(reference, allow_pickle=False) as a:
             if tuple(a['joint_names']) != self.names: raise ValueError('joint order mismatch')
-            if abs(float(a['fps']) - 50.) > 1e-5: raise ValueError('expected 50Hz reference')
+            if abs(float(np.asarray(a['fps']).reshape(-1)[0]) - 50.) > 1e-5: raise ValueError('expected 50Hz reference')
             anchor = list(a['body_names']).index(spec['anchor_body'])
             root = list(a['body_names']).index('pelvis')
             self.target_pos = a['body_pos_w'][:, anchor].copy()
