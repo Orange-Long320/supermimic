@@ -1,6 +1,7 @@
 """Experimental policy loop for the isolated official simulator; never hardware."""
 import argparse
 from collections import deque
+import gc
 import json
 import math
 import os
@@ -84,6 +85,18 @@ def main():
     from supermimic.deploy.torch_policy import TorchScriptPolicy
     from supermimic.deploy.core import Contract, JointSample, State, order_and_validate
     torch.set_num_threads(2)
+    gc_started = {}
+    def observe_gc(phase, info):
+        if info['generation'] != 2:
+            return
+        stamp = time.monotonic()
+        if phase == 'start':
+            gc_started[2] = stamp
+        else:
+            print(json.dumps({'event': 'python_gc_gen2', 'monotonic': stamp,
+                              'duration_s': stamp-gc_started.pop(2, stamp),
+                              'collected': info['collected']}), flush=True)
+    gc.callbacks.append(observe_gc)
     spec = json.loads(a.profile.read_text()); names = spec['joint_names']; n = len(names)
     if spec['robot'] != 'x2_ultra' or n != 31:
         raise ValueError('Expected X2 Ultra profile')
@@ -221,6 +234,7 @@ def main():
         print(json.dumps(report, indent=2), flush=True)
         states.close(); commands.close()
         if keyboard: keyboard.server.shutdown(); keyboard.server.server_close()
+        gc.callbacks.remove(observe_gc)
     if failure: raise SystemExit(1)
 
 
