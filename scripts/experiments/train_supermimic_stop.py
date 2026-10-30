@@ -30,7 +30,7 @@ def sampleable_start_mask(replay, history):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for key in ('checkpoint', 'dataset', 'reference', 'standing-pose', 'out'):
+    for key in ('checkpoint', 'dataset', 'reference', 'standing-pose', 'standing-retention', 'out'):
         p.add_argument('--' + key, type=Path, required=True)
     p.add_argument('--num-envs', type=int, default=256)
     p.add_argument('--batch', type=int, default=128)
@@ -38,14 +38,15 @@ def main():
     p.add_argument('--wm-batches', type=int, default=20)
     p.add_argument('--iterations', type=int, default=120)
     p.add_argument('--hours', type=float, default=.25)
-    p.add_argument('--lr', type=float, default=3e-6)
+    p.add_argument('--lr', type=float, default=None, help='Override the native checkpoint policy learning rate')
+    p.add_argument('--train-base', action='store_true', help='Explicitly train the full standing expert as a control')
     p.add_argument('--ema-decay', type=float, default=.99)
     a = p.parse_args()
     expected = Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve()
     gpu = os.environ.get('CUDA_VISIBLE_DEVICES', '')
     if Path(sys.prefix).resolve() != expected or not gpu or len(gpu.split(',')) != 1:
         p.error('Use the dedicated server environment and explicitly select one GPU')
-    if not 8 <= a.num_envs <= 1024 or min(a.batch, a.wm_batch, a.wm_batches, a.iterations) < 1 or a.iterations > 1200 or not 0 < a.hours <= 1 or a.lr <= 0:
+    if not 8 <= a.num_envs <= 1024 or min(a.batch, a.wm_batch, a.wm_batches, a.iterations) < 1 or a.iterations > 1200 or not 0 < a.hours <= 1 or (a.lr is not None and a.lr <= 0):
         p.error('Invalid training bounds')
     if a.out.exists():
         p.error('Output directory already exists')
@@ -70,14 +71,27 @@ def main():
     torch.manual_seed(29)
     policy, saved = load_policy_from_checkpoint(a.checkpoint, 'cuda:0')
     source = torch.load(a.checkpoint, map_location='cpu', weights_only=False)
+    if a.lr is None:
+        a.lr = float(saved['policy_trainer']['lr'])
+        lr_source = 'checkpoint.config.policy_trainer.lr'
+    else:
+        lr_source = 'explicit_override'
+    if not np.isfinite(a.lr) or a.lr <= 0:
+        raise ValueError('Invalid policy learning rate')
     if not hasattr(policy, 'standing_skill') or policy.standing_skill.mode != 'expert' or policy.standing_skill.feedback_dim != 6:
         raise ValueError('Six-input standing expert required')
     if source.get('standing_reference', {}).get('sha256') != sha(a.reference):
         raise ValueError('Reference mismatch')
+    retention = torch.load(a.standing_retention, map_location='cpu', weights_only=False)
+    for key, expected_hash in (('source_sha256', sha(a.checkpoint)), ('reference_sha256', sha(a.reference)),
+                               ('standing_pose_sha256', sha(a.standing_pose))):
+        if retention.get(key) != expected_hash:
+            raise ValueError(f'Standing retention {key} does not match this initialization')
+    if any(key not in retention for key in ('obs', 'feedback', 'source_action', 'age')):
+        raise ValueError('Standing retention is missing observations, feedback, source actions or ages')
     if hasattr(policy, 'velocity_feedback_weight'):
         delattr(policy, 'velocity_feedback_weight')
     policy.requires_grad_(False)
-    frozen = {k: v.detach().cpu().clone() for k, v in policy.state_dict().items() if not k.startswith('standing_skill.')}
     wc = copy.deepcopy(saved['world_model'])
     wc['state_spec'] = StateSpecCfg(**wc['state_spec'])
     wm = WorldModel(WorldModelCfg(**wc), None, 'cuda:0')
@@ -111,7 +125,14 @@ def main():
     arm_target = torch.tensor([pose[PROFILE['joint_names'][i]] for i in arm_ids], device='cuda', dtype=qref.dtype)
     trainer = StopImaginationTrainer(policy, wm, cmd.library.default_joint_pos, qref, arm_ids, arm_target,
         float(ref['body_pos_w'][0, 0, 2]), VelocityCfg(**saved['velocity']), saved['policy']['history'], env.step_dt,
-        lr=a.lr, horizon=32)
+        lr=a.lr, horizon=32, train_base=a.train_base)
+    trainer.set_cold_retention(retention['obs'].to('cuda:0'), retention['feedback'].to('cuda:0'),
+                               retention['source_action'].to('cuda:0'))
+    trainable_keys = {'standing_skill.' + name for name in trainer.actor_parameter_names}
+    actual_trainable = {name for name, param in policy.named_parameters() if param.requires_grad}
+    if trainable_keys != actual_trainable:
+        raise AssertionError('Unexpected trainable policy parameters')
+    frozen = {k: v.detach().cpu().clone() for k, v in policy.state_dict().items() if k not in trainable_keys}
     ema = StandingEMA(policy.standing_skill, a.ema_decay)
     E, T = replay.E, replay.T
     meta_xy = torch.zeros(E, T, 2, device='cuda')
@@ -142,11 +163,16 @@ def main():
         moving_core_frozen=True, moving_feedback=False, optimizer_initialization='fresh',
         control_matmul_precision='ieee', actor_update='deterministic BPTT through frozen world model',
         model_gate_velocity_8=[.10,.10,.15], model_gate_velocity_32=[.20,.20,.30],
-        model_gate_position_heading_32=[.03,.08])
+        model_gate_position_heading_32=[.03,.08], actor_lr=a.lr, actor_lr_source=lr_source,
+        train_base=a.train_base, trainable_policy_parameters=sorted(trainable_keys),
+        standing_retention_sha256=sha(a.standing_retention), standing_retention_samples=len(retention['obs']),
+        standing_retention_source_action_max_abs_diff=trainer.cold_retention['source_action_max_abs_diff'])
     a.out.mkdir(parents=True, exist_ok=False)
     (a.out / 'launch.json').write_text(json.dumps(dict(argv=sys.argv, gpu=gpu, checkpoint_sha256=sha(a.checkpoint),
         reference_sha256=sha(a.reference), pose_sha256=sha(a.standing_pose), walk_sha256=sha(a.dataset / 'walk.npz'),
-        entry_sha256=sha(__file__), ema=ema.metadata(),
+        entry_sha256=sha(__file__), standing_retention_sha256=sha(a.standing_retention),
+        actor_lr=a.lr, actor_lr_source=lr_source, train_base=a.train_base,
+        trainable_policy_parameters=sorted(trainable_keys), ema=ema.metadata(),
         ema_helper_sha256=sha(Path(__file__).with_name('supermimic_stop_ema.py')),
         model_gate='diagnostic only; physical policy acceptance required'), indent=2) + '\n')
     (a.out/'runtime_config.json').write_text(json.dumps(runtime_config, indent=2)+'\n')
@@ -154,7 +180,7 @@ def main():
     def verify_core(x):
         for key, old in frozen.items():
             if not torch.equal(policy.state_dict()[key].detach().cpu(), old):
-                raise AssertionError(f'Moving core changed: {key}')
+                raise AssertionError(f'Frozen policy tensor changed: {key}')
         with torch.no_grad():
             for c in choices:
                 c = c.expand(len(x), -1)
@@ -237,6 +263,9 @@ def main():
         temporary.replace(path)
         ema_ck = dict(ck)
         ema_ck['policy'] = ema.policy_state(ck['policy'])
+        for key, old in frozen.items():
+            if not torch.equal(ema_ck['policy'][key], old):
+                raise AssertionError(f'EMA changed frozen policy tensor: {key}')
         ema_ck['policy_ema'] = dict(ema.metadata(), variant='ema', paired_online_sha256=sha(path))
         # An EMA export is an evaluation artifact, not an optimizer continuation.
         ema_ck['supermimic_stop'] = {k: v for k, v in ck['supermimic_stop'].items()

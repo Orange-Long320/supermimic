@@ -23,16 +23,19 @@ def digest(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for key in ('source', 'checkpoint', 'dataset', 'reference', 'standing-pose', 'baseline0', 'baseline7', 'out'):
+    for key in ('source', 'checkpoint', 'dataset', 'reference', 'standing-pose', 'standing-retention', 'baseline0', 'baseline7', 'out'):
         p.add_argument('--' + key, type=Path, required=True)
     p.add_argument('--source-commit', required=True)
     p.add_argument('--gpu', type=int, default=2)
     p.add_argument('--iterations', type=int, default=120)
     p.add_argument('--num-envs', type=int, default=256)
     p.add_argument('--hours', type=float, default=.25)
+    p.add_argument('--lr', type=float, default=None, help='Override the native checkpoint policy learning rate')
+    p.add_argument('--train-base', action='store_true', help='Explicit full-standing-expert control')
     p.add_argument('--ema-decay', type=float, default=.99)
+    p.add_argument('--compare-ema', action='store_true', help='Evaluate online and EMA checkpoints as a pair')
     a = p.parse_args()
-    if a.gpu < 0 or a.iterations <= 0 or a.num_envs < 80 or a.hours <= 0 or not 0 <= a.ema_decay < 1:
+    if a.gpu < 0 or a.iterations <= 0 or a.num_envs < 80 or a.hours <= 0 or (a.lr is not None and a.lr <= 0) or not 0 <= a.ema_decay < 1:
         p.error('Invalid GPU or training limits')
     py = Path('/home/2025-Long.xh/HHD/venvs/supermimic/bin/python')
     if Path(sys.prefix).resolve() != py.parent.parent.resolve() or os.path.realpath(sys.executable) != os.path.realpath(py) or not py.is_file():
@@ -42,6 +45,7 @@ def main():
     a.dataset = a.dataset.resolve()
     a.reference = a.reference.resolve()
     a.standing_pose = a.standing_pose.resolve()
+    a.standing_retention = a.standing_retention.resolve()
     a.baseline0 = a.baseline0.resolve()
     a.baseline7 = a.baseline7.resolve()
     a.out = a.out.resolve()
@@ -50,7 +54,7 @@ def main():
     ema_helper = a.source / 'scripts/supermimic_stop_ema.py'
     evaluator = a.source / 'scripts/evaluate_standing_skill.py'
     prior_controller = a.source / 'scripts/run_control_feedback.py'
-    for path in (entry, helper, ema_helper, evaluator, prior_controller, a.checkpoint, a.reference, a.standing_pose,
+    for path in (entry, helper, ema_helper, evaluator, prior_controller, a.checkpoint, a.reference, a.standing_pose, a.standing_retention,
                  a.baseline0, a.baseline7, a.dataset / 'walk.npz'):
         if not path.is_file():
             p.error(f'Required file missing: {path}')
@@ -63,6 +67,11 @@ def main():
     record['control_matmul_precision'] = 'ieee'
     record['algorithm'] = 'supermimic_bptt'
     record['ema_decay'] = a.ema_decay
+    record['compare_ema'] = a.compare_ema
+    record['train_base'] = a.train_base
+    record['actor_lr_override'] = a.lr
+    record['standing_retention'] = str(a.standing_retention)
+    record['standing_retention_sha256'] = digest(a.standing_retention)
     train = None
     log = None
 
@@ -108,16 +117,21 @@ def main():
         source_files = {str(path.relative_to(a.source)): digest(path) for path in sorted((a.source / 'src').rglob('*'))
                         if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc'}
         inputs = (entry, helper, ema_helper, evaluator, prior_controller, Path(__file__).resolve(), a.checkpoint, a.reference,
-                  a.standing_pose, a.baseline0, a.baseline7, a.dataset / 'walk.npz')
+                  a.standing_pose, a.standing_retention, a.baseline0, a.baseline7, a.dataset / 'walk.npz')
         record.update(interpreter_probe=probe, platform=platform.platform(), cpu=platform.machine(),
                       source_sha256=source_files, input_sha256={str(path): digest(path) for path in inputs},
                       environment={key: env[key] for key in ('CUDA_VISIBLE_DEVICES', 'PYTHONPATH', 'SM_ROBOT', 'MUJOCO_GL',
                                                              'OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'HF_HUB_OFFLINE',
                                                              'TRANSFORMERS_OFFLINE', 'XDG_CACHE_HOME')})
         argv = [str(py), str(entry), '--checkpoint', str(a.checkpoint), '--dataset', str(a.dataset),
-                '--reference', str(a.reference), '--standing-pose', str(a.standing_pose), '--out', str(a.out / 'train'),
+                '--reference', str(a.reference), '--standing-pose', str(a.standing_pose),
+                '--standing-retention', str(a.standing_retention), '--out', str(a.out / 'train'),
                 '--iterations', str(a.iterations), '--num-envs', str(a.num_envs), '--hours', str(a.hours),
                 '--ema-decay', str(a.ema_decay)]
+        if a.lr is not None:
+            argv += ['--lr', str(a.lr)]
+        if a.train_base:
+            argv.append('--train-base')
         record['training_argv'] = argv
         save()
         log = (a.out / 'train.log').open('x')
@@ -149,22 +163,27 @@ def main():
         metadata = trained.get('supermimic_stop', {})
         if metadata.get('algorithm') != 'supermimic_bptt':
             raise RuntimeError('Only SuperMimic differentiable imagination checkpoints are allowed')
-        if metadata.get('actor_updates', 0) < 2:
-            record.update(status='insufficient_actor_updates_for_ema', final_checkpoint=str(ck),
+        required_updates = 2 if a.compare_ema else 1
+        if metadata.get('actor_updates', 0) < required_updates:
+            record.update(status='insufficient_actor_updates_for_ema' if a.compare_ema else 'not_accepted',
+                          reason=f'Fewer than {required_updates} effective actor updates', final_checkpoint=str(ck),
                           final_checkpoint_sha256=checkpoint_sha, finished_epoch=time.time())
             save()
             return
-        ema_ck = ck.parent / 'ema' / ck.name
-        ema_sha = digest(ema_ck)
-        from supermimic_stop_ema import validate_pair
-        averaged = torch.load(ema_ck, map_location='cpu', weights_only=False)
-        validate_pair(trained, averaged, checkpoint_sha)
-        record['paired_checkpoints'] = {
-            'online': dict(path=str(ck), sha256=checkpoint_sha),
-            'ema': dict(path=str(ema_ck), sha256=ema_sha),
-        }
-        record['ema_updates'] = averaged['policy_ema']['updates']
-        del trained, averaged
+        checkpoints = {'online': dict(path=str(ck), sha256=checkpoint_sha)}
+        record['actor_updates'] = metadata['actor_updates']
+        if a.compare_ema:
+            ema_ck = ck.parent / 'ema' / ck.name
+            ema_sha = digest(ema_ck)
+            from supermimic_stop_ema import validate_pair
+            averaged = torch.load(ema_ck, map_location='cpu', weights_only=False)
+            validate_pair(trained, averaged, checkpoint_sha)
+            checkpoints['ema'] = dict(path=str(ema_ck), sha256=ema_sha)
+            record['ema_updates'] = averaged['policy_ema']['updates']
+            record['paired_checkpoints'] = checkpoints
+            del averaged
+        record['checkpoints'] = checkpoints
+        del trained
         record.update(status='evaluating', final_checkpoint=str(ck), final_checkpoint_sha256=checkpoint_sha,
                       final_iteration=int(ck.stem.split('_')[-1]))
         save()
@@ -213,32 +232,40 @@ def main():
                  ('cold7', 3, 7, ('--standing-only',), None),
                  ('extended42', 42, 23, ('--extended-stop',), None),
                  ('direct58', 58, 41, ('--direct-switches',), None)]
-        comparison = dict(algorithm='supermimic_bptt', checkpoints=record['paired_checkpoints'],
-                          ema_decay=a.ema_decay, ema_updates=record['ema_updates'],
+        variants = ('online', 'ema') if a.compare_ema else ('online',)
+        comparison = dict(algorithm='supermimic_bptt', checkpoints=checkpoints,
+                          compare_ema=a.compare_ema, ema_decay=a.ema_decay, ema_updates=record.get('ema_updates'),
                           cases=[dict(name=n, seconds=t, seed=s, flags=f) for n,t,s,f,_ in cases],
                           variants={})
-        for variant in ('online', 'ema'):
+        for variant in variants:
             comparison['variants'][variant] = dict(results={})
         for name, seconds, seed, flags, baseline in cases:
-            for variant in ('online', 'ema'):
-                info = record['paired_checkpoints'][variant]
+            for variant in variants:
+                info = checkpoints[variant]
                 summary = evaluate(variant, Path(info['path']), info['sha256'], name, seconds, seed, flags, baseline)
                 comparison['variants'][variant]['results'][name] = summary
                 (a.out / 'comparison.json').write_text(json.dumps(comparison, indent=2) + '\n')
         for variant, result in comparison['variants'].items():
             result['passed'] = all(item['passed'] for item in result['results'].values())
             if result['passed']:
-                info = record['paired_checkpoints'][variant]
-                accepted = a.out / f'accepted_{variant}.pt'
+                info = checkpoints[variant]
+                accepted = a.out / (f'accepted_{variant}.pt' if a.compare_ema else 'accepted.pt')
                 shutil.copy2(info['path'], accepted)
                 if digest(accepted) != info['sha256']:
                     raise RuntimeError('Accepted checkpoint copy checksum mismatch')
                 result.update(accepted_checkpoint=str(accepted), sha256=info['sha256'])
         comparison['verified_conditions'] = paired_conditions
         (a.out / 'comparison.json').write_text(json.dumps(comparison, indent=2) + '\n')
-        record.update(status='paired_evaluation_complete',
-                      variant_passed={name: result['passed'] for name, result in comparison['variants'].items()},
+        record.update(variant_passed={name: result['passed'] for name, result in comparison['variants'].items()},
                       comparison=str(a.out / 'comparison.json'))
+        if a.compare_ema:
+            record['status'] = 'paired_evaluation_complete'
+        else:
+            online = comparison['variants']['online']
+            record['status'] = 'accepted' if online['passed'] else 'not_accepted'
+            if online['passed']:
+                record.update(accepted_checkpoint=str(Path(online['accepted_checkpoint']).resolve()),
+                              accepted_sha256=online['sha256'])
         record['finished_epoch'] = time.time()
         save()
     except BaseException as error:

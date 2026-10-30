@@ -23,7 +23,7 @@ class StopImaginationTrainer:
     """Train only the standing expert; input and output tensors stay on its device."""
 
     def __init__(self, policy, wm, default_joint_pos, qref, arm_ids, arm_target,
-                 nominal_height, velocity_cfg, history, dt, lr=3e-6, horizon=32):
+                 nominal_height, velocity_cfg, history, dt, lr=3e-6, horizon=32, train_base=False):
         if history <= 0 or horizon <= 0 or dt <= 0 or lr <= 0:
             raise ValueError('history, horizon, dt and lr must be positive')
         if abs(float(wm.spec.dt) - float(dt)) > 1e-8:
@@ -33,10 +33,17 @@ class StopImaginationTrainer:
         self.policy, self.wm = policy, wm
         self.actor = policy.standing_skill
         policy.requires_grad_(False)
-        self.actor.requires_grad_(True)
+        self.actor.requires_grad_(False)
+        self.train_base = bool(train_base)
+        if self.train_base:
+            self.actor.requires_grad_(True)
+        else:
+            self.actor.feedback_weight.requires_grad_(True)
         self.wm.requires_grad_(False)
         self.teacher = copy.deepcopy(self.actor).requires_grad_(False)
-        self.actor_params = list(self.actor.parameters())
+        self.actor_parameter_names = [name for name, param in self.actor.named_parameters() if param.requires_grad]
+        self.actor_params = [param for param in self.actor.parameters() if param.requires_grad]
+        self.cold_retention = None
         self.device = next(self.actor.parameters()).device
         self.dtype = next(self.actor.parameters()).dtype
         self.default_joint_pos = torch.as_tensor(default_joint_pos, device=self.device, dtype=self.dtype).detach().clone()
@@ -62,6 +69,29 @@ class StopImaginationTrainer:
         nn.init.zeros_(self.value[-1].bias)
         self.actor_opt = torch.optim.Adam(self.actor_params, lr=lr, betas=self.cfg.betas)
         self.value_opt = torch.optim.Adam(self.value.parameters(), lr=self.cfg.critic_lr)
+
+    def set_cold_retention(self, obs, feedback, source_action=None):
+        """Bind verified real standing observations and their fixed source actions."""
+        if obs.ndim != 2 or len(obs) == 0 or feedback.shape != (len(obs), 6):
+            raise ValueError('Retention observations and feedback must be nonempty and aligned')
+        tensors = (obs, feedback) if source_action is None else (obs, feedback, source_action)
+        if any(t.device != self.device or t.dtype != self.dtype or not torch.isfinite(t).all() for t in tensors):
+            raise ValueError('Retention tensors must be finite and match the actor device and dtype')
+        with torch.no_grad():
+            teacher_action = self.teacher(obs, feedback)
+        if not torch.isfinite(teacher_action).all():
+            raise ValueError('Teacher produced non-finite retention actions')
+        difference = 0.
+        if source_action is not None:
+            if source_action.shape != teacher_action.shape:
+                raise ValueError('Retention source action shape does not match teacher output')
+            difference = float((source_action - teacher_action).abs().max())
+            if difference > 2e-5:
+                raise ValueError(f'Retention source action differs from teacher by {difference:.8g} (limit 2e-5)')
+        self.cold_retention = {'obs': obs.detach().clone(), 'feedback': feedback.detach().clone(),
+                               'teacher_action': teacher_action.detach().clone(),
+                               'source_action_max_abs_diff': difference,
+                               'source_action_supplied': source_action is not None}
 
     def _feedback(self, state, anchor_xy, anchor_yaw):
         yaw = heading_yaw(state[..., 3:7])
@@ -99,6 +129,8 @@ class StopImaginationTrainer:
         the rollout start and the final action as its previous action.
         """
         required = ('hist_states', 'hist_actions', 'xi', 'anchor_xy', 'anchor_yaw', 'stop_age', 'is_cold')
+        if self.cold_retention is None:
+            raise ValueError('Call set_cold_retention with the verified standing dataset before updating')
         if any(key not in batch for key in required):
             raise ValueError(f'Batch must contain {required}')
         states = batch['hist_states'].detach()
@@ -159,7 +191,9 @@ class StopImaginationTrainer:
             objective = policy_objective(rollout, terminal_value, self.cfg.gamma)
             cold_prior = ((self.actor(initial_obs[cold], initial_feedback[cold]) - teacher_action).square().mean()
                           if cold.any() else objective.new_zeros(()))
-            loss = -objective / self.horizon + .1 * cold_prior
+            retained = self.cold_retention
+            retention_prior = (self.actor(retained['obs'], retained['feedback']) - retained['teacher_action']).square().mean()
+            loss = -objective / self.horizon + 10. * cold_prior + 10. * retention_prior
             if not torch.isfinite(loss) or not torch.isfinite(value_inputs).all() or not torch.isfinite(rr).all() or not torch.isfinite(dhat).all():
                 raise FloatingPointError('Non-finite imagination or actor objective')
             self.actor_opt.zero_grad(set_to_none=True)
@@ -171,6 +205,7 @@ class StopImaginationTrainer:
             backup = [p.detach().clone() for p in self.actor_params]
             opt_backup = copy.deepcopy(self.actor_opt.state_dict())
             accepted, action_change, parameter_change, used_lr = False, float('nan'), 0., 0.
+            retention_max_rms = retention_max_abs = cold_max_rms = cold_max_abs = float('nan')
             for attempt in range(8):
                 if attempt:
                     with torch.no_grad():
@@ -184,9 +219,21 @@ class StopImaginationTrainer:
                 with torch.no_grad():
                     new_action = self.actor(initial_obs, initial_feedback)
                     change = (new_action - old_action).square().mean().sqrt()
-                    finite = torch.isfinite(new_action).all() and all(torch.isfinite(p).all() for p in self.actor_params)
+                    retained_diff = self.actor(retained['obs'], retained['feedback']) - retained['teacher_action']
+                    retention_max_rms = float(retained_diff.square().mean(-1).sqrt().max())
+                    retention_max_abs = float(retained_diff.abs().max())
+                    if cold.any():
+                        cold_diff = self.actor(initial_obs[cold], initial_feedback[cold]) - teacher_action
+                        cold_max_rms = float(cold_diff.square().mean(-1).sqrt().max())
+                        cold_max_abs = float(cold_diff.abs().max())
+                    else:
+                        cold_max_rms = cold_max_abs = 0.
+                    finite = (torch.isfinite(new_action).all() and torch.isfinite(retained_diff).all()
+                              and all(torch.isfinite(p).all() for p in self.actor_params))
                     action_change = float(change)
-                if finite and torch.isfinite(change) and change <= .02:
+                if (finite and torch.isfinite(change) and change <= .02
+                        and retention_max_rms <= .03 and retention_max_abs <= .15
+                        and cold_max_rms <= .03 and cold_max_abs <= .15):
                     accepted, used_lr = True, rate
                     with torch.no_grad():
                         parameter_change = float(torch.sqrt(sum((p - before).square().sum() for p, before in zip(self.actor_params, backup))))
@@ -225,13 +272,20 @@ class StopImaginationTrainer:
                 self.value_opt.step()
         return {'objective': float(objective.detach()), 'reward_mean': float(rr.detach().mean()),
                 'survival_final': float(alive[-1].detach().mean()), 'actor_grad_norm': float(grad_norm),
-                'cold_prior': float(cold_prior.detach()), 'actor_step_accepted': accepted,
+                'cold_prior': float(cold_prior.detach()), 'retention_prior': float(retention_prior.detach()),
+                'train_base': self.train_base, 'actor_parameter_names': self.actor_parameter_names,
+                'actor_step_accepted': accepted,
                 'actor_step_attempts': attempt + 1, 'actor_step_lr': used_lr,
                 'initial_action_change_rms': action_change, 'actor_parameter_change_l2': parameter_change,
+                'cold_max_sample_action_rms': cold_max_rms, 'cold_max_abs_action_diff': cold_max_abs,
+                'retention_max_sample_action_rms': retention_max_rms, 'retention_max_abs_action_diff': retention_max_abs,
+                'action_metrics_are_rejected_candidate': not accepted,
                 'critic_loss': float(critic_loss.detach()), 'critic_value_mean': float(values.mean()),
                 'critic_target_mean': float(targets.mean()), 'cold_count': int(cold.sum())}
 
     def save_state(self):
         """Return independent optimizer and value snapshots; the caller saves actor weights."""
         return copy.deepcopy({'actor_optimizer': self.actor_opt.state_dict(), 'value': self.value.state_dict(),
-                              'value_optimizer': self.value_opt.state_dict()})
+                              'value_optimizer': self.value_opt.state_dict(), 'train_base': self.train_base,
+                              'actor_parameter_names': self.actor_parameter_names,
+                              'cold_retention': self.cold_retention})

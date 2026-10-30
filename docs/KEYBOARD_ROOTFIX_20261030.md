@@ -73,3 +73,7 @@ fullcycle candidate_40（最后实际保存）独立20秒站立回归也失败�
 standing_retention_cap20_r1实际8环境seed0连续20秒通过全部原站立门限：最差平均平移0.00671m/s、arm RMS0.01996rad/s、净位移0.01010m，无跌倒/timeout。导出800条真实obs/feedback/source_action固定留出，来源、参考与姿态SHA绑定；这只证明源站姿，非完整键盘通过。
 
 walk bridge_r2已真实完成203步原动作+300步停止，2/2无失败/重置；停止1秒后最大位置变化0.0143/0.0302m，末3秒平面均速0.00092/0.00286m/s，原脚双侧几何接触占比均100%。采集脚本按soft门限拒绝，未导出NPZ。逐关节原生模型复核：仅右肘到-2.25209rad，比训练soft下界-2.23838多0.01371rad，机械下界-2.35619，所有机械越界为0。新增显式--limit-gate hard选项按真实机械范围严格审计（1e-6rad容差），不改机器人、PD或任何姿态；soft范围及越界完整保留报告。停止速度/位移/朝向/姿态/接触门限不变，不把训练margin误称机械限位。
+
+五动作连续停止诊断已启动：tmux sm-gait-five-1030，controller2255755，GPU2，固定源码838a2b4及bundle保存在gait_stop_bridge_five_20261030_source；每段2环境seed0，原完整跟踪后零指令6秒。显式hard gate仅用于物理候选审计，soft越界仍报告；原reset会裁soft边界但保留速度，因此hard-only候选尚不视为训练兼容，不直接加入训练。
+
+下轮SuperMimic修正为默认只训练standing_skill.feedback_weight，冻结站立encoder/decoder及全部运动张量。必需输入上述实测通过的800行站立留出集，初始化权重/参考/姿态SHA三重绑定，teacher重算动作误差≤2e-5。固定留出与实际cold状态均约束相对原teacher的累计最大单样本动作RMS≤0.03、最大元素差≤0.15；每步动作RMS变化≤0.02，回溯同时恢复Adam。学习率默认读取原checkpoint policy_trainer.lr，实测2e-4；不是沿用未经核对的3e-6。默认在线7项物理门检，EMA成对测试仅显式--compare-ema启用。以上实现静态通过，物理效果待新短试。
