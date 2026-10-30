@@ -145,8 +145,9 @@ def main():
         spec.loader.exec_module(module)
         import numpy as np
         ref = np.load(a.reference)
-        arm_target = np.array([ref['joint_pos'][0, list(ref['joint_names']).index(n)] for n in ref['joint_names']
-                               if any(k in n for k in ('shoulder', 'elbow', 'wrist'))])
+        pose = json.loads(a.standing_pose.read_text())['joint_positions_rad']
+        arm_target = np.array([pose[str(n)] for n in ref['joint_names']
+                               if any(k in str(n) for k in ('shoulder', 'elbow', 'wrist'))])
         baselines = {0: json.loads(a.baseline0.read_text()), 7: json.loads(a.baseline7.read_text())}
 
         def evaluate(name, seconds, seed, flags=(), baseline=None):
