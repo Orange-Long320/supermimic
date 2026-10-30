@@ -14,7 +14,16 @@ def main():
     m=load_g1_model();d=mujoco.MjData(m);meta=json.loads((a.walking/'manifest.json').read_text());release=meta['release_frame'];lead=meta['parameters']['release_lead'];startidx=release+lead
     with np.load(a.walking/'candidate.npz') as z:
         root=list(z['body_names']).index('pelvis');fps=float(z['fps'][0]);prefix=np.c_[z['body_pos_w'][:startidx+1,root],z['body_quat_w'][:startidx+1,root],z['joint_pos'][:startidx+1]].astype(float);names=list(z['joint_names'])
-    end=np.load(a.pose)['qpos'].astype(float);start=prefix[-1].copy();yaw=Rotation.from_quat(start[[4,5,6,3]]).as_euler('xyz')[2];end[3:7]=(Rotation.from_euler('z',yaw)*Rotation.from_quat(end[[4,5,6,3]])).as_quat()[[3,0,1,2]]
+    end=np.load(a.pose)['qpos'].astype(float);start=prefix[-1].copy()
+    start_yaw=Rotation.from_quat(start[[4,5,6,3]]).as_euler('xyz')[2]
+    end_rotation=Rotation.from_quat(end[[4,5,6,3]])
+    end_yaw=end_rotation.as_euler('xyz')[2]
+    # The calibrated pose can already have a world heading: rotate only the
+    # difference, rather than applying the walking heading a second time.
+    end[3:7]=(Rotation.from_euler('z',start_yaw-end_yaw)*end_rotation).as_quat()[[3,0,1,2]]
+    final_yaw=Rotation.from_quat(end[[4,5,6,3]]).as_euler('xyz')[2]
+    if abs(np.arctan2(np.sin(final_yaw-start_yaw),np.cos(final_yaw-start_yaw)))>1e-6:
+        raise ValueError('Standing heading does not match walking heading')
     feet=[m.body(s+'_ankle_roll_link').id for s in ('left','right')];geoms=[]
     for foot in feet:
         gg=[]
