@@ -37,19 +37,33 @@ def main():
         foot_bodies.append(body)
     gap = np.empty((len(rows), 2))
     ankle_xy = np.empty((len(rows), 2, 2))
+    ref_gap = np.empty((len(rows), 2)); ref_ankle_xy = np.empty((len(rows), 2, 2))
+    default = np.array([spec['default_joint_pos'][name] for name in names])
+    ref_xy = np.zeros(2); ref_yaw = 0.; n = len(names)
     for i in range(len(rows)):
         data.qpos[:7] = np.r_[xyz[i], quats[i]]; data.qpos[qadr] = joints[i]
         mujoco.mj_kinematics(model, data)
         ankle_xy[i] = data.xpos[foot_bodies, :2]
         for j, ids in enumerate(foot_geom):
             gap[i,j] = np.min(data.geom_xpos[ids,2]-model.geom_size[ids,0])
+        g = np.asarray(rows[i]['goal_current']); grav = g[2*n:2*n+3]
+        roll = np.arctan2(-grav[1], -grav[2]); pitch = np.arcsin(np.clip(grav[0], -1., 1.))
+        ref_quat = Rotation.from_euler('xyz', [roll, pitch, ref_yaw]).as_quat()[[3,0,1,2]]
+        data.qpos[:7] = np.r_[ref_xy, g[-1], ref_quat]; data.qpos[qadr] = default+g[:n]
+        mujoco.mj_kinematics(model, data)
+        ref_ankle_xy[i] = data.xpos[foot_bodies, :2]
+        for j, ids in enumerate(foot_geom):
+            ref_gap[i,j] = np.min(data.geom_xpos[ids,2]-model.geom_size[ids,0])
+        ref_xy += Rotation.from_euler('z', ref_yaw).apply(g[2*n+6:2*n+9])[:2]*.02
+        ref_yaw += float(g[2*n+5])*.02
     def nearest(x): return int(np.argmin(np.abs(t-x)))
     modes = np.array([r['mode'] for r in rows]); changes = np.flatnonzero((modes[:-1]=='jog') & (modes[1:]=='stand'))+1
     events = [e for e in result['phase_events'] if e.get('from') == 'jog' and e.get('to') == 'stand']
     stops=[]
     for index, event in zip(changes, events):
         start = t[index]
-        item = {'time': float(start), 'next_frame_at_selection': event['next_frame_at_selection']}
+        item = {'time': float(start), 'next_frame_at_selection': event['next_frame_at_selection'],
+                'bridge_frames_remaining_before_selection': rows[index-1]['planned_frames']}
         for seconds in (1, 2, 4, 5):
             if start+seconds <= t[-1]:
                 end=nearest(start+seconds)
@@ -58,6 +72,10 @@ def main():
         end=nearest(min(start+5,t[-1]))+1
         item['min_root_height_m']=float(xyz[index:end,2].min())
         item['min_foot_gap_m']=gap[index:end].min(axis=0).tolist()
+        item['reference_min_foot_gap_m']=ref_gap[index:end].min(axis=0).tolist()
+        ref_speed=np.linalg.norm(np.diff(ref_ankle_xy[index:end],axis=0),axis=2)/.02
+        near=(ref_gap[index+1:end] < .005) & (ref_gap[index:end-1] < .005)
+        item['reference_near_ground_ankle_speed_p95_m_s']=[float(np.percentile(ref_speed[:,j][near[:,j]],95)) if np.any(near[:,j]) else None for j in range(2)]
         stops.append(item)
     if len(events) != len(changes): raise ValueError('release event count mismatch')
     stand = None
@@ -78,7 +96,7 @@ def main():
              'frames':len(rows), 'jog_brake_fade':result['jog_brake_fade'], 'stops':stops, 'stand':stand,
              'max_future_overlap_error':result['max_future_overlap_error'], 'dt_p99_s':float(np.percentile(dt,99)),
              'dt_max_s':float(dt.max()), 'dt_over_40ms':int(np.sum(dt>.04)),
-             'scope':'one no-reset rollout; foot gaps are kinematics, not measured contact forces'}
+             'scope':'one no-reset rollout; foot gaps are kinematics, not measured contact forces; reference path reconstructed at 50 Hz in official model'}
     a.out.write_text(json.dumps(summary,indent=2)+'\n'); print(json.dumps(summary,indent=2))
 
 
