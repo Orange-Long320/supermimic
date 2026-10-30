@@ -20,9 +20,10 @@ def main():
             if body in bodies and any(m.body_rootid[b]!=rootbody for b in bodies) and w[0]>1e-5:
                 normal[side]+=float(w[0]);counts[side]+=1;points.append(c.pos[:2].copy())
     margin=None
-    try:
-        hull=ConvexHull(np.asarray(points));com=d.subtree_com[rootbody,:2];margin=float(np.min(-(hull.equations[:,:2]@com+hull.equations[:,2])/np.linalg.norm(hull.equations[:,:2],axis=1)))
-    except (QhullError,ValueError):pass
+    if len(points)>=3:
+        try:
+            hull=ConvexHull(np.asarray(points));com=d.subtree_com[rootbody,:2];margin=float(np.min(-(hull.equations[:,:2]@com+hull.equations[:,2])/np.linalg.norm(hull.equations[:,:2],axis=1)))
+        except (QhullError,ValueError):pass
     joints=m.actuator_trnid[:,0].astype(int);limits=m.jnt_range[joints];v=q[m.jnt_qposadr[joints]]
     result={'reference':str(a.reference),'reference_sha256':hashlib.sha256(a.reference.read_bytes()).hexdigest(),'frame':i,'frames':n,'original_joint_speed_norm_rad_s':reference_speed,'qpos':q.tolist(),'root_force_residual':force[:6].tolist(),'left_right_normal_force_n':normal,'loaded_contact_points':counts,'com_loaded_support_margin_m':margin,'root_up':float(d.xmat[rootbody].reshape(3,3)[2,2]),'max_hard_joint_violation_rad':float(np.maximum(np.maximum(limits[:,0]-v,v-limits[:,1]),0).max()),'scope':'Static inverse-dynamics snapshot only, not proof of closed-loop or physical stability'}
     a.out.parent.mkdir(parents=True,exist_ok=True)
