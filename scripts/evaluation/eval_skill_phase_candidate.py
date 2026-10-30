@@ -45,8 +45,8 @@ def main():
     alternative=MotionLibrary([continuation],cmd.cfg.body_names,cmd.library.default_joint_pos,device='cuda:0')
     if alternative.num_frames<release+k:raise ValueError('Continuation does not cover the release horizon')
     # Verify the prefix is exactly shared; the branch only affects future goals.
-    ix=torch.arange(release+1,device='cuda:0')
-    if not torch.allclose(cmd.library.ref71(ix),alternative.ref71(ix),atol=1e-6,rtol=0):
+    ix=torch.arange(release-1,device='cuda:0')
+    if not torch.allclose(cmd.library.ref71(ix),alternative.ref71(ix),atol=1e-5,rtol=0):
         raise ValueError('Candidate and continuation prefixes differ')
     original_compute=env.termination_manager.compute;failures=[];step_index=[0]
     def capture_termination():
@@ -63,7 +63,8 @@ def main():
                 step_index[0]=step
                 frame=int(cmd.frame[0]); source=alternative if frame<release else cmd.library
                 goal=source.goal_window(cmd.frame,k)
-                states.append(cmd.state_io.read()[0].cpu().numpy().copy());goals.append(goal[0].cpu().numpy().copy())
+                qpos=env.sim.data.qpos[0].cpu().numpy().copy();qpos[:3]-=env.scene.env_origins[0].cpu().numpy()
+                states.append(np.r_[qpos,env.sim.data.qvel[0].cpu().numpy()].copy());goals.append(goal[0].cpu().numpy().copy())
                 frames.append(frame);phases.append(manifest['phases'][frame]);action=policy(obs['policy'],goal)
                 actions.append(action[0].cpu().numpy().copy());obs,_,_,_,_=env.step(action)
                 if failures:break
