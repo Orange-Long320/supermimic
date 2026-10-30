@@ -64,8 +64,11 @@ def main():
     server = viser.ViserServer(host='127.0.0.1', port=a.viewer_port, label='X2 skill phase - experimental')
     class Controller:
         tracker = None
-        def reset(self):
-            self.tracker = None
+        def reset(self, dones=None):
+            # Viewer calls reset(dones) after every step and reset() only for a
+            # manual full reset. False done flags must not clear the scheduler.
+            if dones is None:
+                self.tracker = None
         @torch.no_grad()
         def __call__(self, obs):
             if self.tracker is None:
