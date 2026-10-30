@@ -187,6 +187,7 @@ def main():
                 row = {'elapsed': elapsed, 'mode': mode, 'root': position, 'q': quat,
                        'odom_age_s': odom_age,
                        'packet_age_s': sample_now-data['time'],
+                       'loop_processing_s': time.monotonic()-now,
                        'joint_pos': q, 'joint_vel': qvel, 'target': target,
                        'goal_current': window[0].tolist(), 'anchor': goal[-9:].tolist(),
                        'future_overlap_error': overlap_error,

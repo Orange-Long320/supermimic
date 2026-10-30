@@ -46,6 +46,7 @@ def main():
                                for g in ('leg', 'waist', 'head', 'arm')}
             self.target = None
             self.last = 0.
+            self.was_fresh = None
             self.timer = self.create_timer(.002, self.tick)
 
         def tick(self):
@@ -63,6 +64,11 @@ def main():
             if self.target is None:
                 return
             fresh = time.monotonic() - self.last < .1
+            if fresh != self.was_fresh:
+                print(json.dumps({'event': 'target_freshness', 'fresh': fresh,
+                                  'monotonic': time.monotonic(),
+                                  'target_age_s': time.monotonic() - self.last}), flush=True)
+                self.was_fresh = fresh
             for g, publisher in self.pubs.items():
                 msg = JointCommandArray()
                 for i, name in enumerate(names):
