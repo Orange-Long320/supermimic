@@ -168,6 +168,16 @@ def main():
                 overlap_error = float(np.max(np.abs(previous_window[1:]-window[:-1]))) if previous_window is not None else 0.
                 previous_window = window
                 if abs(float(goal[2*n+9])-position[2]) > .25 or abs(float(goal[2*n+2])-gravity[2]) > .8:
+                    failure_context = {'position': position, 'orientation_wxyz': quat,
+                                       'gravity_body': gravity, 'reference_height': float(goal[2*n+9]),
+                                       'reference_gravity_z': float(goal[2*n+2]),
+                                       'height_error': float(goal[2*n+9])-position[2],
+                                       'gravity_z_error': float(goal[2*n+2])-gravity[2],
+                                       'odometry_age_s': odom_age, 'packet_age_s': sample_now-data['time'],
+                                       'joint_group_age_s': {g: sample_now-data['groups'][g]['time']
+                                                             for g in ('leg', 'waist', 'head', 'arm')},
+                                       'imu_age_s': sample_now-data['imu']['time'],
+                                       'control_elapsed_s': elapsed}
                     raise ValueError('root height or tilt termination')
                 obs = tuple(v for term in range(5) for frame in history for v in frame[term])
                 action = model.infer(obs, goal)
