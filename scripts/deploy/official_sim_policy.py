@@ -54,6 +54,7 @@ def main():
     p.add_argument('--schedule', type=Path, help='JSON array of [seconds, skill]')
     p.add_argument('--keyboard-port', type=int)
     p.add_argument('--jog-brake-fade', type=float, help='Experimental root-velocity fade duration in seconds')
+    p.add_argument('--compact-log', action='store_true', help='Log measured joints and per-step diagnostics without full network vectors')
     p.add_argument('--seconds', type=float, default=10.)
     p.add_argument('--sim-only', action='store_true', required=True)
     a = p.parse_args()
@@ -93,6 +94,7 @@ def main():
         raise ValueError('Invalid schedule')
     keyboard = Keyboard(a.keyboard_port) if a.keyboard_port else None
     initialized = False; control_started = None; records = []; failure = None; started = time.monotonic(); next_tick = started
+    previous_window = None
     print('policy ready for simulator', flush=True)
     try:
         while time.monotonic()-started < a.seconds:
@@ -134,6 +136,9 @@ def main():
                 elapsed = now-control_started
                 mode = keyboard.read() if keyboard else (next(m for t, m in reversed(schedule) if elapsed >= t) if schedule else (a.mode if 3. <= elapsed < a.seconds-3. else 'stand'))
                 goal = tracker.goal(position, quat, q, mode)
+                window = tracker.scheduler.window().copy()
+                overlap_error = float(np.max(np.abs(previous_window[1:]-window[:-1]))) if previous_window is not None else 0.
+                previous_window = window
                 if abs(float(goal[2*n+9])-position[2]) > .25 or abs(float(goal[2*n+2])-gravity[2]) > .8:
                     raise ValueError('root height or tilt termination')
                 obs = tuple(v for term in range(5) for frame in history for v in frame[term])
@@ -141,10 +146,14 @@ def main():
                 if len(action) != n or not all(math.isfinite(v) for v in action): raise ValueError('invalid action')
                 target = [d+s*v for d, s, v in zip(default, scale, action)]
                 send(target); previous = action; tracker.advance()
-                records.append({'elapsed': elapsed, 'mode': mode, 'root': position, 'q': quat,
-                                'target': target, 'observation': obs, 'goal': goal.tolist(), 'action': action,
-                                'phase_source': tracker.scheduler.source, 'phase_index': tracker.scheduler.index,
-                                'planned_frames': len(tracker.scheduler.plan)})
+                row = {'elapsed': elapsed, 'mode': mode, 'root': position, 'q': quat,
+                       'joint_pos': q, 'joint_vel': qvel, 'target': target,
+                       'goal_current': window[0].tolist(), 'anchor': goal[-9:].tolist(),
+                       'future_overlap_error': overlap_error,
+                       'phase_source': tracker.scheduler.source, 'phase_index': tracker.scheduler.index,
+                       'planned_frames': len(tracker.scheduler.plan)}
+                if not a.compact_log: row.update(observation=obs, goal=goal.tolist(), action=action)
+                records.append(row)
             except socket.timeout:
                 if not initialized:
                     send(stand)
@@ -161,6 +170,7 @@ def main():
                   'control_seconds': records[-1]['elapsed']-records[0]['elapsed'] if len(records) > 1 else 0.,
                   'schedule': schedule, 'keyboard': bool(keyboard),
                   'jog_brake_fade': a.jog_brake_fade, 'phase_events': tracker.scheduler.events,
+                  'max_future_overlap_error': max((r['future_overlap_error'] for r in records), default=None),
                   'scope': 'official simulator exploratory run, simulation odometry ground truth'}
         (a.out/'result.json').write_text(json.dumps(report, indent=2)+'\n')
         print(json.dumps(report, indent=2), flush=True)
