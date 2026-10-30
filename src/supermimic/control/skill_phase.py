@@ -9,11 +9,15 @@ import numpy as np
 
 
 class SkillPhase:
-    def __init__(self, gaits, stops, brake_start, joint_count, horizon=10, dt=.02):
+    def __init__(self, gaits, stops, brake_start, joint_count, horizon=10, dt=.02, loops=None):
         self.gaits = {k: np.asarray(v, dtype=np.float32) for k, v in gaits.items()}
         self.stops = {k: np.asarray(v, dtype=np.float32) for k, v in stops.items()}
         self.brake_start = brake_start
         self.nj, self.horizon, self.dt = joint_count, horizon, dt
+        self.loops = loops or {}
+        for name, (start, end) in self.loops.items():
+            if name not in self.gaits or not (0 <= start < end < len(self.gaits[name]) and end-start >= 20):
+                raise ValueError('Invalid gait cycle bounds')
         if not self.gaits or set(self.gaits) != set(self.stops) or horizon < 1:
             raise ValueError('Missing gait or stop references')
         self.stand = self.stops['walk'][-1].copy()
@@ -80,17 +84,18 @@ class SkillPhase:
         if self.source == 'stand':
             return self.stand.copy()
         clip = self.gaits[self.source]
-        if self.index >= len(clip):
+        cycle_end = self.loops[self.source][1] if self.source in self.loops else len(clip)-1
+        if self.index > cycle_end:
             # Select a matching interior phase, then explicitly bridge the seam.
             lo, hi = min(30, len(clip)//4), max(min(31, len(clip)//4+1), len(clip)-25)
             candidates = clip[lo:hi]
             tail = self.queue[-1]
             score = np.mean((candidates[:, :self.nj]-tail[:self.nj])**2, axis=1)
             score += .0025*np.mean((candidates[:, self.nj:2*self.nj]-tail[self.nj:2*self.nj])**2, axis=1)
-            start = lo+int(np.argmin(score))
-            end = min(start+15, len(clip)-1)
+            start = self.loops[self.source][0] if self.source in self.loops else lo+int(np.argmin(score))
+            end = min(start+15, cycle_end)
             self.events.append({'kind':'loop_seam', 'skill':self.source, 'scheduler_step':self.steps,
-                'from_frame':len(clip)-1, 'to_frame':start, 'bridge_end_frame':end,
+                'from_frame':cycle_end, 'to_frame':start, 'bridge_end_frame':end,
                 'joint_position_rms_rad':float(np.sqrt(np.mean((tail[:self.nj]-clip[start,:self.nj])**2))),
                 'joint_velocity_rms_rad_s':float(np.sqrt(np.mean((tail[self.nj:2*self.nj]-clip[start,self.nj:2*self.nj])**2)))})
             self.plan.extend(self._blend(tail, clip[start:end+1]))
