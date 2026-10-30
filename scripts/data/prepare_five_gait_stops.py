@@ -65,6 +65,8 @@ def main():
             dh = np.diff(height)
             if abs(dh[i] - dh[i-1]) > .005:
                 raise ValueError('First stop root height velocity discontinuity: ' + name)
+            if np.max(np.abs(np.diff(dh[i-1:meta['standing_frame']]))) > .005:
+                raise ValueError('Stop root height acceleration discontinuity: ' + name)
             audit['entry_root_height_step_m'] = float(dh[i])
             audit['previous_root_height_step_m'] = float(dh[i-1])
             audit['brake_max_root_height_step_m'] = float(np.max(np.abs(dh[i:meta['standing_frame']])))

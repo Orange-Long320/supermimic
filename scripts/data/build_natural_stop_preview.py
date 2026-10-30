@@ -61,7 +61,8 @@ def main():
             orient=np.concatenate([Rotation.from_matrix(footrot[s].T@rnow[s]).as_rotvec() for s in range(2)])
             ground=np.array([h[s] if s==support else min(h[s],0.) for s in range(2)])
             entry_weight=20*(1-u)**3 if a.soft_entry else 0.
-            return np.r_[50*(pnow-wanted).ravel(),3*orient,100*ground,(.15+entry_weight)*(x[3:]-raw[7+leg]),.03*(x[3:]-prev),(.5+entry_weight)*(x[:3]-raw[:3])]
+            root_weight=100. if a.soft_entry else .5
+            return np.r_[50*(pnow-wanted).ravel(),3*orient,100*ground,(.15+entry_weight)*(x[3:]-raw[7+leg]),.03*(x[3:]-prev),(root_weight+entry_weight)*(x[:3]-raw[:3])]
         x=least_squares(residual,init,bounds=(lower,upper),max_nfev=25,ftol=1e-6,xtol=1e-6,gtol=1e-6).x
         residual(x);raw[:3]=x[:3];raw[7+leg]=x[3:];prev=x[3:];rows.append(raw);errs.append(np.linalg.norm(d.xpos[feet]-wanted,axis=1))
     poses=np.vstack([prefix,np.asarray(rows),np.repeat(end[None],a.hold_frames+1,axis=0)])
