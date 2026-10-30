@@ -35,6 +35,14 @@ def main():
     mask=(time>=max(time[0],time[-1]-10)) & np.array([r['mode']=='stand' for r in rows])
     if not mask.any():raise ValueError('no final stand samples')
     fy=footyaw[mask];gt=gaps[mask];idx=np.flatnonzero(mask);stand_xy=poses[idx,:2];delta=np.linalg.norm(stand_xy-stand_xy[0],axis=1)
+    modes=np.array([r['mode'] for r in rows]); releases=np.flatnonzero((modes[:-1]=='jog') & (modes[1:]=='stand'))+1
+    per_stop=[]
+    for i in releases:
+        selected=(time>=time[i]+4.) & (time<time[i]+5.) & (modes=='stand')
+        if not selected.any():continue
+        per_stop.append({'release_s':float(time[i]),'after_4_to_5_s_mean_foot_yaw_deg':footyaw[selected].mean(axis=0).tolist(),
+                         'after_4_to_5_s_heading_difference_p95_deg':float(np.percentile(abs(footyaw[selected,0]-footyaw[selected,1]),95)),
+                         'after_4_to_5_s_root_tilt_max_deg':float(tilt[selected].max())})
     out={'frames':len(rows),'seconds':float(time[-1]-time[0]),'failure':report['failure'],'window_s':float(time[idx[-1]]-time[idx[0]]),
          'foot_yaw_mean_deg':fy.mean(axis=0).tolist(),'foot_yaw_abs_p95_deg':np.percentile(abs(fy),95,axis=0).tolist(),
          'foot_yaw_difference_abs_p95_deg':float(np.percentile(abs(fy[:,0]-fy[:,1]),95)),
@@ -42,6 +50,7 @@ def main():
          'stand_net_displacement_m':float(delta[-1]),'stand_max_displacement_m':float(delta.max()),
          'foot_gap_min_m':gt.min(axis=0).tolist(),'both_feet_near_ground_fraction':float(np.mean(np.all(gt<.005,axis=1))),
          'max_future_overlap_error':report.get('max_future_overlap_error'),
+         'stops':per_stop,
          'scope':'one official-simulator rollout; kinematic foot gaps, not measured contact force'}
     a.out.write_text(json.dumps(out,indent=2)+'\n');print(json.dumps(out,indent=2))
 
