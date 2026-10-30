@@ -39,7 +39,7 @@ def choose_cycle(path, minimum_speed):
 
 
 class SkillTracker:
-    def __init__(self, env, dataset, cfg, loop_profile='baseline'):
+    def __init__(self, env, dataset, cfg, loop_profile='baseline', straight_heading=False):
         self.env = env
         self.cmd = env.command_manager.get_term('motion')
         names = ['walk', 'backward', 'turn_left_inplace', 'turn_right_inplace', 'jog']
@@ -50,6 +50,14 @@ class SkillTracker:
             raise ValueError('Five stop phases required')
         lib = MotionLibrary(files, self.cmd.cfg.body_names, self.cmd.library.default_joint_pos, device=env.device)
         clips = {c.name: lib.goal_feat[c.start:c.end].cpu().numpy() for c in lib.clips}
+        if straight_heading:
+            for name in ('walk', 'jog'):
+                # The finite source clips carry a non-zero yaw-rate bias. The
+                # keyboard forward commands request a straight heading.
+                clips[name] = clips[name].copy()
+                clips[name+'_stop'] = clips[name+'_stop'].copy()
+                clips[name][:, 2*NJ+5] = 0.
+                clips[name+'_stop'][:, 2*NJ+5] = 0.
         if loop_profile not in ('baseline', 'sustained'):
             raise ValueError('Unknown loop profile')
         loops = {n: choose_cycle(dataset/(n+'.npz'), minimum) for n, minimum in [('walk', .22), ('jog', .5)]} if loop_profile == 'sustained' else {}

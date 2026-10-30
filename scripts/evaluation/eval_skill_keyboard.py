@@ -13,6 +13,7 @@ def main():
     p.add_argument('--out',type=Path,required=True);p.add_argument('--gpu',type=int,required=True)
     p.add_argument('--mode',choices=['all','walk','jog'],default='all');p.add_argument('--hold-seconds',type=float,default=20.)
     p.add_argument('--loop-profile',choices=['baseline','sustained'],default='baseline')
+    p.add_argument('--straight-heading',action='store_true')
     a=p.parse_args()
     import os
     if a.out.exists() or os.environ.get('CUDA_VISIBLE_DEVICES')!=str(a.gpu):
@@ -43,7 +44,7 @@ def main():
         duration=3.+a.hold_seconds+5.
     a.out.mkdir(parents=True)
     try:
-        obs,_=env.reset();origin=env.scene.env_origins[0].cpu().numpy();tracker=SkillTracker(env,a.dataset,cfg,loop_profile=a.loop_profile)
+        obs,_=env.reset();origin=env.scene.env_origins[0].cpu().numpy();tracker=SkillTracker(env,a.dataset,cfg,loop_profile=a.loop_profile,straight_heading=a.straight_heading)
         states=[]; goals=[]; modes=[];failures=[];overlap=[]; previous=None
         with torch.no_grad():
             for step in range(round(50*duration)):
@@ -63,7 +64,7 @@ def main():
         states=np.asarray(states);np.savez_compressed(a.out/'trajectory.npz',states=states,goals=np.asarray(goals),modes=np.asarray(modes))
         report={'checkpoint_sha256':hashlib.sha256(a.checkpoint.read_bytes()).hexdigest(),'steps':len(states),'seconds':len(states)*.02,
             'failures':failures,'resets_after_initialization':0,'max_future_overlap_error':max(overlap,default=0.),'schedule':schedule,
-            'events':tracker.scheduler.events,'loop_profile':a.loop_profile,'loop_bounds':tracker.scheduler.loops,
+            'events':tracker.scheduler.events,'loop_profile':a.loop_profile,'straight_heading':a.straight_heading,'loop_bounds':tracker.scheduler.loops,
             'min_root_height_m':float(states[:,2].min()),'scope':'Exploratory scripted deterministic test, not keyboard or physical acceptance'}
         (a.out/'result.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
     finally:env.close()
