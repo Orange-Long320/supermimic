@@ -54,6 +54,33 @@ class VelocityFeedbackImaginationTrainer:
         nn.init.zeros_(self.value[-1].bias)
         self.projection_opt = torch.optim.Adam([self.projection], lr=lr, betas=self.cfg.betas)
         self.value_opt = torch.optim.Adam(self.value.parameters(), lr=self.cfg.critic_lr)
+        self.retention = None
+
+    def set_retention(self, obs, command, feedback, source_action):
+        """Bind an immutable copy of real rollout states and original full-policy actions."""
+        if self.retention is not None:
+            raise ValueError('Retention is already bound; create a new trainer for another set')
+        if obs.ndim != 2 or len(obs) == 0 or command.shape != (len(obs), 3) or feedback.shape != (len(obs), 6):
+            raise ValueError('Invalid retention shapes')
+        for tensor in (obs, command, feedback, source_action):
+            if tensor.device != self.device or tensor.dtype != self.dtype or not torch.isfinite(tensor).all():
+                raise ValueError('Retention tensors must be finite and match actor device and dtype')
+        norms = command.square().sum(-1).sqrt()
+        expected = command.new_tensor([[.3, 0, 0], [-.2, 0, 0], [0, 0, .4], [0, 0, -.4], [.6, 0, 0]])
+        if not (norms == 0).any() or not ((norms > 0) & (norms < .1)).any():
+            raise ValueError('Retention must cover zero and near-zero commands')
+        if any(not torch.isclose(command, c, atol=1e-6, rtol=0).all(-1).any() for c in expected):
+            raise ValueError('Retention must cover all five full commands')
+        with torch.no_grad():
+            teacher = self.policy.velocity_action(obs, command, feedback, disable_moving_feedback=True)
+        if teacher.shape != source_action.shape or not torch.isfinite(teacher).all():
+            raise ValueError('Invalid source action shape or teacher output')
+        source_difference = float((teacher - source_action).abs().max())
+        if source_difference > 2e-5:
+            raise ValueError(f'Retention source actions differ from fixed teacher: {source_difference}')
+        self.retention = dict(obs=obs.detach().clone(), command=command.detach().clone(),
+                              feedback=feedback.detach().clone(), teacher=teacher.detach().clone(),
+                              source_action_max_abs_diff=source_difference)
 
     def _feedback(self, state):
         return torch.cat((measured_velocity(state), state.new_zeros((*state.shape[:-1], 3))), -1)
@@ -77,7 +104,7 @@ class VelocityFeedbackImaginationTrainer:
             if tensor.device != self.device or not torch.isfinite(tensor).all():
                 raise ValueError('Inputs must be finite tensors on the actor device')
 
-    def update(self, batch, retention_batch):
+    def update(self, batch):
         """Update from real histories and a fixed real-state retention set.
 
         Histories are oldest first; their last action is the previous action for
@@ -85,10 +112,10 @@ class VelocityFeedbackImaginationTrainer:
         """
         if any(k not in batch for k in ('hist_states', 'hist_actions', 'xi', 'command')):
             raise ValueError('batch requires hist_states, hist_actions, xi and command')
-        if any(k not in retention_batch for k in ('obs', 'command', 'feedback')):
-            raise ValueError('retention_batch requires obs, command and feedback')
+        if self.retention is None:
+            raise ValueError('Call set_retention before updating')
         states, history_actions, xi, command = (batch[k].detach() for k in ('hist_states', 'hist_actions', 'xi', 'command'))
-        retained_obs, retained_command, retained_feedback = (retention_batch[k].detach() for k in ('obs', 'command', 'feedback'))
+        retained_obs, retained_command, retained_feedback = (self.retention[k] for k in ('obs', 'command', 'feedback'))
         if states.ndim != 3 or states.shape[0] != self.history or history_actions.ndim != 3 or history_actions.shape[:2] != states.shape[:2]:
             raise ValueError('Histories must have matching (history, batch, feature) dimensions')
         n = states.shape[1]
@@ -97,14 +124,15 @@ class VelocityFeedbackImaginationTrainer:
         if retained_obs.ndim != 2 or retained_command.shape != (len(retained_obs), 3) or retained_feedback.shape != (len(retained_obs), 6):
             raise ValueError('Invalid retention set dimensions')
         self._validate((states, history_actions, xi, command, retained_obs, retained_command, retained_feedback))
-        if (command.square().sum(-1) < .1 ** 2).any() or (retained_command.square().sum(-1) < .1 ** 2).any():
-            raise ValueError('All calibration and retention commands must have norm >= 0.1')
-        groups, inverse = torch.unique(retained_command, dim=0, return_inverse=True)
+        if (command.square().sum(-1) < .1 ** 2).any():
+            raise ValueError('Imagined calibration commands must have norm >= 0.1')
+        norms = retained_command.square().sum(-1).sqrt()
         expected = retained_command.new_tensor([[.3,0,0],[-.2,0,0],[0,0,.4],[0,0,-.4],[.6,0,0]])
-        if any(not torch.isclose(retained_command, c, atol=1e-6, rtol=0).all(-1).any() for c in expected):
-            raise ValueError('Retention set must cover forward, backward, both turns and jogging')
-        if not torch.allclose(retained_feedback[:, 3:], torch.zeros_like(retained_feedback[:, 3:]), atol=1e-6, rtol=0):
-            raise ValueError('Movement retention feedback must have zero anchor errors')
+        masks = [('zero', norms == 0), ('near_zero', (norms > 0) & (norms < .1))]
+        masks += [(name, torch.isclose(retained_command, c, atol=1e-6, rtol=0).all(-1))
+                  for name, c in zip(('forward', 'backward', 'left', 'right', 'jog'), expected)]
+        covered = torch.stack([mask for _, mask in masks]).any(0)
+        masks.append(('other_ramp', ~covered))
         xi_normalized = self.wm.spec.normalize_xi(xi)
         obs_history = [analytic_observation(states[i], history_actions[i], xi, self.default_joint_pos) for i in range(self.history)]
         self.value.requires_grad_(False)
@@ -141,7 +169,8 @@ class VelocityFeedbackImaginationTrainer:
             value_inputs = self._critic_inputs(ss, command_sequence, xi_normalized.expand(self.horizon + 1, -1, -1))
             terminal_value = self.value(value_inputs[-1]).squeeze(-1)
             objective = policy_objective(rollout, terminal_value, self.cfg.gamma)
-            retained_latent, retained_teacher = self._teacher(retained_obs, retained_command)
+            retained_latent, _ = self._teacher(retained_obs, retained_command)
+            retained_teacher = self.retention['teacher']
             retained_new_latent = self._new_latent(retained_obs, retained_command, retained_feedback)
             retained_action = self.policy.velocity_action(retained_obs, retained_command, retained_feedback)
             if not hasattr(self, '_zero_projection_verified'):
@@ -149,8 +178,10 @@ class VelocityFeedbackImaginationTrainer:
                     raise AssertionError('Zero projection changed original moving actions')
                 self._zero_projection_verified = True
             imagined_cost = torch.stack(teacher_costs).mean()
-            retained_cost = ((retained_new_latent - retained_latent).square().mean(-1)
-                             + (retained_action - retained_teacher).square().mean(-1)).mean()
+            full_movement = norms >= .1
+            retained_cost = (retained_action - retained_teacher).square().mean()
+            if full_movement.any():
+                retained_cost = retained_cost + (retained_new_latent[full_movement] - retained_latent[full_movement]).square().mean()
             loss = -objective / self.horizon + 10. * (imagined_cost + retained_cost)
             if not torch.isfinite(loss) or not torch.isfinite(value_inputs).all() or not torch.isfinite(rr).all() or not torch.isfinite(dhat).all():
                 raise FloatingPointError('Non-finite imagination or actor objective')
@@ -162,6 +193,10 @@ class VelocityFeedbackImaginationTrainer:
                 raise FloatingPointError('Missing or non-finite velocity projection gradient')
             prior_projection = self.projection.detach().clone()
             prior_optimizer = copy.deepcopy(self.projection_opt.state_dict())
+            initial_obs = flatten_history_term_major(torch.stack([analytic_observation(states[i], history_actions[i], xi, self.default_joint_pos) for i in range(self.history)]))
+            initial_feedback = self._feedback(states[-1])
+            with torch.no_grad():
+                initial_action = self.policy.velocity_action(initial_obs, command, initial_feedback).clone()
             accepted, used_lr, parameter_change = False, 0., 0.
             group_metrics = []
             for attempt in range(8):
@@ -177,13 +212,19 @@ class VelocityFeedbackImaginationTrainer:
                     current = self.policy.velocity_action(retained_obs, retained_command, retained_feedback)
                     diff = current - retained_teacher
                     group_metrics = []
-                    for i, group_command in enumerate(groups):
-                        selected = diff[inverse == i]
-                        group_metrics.append({'command': group_command.cpu().tolist(), 'count': len(selected),
-                                              'rms': float(selected.square().mean().sqrt()),
+                    for name, mask in masks:
+                        selected = diff[mask]
+                        if not len(selected):
+                            continue
+                        group_metrics.append({'group': name, 'count': len(selected),
+                                              'max_sample_rms': float(selected.square().mean(-1).sqrt().max()),
                                               'max_abs': float(selected.abs().max())})
+                    initial_new = self.policy.velocity_action(initial_obs, command, initial_feedback)
+                    update_rms = float((initial_new - initial_action).square().mean().sqrt())
+                    zero_diff = diff[norms == 0]
                     finite = torch.isfinite(self.projection).all() and torch.isfinite(current).all()
-                if finite and all(g['rms'] <= .03 and g['max_abs'] <= .15 for g in group_metrics):
+                if (finite and update_rms <= .02 and torch.equal(zero_diff, torch.zeros_like(zero_diff))
+                        and all(g['max_sample_rms'] <= .03 and g['max_abs'] <= .15 for g in group_metrics)):
                     accepted, used_lr = True, rate
                     parameter_change = float((self.projection.detach() - prior_projection).norm())
                     break
@@ -222,6 +263,7 @@ class VelocityFeedbackImaginationTrainer:
                 'imagined_teacher_loss': float(imagined_cost.detach()), 'retention_teacher_loss': float(retained_cost.detach()),
                 'step_accepted': accepted, 'step_attempts': attempt + 1, 'step_lr': used_lr,
                 'projection_change_l2': parameter_change, 'retention_groups': group_metrics,
+                'update_action_rms': update_rms,
                 'retention_metrics_are_rejected_candidate': not accepted,
                 'critic_loss': float(critic_loss.detach()), 'critic_value_mean': float(values.mean()),
                 'critic_target_mean': float(targets.mean()), 'physical_validation': 'pending'}
@@ -230,4 +272,5 @@ class VelocityFeedbackImaginationTrainer:
         """Return independent projection and optimizer/value snapshots."""
         return copy.deepcopy({'velocity_feedback_weight': self.projection.detach().clone(),
                               'projection_optimizer': self.projection_opt.state_dict(),
-                              'value': self.value.state_dict(), 'value_optimizer': self.value_opt.state_dict()})
+                              'value': self.value.state_dict(), 'value_optimizer': self.value_opt.state_dict(),
+                              'retention': self.retention})

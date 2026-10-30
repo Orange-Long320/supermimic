@@ -83,3 +83,7 @@ walk bridge_r2已真实完成203步原动作+300步停止，2/2无失败/重置�
 retained_r1已启动controller2257644/train2257688，tmux sm-stop-retained-1030，GPU2，128环境/120周期/30分钟上限，固定源444effc及bundle在keyboard_supermimic_retained_20261030_source。采用feedback-only及固定真实cold留出，不接入hard-only桥接候选。
 
 新增独立native_stand_goal诊断入口：原velocity移动路径保留，近零分支以原motion encoder+静态站立NPZ原生goal替代独立站立expert，锚定当前停止位置和航向，原10帧obs历史保持，记录同状态新旧动作差与全部失败。该分支仅诊断，无训练、无PPO；报告明确override，不可当accepted。片尾数据不被当前velocity推理直接读取，故必须经过训练/教师对齐或显式motion-goal分支才可能影响键盘结果。静态通过，实际结果待执行。
+
+native motion-goal对照在GPU1实际完成两种子（full0/full7），不采用；seed0 8/8无失败但前进均速0.2029m/s，五运动后最差停止净位移0.1307/0.1137/0.0928/0.1030/0.1540m，多项停止yaw/平移失败，同状态新旧站立动作RMS差0.2287。原生目标接口可用不等于该站立目标已学会；直接换分支不构成缺尾因果修复。
+
+另准备移动稳态BPTT校准的固定原策略真实留出：原66秒调度，8环境，每10步及每近零斜坡步保留obs/实际command/feedback/完整原teacher动作，无摔倒/重置才导出。固定抽样集非全部状态，明确保留范围；helper同时约束零/近零/五动作/其余斜坡样本，默认只允许新velocity_feedback_weight变化，原站立和移动主体保持。稳态32步想象不宣称覆盖动态启停，后续仍需完整闭环门检。采集与训练入口当前尚未运行。
