@@ -7,7 +7,7 @@
 - [AimDK 1.1 快速开始](https://x2-aimdk.agibot.com/zh-cn/latest/quick_start/prerequisites.html)：SDK 必须与机器人固件版本匹配；Ubuntu 22.04、ROS 2 Humble；开发计算单元从 1.2.0 起须在容器中运行二开程序。
 - [获取 SDK](https://x2-aimdk.agibot.com/zh-cn/latest/get_sdk/index.html)：RL Deploy 是单独扩展包。[仿真与强化学习](https://x2-aimdk.agibot.com/zh-cn/latest/sim_rl/index.html)明确两种示例只在仿真验证，电机 KP/KD 不可直接用于真机。
 - [底层关节接口](https://x2-aimdk.agibot.com/zh-cn/latest/Interface/control_mod/joint_control.html)：关节命令没有超时或失效保护，停止下发不会自动进入安全状态；不能把本进程的异常退出或软件限幅当作安全系统。
-- 官方扩展包 `https://x2-aimdk.agibot.com/downloads/aimdk-extra-x2_rl_deploy-v1.1.zip`；服务器 `/home/2025-Long.xh/HHD/data/supermimic/downloads/aimdk-1.1/x2_rl_deploy-v1.1.zip`，SHA-256 `cbf772de7875a70f85b4bd4f3097e763065d64fbebc0c811e65833a3c2339f17`。包内 `JointStateArray`、`JointCommandArray` 和 `motion_control_node.cc` 已核对；示例关节发布周期 2 ms。未取得机器人的固件版本，不能认定此版本匹配。
+- 官方扩展包 `https://x2-aimdk.agibot.com/downloads/aimdk-extra-x2_rl_deploy-v1.1.zip`；服务器 `/home/2025-Long.xh/HHD/data/supermimic/downloads/aimdk-1.1/x2_rl_deploy-v1.1.zip`，SHA-256 `cbf772de7875a70f85b4bd4f3097e763065d64fbebc0c811e65833a3c2339f17`。包内 `JointStateArray`、`JointCommandArray` 和 `motion_control_node.cc` 已核对；示例关节发布周期 2 ms。用户提供机器人版本 1.1.5；公开文档显示 SDK 1.1.0，尚不能确认与 1.1.5 的对应关系。
 - 旗舰版 X2 Ultra 使用 v1.3.0 模型；Ultra-N 和 EDU 使用 v1.4.0，按[官方铭牌说明](https://github.com/AgibotTech/agibot_x2_urdf)核对。仓库训练模型不等于已核实的实机标定。
 
 ## 分层和当前代码
@@ -35,3 +35,5 @@ SM_ROBOT=x2_ultra PYTHONPATH=src .venv/bin/python scripts/deploy/export_policy.p
 4. 在服务器官方 RL 仿真和本项目仿真中完成连续键盘动作、多时相启停、长时站立及异常注入；当前策略已有脚部穿透、漂移等局限，尚未完成物理验收。之后才考虑受控实机测试。
 
 未实现：硬件命令发布、实际控制权切换、真机安全看门狗、在线目标构造和完整实机部署。以上前置条件完成前不可接入电机输出。
+
+2026-10-31 更新：已增加仅本机隔离的官方仿真策略及键盘接口；仿真提供骨盆真值，不等于实机状态估计。测试发现小跑停步距离较长、站立漂移及控制周期抖动，尚未通过实机部署验收。详情见 [官方仿真记录](X2_OFFICIAL_SIM_20261031.md)。
