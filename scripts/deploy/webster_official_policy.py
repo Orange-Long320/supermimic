@@ -127,12 +127,13 @@ def main():
                 w, x, y, z = state.orientation_wxyz
                 gravity = (2*(w*y-x*z), -2*(w*x+y*z), -1+2*(x*x+y*y))
                 terms = (tuple(v-d for v, d in zip(q, default)), qvel, state.angular_velocity, gravity, previous)
-                history.append(terms)
+                if not initialized:
+                    # Match the training observation buffer's reset backfill.
+                    history.extend([terms] * 10)
+                else:
+                    history.append(terms)
                 if not initialized:
                     initialized = True
-                if len(history) < 10:
-                    send(stand)
-                    continue
                 if control_started is None: control_started = now
                 elapsed = now-control_started
                 mode = 'webster'
