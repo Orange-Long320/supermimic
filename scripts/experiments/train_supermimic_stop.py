@@ -30,7 +30,7 @@ def sampleable_start_mask(replay, history):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for key in ('checkpoint', 'dataset', 'reference', 'standing-pose', 'standing-retention', 'control-retention', 'out'):
+    for key in ('checkpoint', 'dataset', 'reference', 'standing-pose', 'standing-retention', 'control-retention', 'control-dynamics', 'control-report', 'out'):
         p.add_argument('--' + key, type=Path, required=True)
     p.add_argument('--num-envs', type=int, default=256)
     p.add_argument('--batch', type=int, default=128)
@@ -51,6 +51,8 @@ def main():
         p.error('Invalid training bounds')
     if a.out.exists():
         p.error('Output directory already exists')
+    if a.batch < 8 or a.wm_batches < 2:
+        p.error('Use at least eight actor samples and two world-model batches for the strata')
     if not 0 <= a.ema_decay < 1:
         p.error('EMA decay must be in [0, 1)')
 
@@ -67,6 +69,7 @@ def main():
     from supermimic.world_model.world_model import WorldModel, WorldModelCfg
     from supermimic_stop_imagination import StopImaginationTrainer
     from supermimic_stop_ema import StandingEMA
+    from fixed_control_dynamics import FixedControlDynamics
 
     torch.set_num_threads(2)
     torch.manual_seed(29)
@@ -175,6 +178,11 @@ def main():
                                retention['source_action'].to('cuda:0'))
     trainer.set_control_retention(*(control_retention[k].to('cuda:0')
                                    for k in ('obs', 'command', 'feedback', 'source_action')))
+    fixed_dynamics = FixedControlDynamics(a.control_dynamics, a.control_retention, a.control_report,
+        source_sha256=sha(a.checkpoint), reference_sha256=sha(a.reference), standing_pose_sha256=sha(a.standing_pose),
+        report_sha256=sha(a.control_report), dt=env.step_dt, device='cuda:0')
+    if fixed_dynamics.provenance['preserve_moving_feedback'] != a.preserve_moving_feedback:
+        raise ValueError('Fixed dynamics collection used a different movement-feedback mode')
     trainable_keys = {'standing_skill.' + name for name in trainer.actor_parameter_names}
     actual_trainable = {name for name, param in policy.named_parameters() if param.requires_grad}
     if trainable_keys != actual_trainable:
@@ -216,12 +224,16 @@ def main():
         train_base=a.train_base, trainable_policy_parameters=sorted(trainable_keys),
         standing_retention_sha256=sha(a.standing_retention), standing_retention_samples=len(retention['obs']),
         control_retention_sha256=sha(a.control_retention), control_retention_samples=len(control_retention['obs']),
+        control_dynamics=fixed_dynamics.provenance, wm_fixed_batches_per_update=(a.wm_batches+1)//2,
+        wm_recent_batches_per_update=a.wm_batches//2, actor_fixed_source_fraction=.5,
         standing_retention_source_action_max_abs_diff=trainer.cold_retention['source_action_max_abs_diff'])
     a.out.mkdir(parents=True, exist_ok=False)
     (a.out / 'launch.json').write_text(json.dumps(dict(argv=sys.argv, gpu=gpu, checkpoint_sha256=sha(a.checkpoint),
         reference_sha256=sha(a.reference), pose_sha256=sha(a.standing_pose), walk_sha256=sha(a.dataset / 'walk.npz'),
         entry_sha256=sha(__file__), standing_retention_sha256=sha(a.standing_retention),
         control_retention_sha256=sha(a.control_retention),
+        control_dynamics=fixed_dynamics.provenance,
+        fixed_dynamics_helper_sha256=sha(Path(__file__).with_name('fixed_control_dynamics.py')),
         actor_lr=a.lr, actor_lr_source=lr_source, train_base=a.train_base,
         preserve_moving_feedback=a.preserve_moving_feedback, moving_projection_sha256=moving_projection_sha,
         trainable_policy_parameters=sorted(trainable_keys), ema=ema.metadata(),
@@ -265,10 +277,15 @@ def main():
         after_mask = eligible & meta_stop & ~meta_cold
         cold_mask = eligible & meta_stop & meta_cold
         move_mask = eligible & ~meta_stop & ~meta_cold
-        nmove = a.batch // 2 if move_mask.any() else 0
-        nafter = (a.batch-nmove)//2
-        ncold = a.batch-nmove-nafter
-        parts = [starts(after_mask, nafter), starts(cold_mask, ncold)]
+        nsource = a.batch // 2
+        nrecent = a.batch - nsource
+        nmove = nrecent // 2 if move_mask.any() else 0
+        nafter = (nrecent-nmove)//2 if after_mask.any() else 0
+        ncold = nrecent-nmove-nafter
+        parts = []
+        if nafter:
+            parts.append(starts(after_mask, nafter))
+        parts.append(starts(cold_mask, ncold))
         if nmove:
             parts.append(starts(move_mask, nmove))
         nstop = nafter+ncold
@@ -276,8 +293,11 @@ def main():
         hs = torch.cat([v[2] for v in parts], dim=1); ha = torch.cat([v[3] for v in parts], dim=1)
         xy = meta_xy[e, t].clone(); yaw = meta_yaw[e, t].clone(); age = meta_age[e, t].clone()
         xy[nstop:] = hs[-1, nstop:, :2]; yaw[nstop:] = heading_yaw(hs[-1, nstop:, 3:7]); age[nstop:] = 0
-        return dict(hist_states=hs, hist_actions=ha, xi=replay.xi[e, t], anchor_xy=xy,
-                    anchor_yaw=yaw, stop_age=age, is_cold=meta_cold[e, t])
+        recent = dict(hist_states=hs, hist_actions=ha, xi=replay.xi[e, t], anchor_xy=xy,
+                      anchor_yaw=yaw, stop_age=age, is_cold=meta_cold[e, t])
+        fixed = fixed_dynamics.sample_stop_starts(nsource, history)
+        return {key: torch.cat((recent[key], fixed[key]), dim=1 if key in ('hist_states', 'hist_actions') else 0)
+                for key in recent}
 
     @torch.no_grad()
     def heldout():
@@ -386,8 +406,9 @@ def main():
                 if iteration == 2:
                     row['heldout_before_first_fit'] = heldout()
                 wm.requires_grad_(True)
-                for _ in range(a.wm_batches):
-                    states, actions, xi = sample_windows(train_env, a.wm_batch)
+                for fit_index in range(a.wm_batches):
+                    states, actions, xi = (fixed_dynamics.sample_train(a.wm_batch) if fit_index % 2 == 0
+                                           else sample_windows(train_env, a.wm_batch))
                     pred = states[0]; loss = 0.
                     for j in range(32):
                         pred = wm.step(pred, actions[j], xi)
@@ -399,16 +420,19 @@ def main():
                     wm_opt.step()
                 row['wm_loss'] = float(loss.detach())
                 metrics, pose_metrics = heldout(); row['heldout_velocity_rmse'] = metrics; row['heldout_pose_rmse'] = pose_metrics
-                row['model_gate'] = (all(x < y for x, y in zip(metrics['8'], (.10, .10, .15)))
+                row['recent_model_gate'] = (all(x < y for x, y in zip(metrics['8'], (.10, .10, .15)))
                     and all(x < y for x, y in zip(metrics['32'], (.20, .20, .30)))
                     and all(x < y for x, y in zip(pose_metrics['32'], (.03, .08))))
+                row['fixed_phase_model_gate'] = fixed_dynamics.heldout_gate(wm)
+                row['model_gate'] = row['recent_model_gate'] and row['fixed_phase_model_gate']['passed']
                 actor_eligible = sampleable_start_mask(replay, history) & train_env[:, None]
                 cold_starts = int((actor_eligible & meta_stop & meta_cold).sum())
                 after_starts = int((actor_eligible & meta_stop & ~meta_cold).sum())
                 row['sampleable_cold_starts'] = cold_starts
                 row['sampleable_post_motion_stop_starts'] = after_starts
-                actor_ready = cold_starts > 0 and after_starts > 0
+                actor_ready = cold_starts > 0
                 row['actor_samples_ready'] = actor_ready
+                row['fixed_source_stop_batch'] = a.batch // 2
                 if row['model_gate'] and actor_ready:
                     wm.requires_grad_(False)
                     row['actor_result'] = trainer.update(actor_batch())

@@ -119,3 +119,11 @@ collector新增保留BPTT moving projection模式和完整真实转移raw.pt：s
 controlguard_r1已启动GPU2，tmux sm-stop-controlguard-1030，wrapper2277635、collector2277643、train2278317，固定source5910e77及bundle；完整source合成策略的66秒采集已完成3300步/8环境，无终止，保存raw与2872条control留出，进入新的有界20轮。保留同源20秒cold留出，模型/门限/训练周期不延长。
 
 新增两个服务器CPU离线审计入口，尚未执行：audit_control_action_change比较旧失败fullbase与source在同一真实控制输入上的逐状态/逐阶段动作偏移，先校验source重算动作，不将相关性当唯一因果；audit_control_world_model按11阶段对新完整raw做1/8/32步预测和原模型门限，检查全局均值是否掩盖阶段失败。采集seed只在raw/report SHA与来源绑定后采用，训练seed缺失如实null，不声称统计独立，也不生成accepted。
+
+两个CPU审计已实际完成：source动作重算最大差9.54e-6，纯moving逐位相同；旧失败base20在forward-stop有26.8%、jog-stop有21.3%样本的动作RMS偏离>0.03，整批均值0.00622但最大0.05245，证明原平均动作界掩盖了停止状态的偏离。WM全局门检通过但jog阶段8步yaw RMSE0.17384超过原0.15；新controlguard20的WM同一阶段仍0.17007，不能用全局平均放行所有阶段。报告keyboard_control_audit_20261030_r1。
+
+controlguard20已完成5次有效更新、855.11MiB峰值，fixed control最大样本RMS0.02889、纯moving输出相等；hold20仍通过，但full0前进停止0.651m、小跑停止1.610m并有arm/pose/yaw失败，拒绝，不延长此全站立网络配方。逐状态动作界也不等于闭环稳定性。
+
+已准备但未运行固定完整动态数据训练：20个WM minibatch交替近期回放与完整66秒source转移，source按11阶段均衡、6/2环境隔离；actor可从5个真实source运动后停止状态重建历史/锚点，而非仅最新5.12秒环形数据；全部source阶段与近期WM均过原门限才更新。新增control-dynamics/report必需输入与SHA绑定，未放宽门限。观测输入快速CPU核对：原term-major/oldest-first的qvel和prevaction误差0，角速度最大5.96e-7，推断default q跨样本差8.94e-8；未发现时间反序/一拍错位。完整审计脚本尚待执行。
+
+新目标一致性审计anchor_objective_audit.json：source小跑末3秒最差环境平均速度0.01915m/s，但距冻结anchor均值0.13926m，位置cost均值3.8785大于基础站立reward2。anchor在指令进入standing半径时已冻结，实际制动尚未结束，奖励要求返回旧点，与验收停后原地保持不一致；尚不称物理漂移唯一因果。优先准备独立brake-latch context对照：不改权重、观测历史、门限或时间；制动时只提供真实速度与零位置/角度误差，速度<0.03/yaw<0.05/全关节dq RMS<0.3连续0.2秒后锁定当前点，冷启动同原逻辑。输出明确context_override，不可accepted，实测待执行。
