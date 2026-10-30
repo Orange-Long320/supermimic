@@ -23,7 +23,7 @@ def digest(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for key in ('source', 'checkpoint', 'dataset', 'reference', 'standing-pose', 'standing-retention', 'baseline0', 'baseline7', 'out'):
+    for key in ('source', 'checkpoint', 'dataset', 'reference', 'standing-pose', 'standing-retention', 'control-retention', 'baseline0', 'baseline7', 'out'):
         p.add_argument('--' + key, type=Path, required=True)
     p.add_argument('--source-commit', required=True)
     p.add_argument('--gpu', type=int, default=2)
@@ -47,6 +47,7 @@ def main():
     a.reference = a.reference.resolve()
     a.standing_pose = a.standing_pose.resolve()
     a.standing_retention = a.standing_retention.resolve()
+    a.control_retention = a.control_retention.resolve()
     a.baseline0 = a.baseline0.resolve()
     a.baseline7 = a.baseline7.resolve()
     a.out = a.out.resolve()
@@ -55,7 +56,7 @@ def main():
     ema_helper = a.source / 'scripts/supermimic_stop_ema.py'
     evaluator = a.source / 'scripts/evaluate_standing_skill.py'
     prior_controller = a.source / 'scripts/run_control_feedback.py'
-    for path in (entry, helper, ema_helper, evaluator, prior_controller, a.checkpoint, a.reference, a.standing_pose, a.standing_retention,
+    for path in (entry, helper, ema_helper, evaluator, prior_controller, a.checkpoint, a.reference, a.standing_pose, a.standing_retention, a.control_retention,
                  a.baseline0, a.baseline7, a.dataset / 'walk.npz'):
         if not path.is_file():
             p.error(f'Required file missing: {path}')
@@ -74,6 +75,8 @@ def main():
     record['actor_lr_override'] = a.lr
     record['standing_retention'] = str(a.standing_retention)
     record['standing_retention_sha256'] = digest(a.standing_retention)
+    record['control_retention'] = str(a.control_retention)
+    record['control_retention_sha256'] = digest(a.control_retention)
     train = None
     log = None
 
@@ -119,7 +122,7 @@ def main():
         source_files = {str(path.relative_to(a.source)): digest(path) for path in sorted((a.source / 'src').rglob('*'))
                         if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc'}
         inputs = (entry, helper, ema_helper, evaluator, prior_controller, Path(__file__).resolve(), a.checkpoint, a.reference,
-                  a.standing_pose, a.standing_retention, a.baseline0, a.baseline7, a.dataset / 'walk.npz')
+                  a.standing_pose, a.standing_retention, a.control_retention, a.baseline0, a.baseline7, a.dataset / 'walk.npz')
         record.update(interpreter_probe=probe, platform=platform.platform(), cpu=platform.machine(),
                       source_sha256=source_files, input_sha256={str(path): digest(path) for path in inputs},
                       environment={key: env[key] for key in ('CUDA_VISIBLE_DEVICES', 'PYTHONPATH', 'SM_ROBOT', 'MUJOCO_GL',
@@ -127,7 +130,7 @@ def main():
                                                              'TRANSFORMERS_OFFLINE', 'XDG_CACHE_HOME')})
         argv = [str(py), str(entry), '--checkpoint', str(a.checkpoint), '--dataset', str(a.dataset),
                 '--reference', str(a.reference), '--standing-pose', str(a.standing_pose),
-                '--standing-retention', str(a.standing_retention), '--out', str(a.out / 'train'),
+                '--standing-retention', str(a.standing_retention), '--control-retention', str(a.control_retention), '--out', str(a.out / 'train'),
                 '--iterations', str(a.iterations), '--num-envs', str(a.num_envs), '--hours', str(a.hours),
                 '--ema-decay', str(a.ema_decay)]
         if a.lr is not None:

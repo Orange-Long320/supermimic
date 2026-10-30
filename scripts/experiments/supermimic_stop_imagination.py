@@ -44,6 +44,8 @@ class StopImaginationTrainer:
         self.actor_parameter_names = [name for name, param in self.actor.named_parameters() if param.requires_grad]
         self.actor_params = [param for param in self.actor.parameters() if param.requires_grad]
         self.cold_retention = None
+        self.control_retention = None
+        self._update_started = False
         self.device = next(self.actor.parameters()).device
         self.dtype = next(self.actor.parameters()).dtype
         self.default_joint_pos = torch.as_tensor(default_joint_pos, device=self.device, dtype=self.dtype).detach().clone()
@@ -93,6 +95,33 @@ class StopImaginationTrainer:
                                'source_action_max_abs_diff': difference,
                                'source_action_supplied': source_action is not None}
 
+    def set_control_retention(self, obs, command, feedback, source_action):
+        """Bind original full-policy actions on real source samples before any update."""
+        if self._update_started or self.control_retention is not None:
+            raise ValueError('Control retention must be bound once before the first update')
+        if obs.ndim != 2 or not len(obs) or command.shape != (len(obs), 3) or feedback.shape != (len(obs), 6):
+            raise ValueError('Control retention inputs must be nonempty and aligned')
+        if any(t.device != self.device or t.dtype != self.dtype or not torch.isfinite(t).all()
+               for t in (obs, command, feedback, source_action)):
+            raise ValueError('Control retention tensors must be finite and match the actor device and dtype')
+        norms = command.square().sum(-1).sqrt()
+        expected = command.new_tensor([[.3, 0, 0], [-.2, 0, 0], [0, 0, .4], [0, 0, -.4], [.6, 0, 0]])
+        if not (norms == 0).any() or not ((norms > 0) & (norms < .1)).any():
+            raise ValueError('Control retention must include zero and near-zero commands')
+        if any(not torch.isclose(command, c, atol=1e-6, rtol=0).all(-1).any() for c in expected):
+            raise ValueError('Control retention must include all five full movement commands')
+        with torch.no_grad():
+            teacher = self.policy.velocity_action(obs, command, feedback)
+        if teacher.shape != source_action.shape or not torch.isfinite(teacher).all():
+            raise ValueError('Control source action shape or teacher output is invalid')
+        difference = float((teacher - source_action).abs().max())
+        if difference > 2e-5:
+            raise ValueError(f'Control source action differs from initial policy by {difference:.8g} (limit 2e-5)')
+        self.control_retention = {'obs': obs.detach().clone(), 'command': command.detach().clone(),
+                                  'feedback': feedback.detach().clone(), 'teacher_action': teacher.detach().clone(),
+                                  'source_action_max_abs_diff': difference,
+                                  'scope': 'source samples for action retention; physical acceptance not established'}
+
     def _feedback(self, state, anchor_xy, anchor_yaw):
         yaw = heading_yaw(state[..., 3:7])
         delta = anchor_xy - state[..., :2]
@@ -131,6 +160,8 @@ class StopImaginationTrainer:
         required = ('hist_states', 'hist_actions', 'xi', 'anchor_xy', 'anchor_yaw', 'stop_age', 'is_cold')
         if self.cold_retention is None:
             raise ValueError('Call set_cold_retention with the verified standing dataset before updating')
+        if self.control_retention is None:
+            raise ValueError('Call set_control_retention with the fixed source samples before updating')
         if any(key not in batch for key in required):
             raise ValueError(f'Batch must contain {required}')
         states = batch['hist_states'].detach()
@@ -149,13 +180,15 @@ class StopImaginationTrainer:
             raise ValueError('Batch tensors must already be on the actor device')
         if any(not torch.isfinite(t).all() for t in (states, actions, xi, anchor_xy, anchor_yaw, stop_age)) or (stop_age < 0).any():
             raise ValueError('Batch contains invalid or non-finite values')
+        self._update_started = True
         xi_normalized = self.wm.spec.normalize_xi(xi)
         obs_history = [analytic_observation(states[i], actions[i], xi, self.default_joint_pos) for i in range(self.history)]
         initial_obs = flatten_history_term_major(torch.stack(obs_history))
         initial_feedback = self._feedback(states[-1], anchor_xy, anchor_yaw)
         with torch.no_grad():
             old_action = self.actor(initial_obs, initial_feedback).detach().clone()
-            teacher_action = self.teacher(initial_obs[cold], initial_feedback[cold]) if cold.any() else None
+            all_teacher_action = self.teacher(initial_obs, initial_feedback).detach()
+            teacher_action = all_teacher_action[cold] if cold.any() else None
         self.value.requires_grad_(False)
         try:
             state = states[-1]
@@ -193,7 +226,12 @@ class StopImaginationTrainer:
                           if cold.any() else objective.new_zeros(()))
             retained = self.cold_retention
             retention_prior = (self.actor(retained['obs'], retained['feedback']) - retained['teacher_action']).square().mean()
-            loss = -objective / self.horizon + 10. * cold_prior + 10. * retention_prior
+            allstate_prior = (self.actor(initial_obs, initial_feedback) - all_teacher_action).square().mean()
+            control = self.control_retention
+            control_prior = (self.policy.velocity_action(control['obs'], control['command'], control['feedback'])
+                             - control['teacher_action']).square().mean()
+            loss = (-objective / self.horizon + 10. * cold_prior + 10. * retention_prior
+                    + 10. * allstate_prior + 10. * control_prior)
             if not torch.isfinite(loss) or not torch.isfinite(value_inputs).all() or not torch.isfinite(rr).all() or not torch.isfinite(dhat).all():
                 raise FloatingPointError('Non-finite imagination or actor objective')
             self.actor_opt.zero_grad(set_to_none=True)
@@ -206,6 +244,9 @@ class StopImaginationTrainer:
             opt_backup = copy.deepcopy(self.actor_opt.state_dict())
             accepted, action_change, parameter_change, used_lr = False, float('nan'), 0., 0.
             retention_max_rms = retention_max_abs = cold_max_rms = cold_max_abs = float('nan')
+            allstate_max_rms = allstate_max_abs = control_max_rms = control_max_abs = float('nan')
+            control_groups = {}
+            pure_moving_equal = False
             for attempt in range(8):
                 if attempt:
                     with torch.no_grad():
@@ -218,7 +259,10 @@ class StopImaginationTrainer:
                 self.actor_opt.step()
                 with torch.no_grad():
                     new_action = self.actor(initial_obs, initial_feedback)
-                    change = (new_action - old_action).square().mean().sqrt()
+                    change = (new_action - old_action).square().mean(-1).sqrt().max()
+                    allstate_diff = new_action - all_teacher_action
+                    allstate_max_rms = float(allstate_diff.square().mean(-1).sqrt().max())
+                    allstate_max_abs = float(allstate_diff.abs().max())
                     retained_diff = self.actor(retained['obs'], retained['feedback']) - retained['teacher_action']
                     retention_max_rms = float(retained_diff.square().mean(-1).sqrt().max())
                     retention_max_abs = float(retained_diff.abs().max())
@@ -228,12 +272,26 @@ class StopImaginationTrainer:
                         cold_max_abs = float(cold_diff.abs().max())
                     else:
                         cold_max_rms = cold_max_abs = 0.
-                    finite = (torch.isfinite(new_action).all() and torch.isfinite(retained_diff).all()
+                    control_action = self.policy.velocity_action(control['obs'], control['command'], control['feedback'])
+                    control_diff = control_action - control['teacher_action']
+                    control_max_rms = float(control_diff.square().mean(-1).sqrt().max())
+                    control_max_abs = float(control_diff.abs().max())
+                    control_norm = control['command'].square().sum(-1).sqrt()
+                    pure_moving = self.actor.gate(control['command']) == 0
+                    pure_moving_equal = bool(torch.equal(control_action[pure_moving], control['teacher_action'][pure_moving]))
+                    control_groups = {}
+                    for name, mask in (('zero', control_norm == 0), ('near_zero', (control_norm > 0) & (control_norm < .1)), ('pure_moving', pure_moving)):
+                        if mask.any():
+                            group_diff = control_diff[mask]
+                            control_groups[name] = {'count': int(mask.sum()), 'max_sample_rms': float(group_diff.square().mean(-1).sqrt().max()), 'max_abs': float(group_diff.abs().max())}
+                    finite = (torch.isfinite(new_action).all() and torch.isfinite(retained_diff).all() and torch.isfinite(control_diff).all()
                               and all(torch.isfinite(p).all() for p in self.actor_params))
                     action_change = float(change)
                 if (finite and torch.isfinite(change) and change <= .02
                         and retention_max_rms <= .03 and retention_max_abs <= .15
-                        and cold_max_rms <= .03 and cold_max_abs <= .15):
+                        and cold_max_rms <= .03 and cold_max_abs <= .15
+                        and allstate_max_rms <= .03 and allstate_max_abs <= .15
+                        and control_max_rms <= .03 and control_max_abs <= .15 and pure_moving_equal):
                     accepted, used_lr = True, rate
                     with torch.no_grad():
                         parameter_change = float(torch.sqrt(sum((p - before).square().sum() for p, before in zip(self.actor_params, backup))))
@@ -273,12 +331,18 @@ class StopImaginationTrainer:
         return {'objective': float(objective.detach()), 'reward_mean': float(rr.detach().mean()),
                 'survival_final': float(alive[-1].detach().mean()), 'actor_grad_norm': float(grad_norm),
                 'cold_prior': float(cold_prior.detach()), 'retention_prior': float(retention_prior.detach()),
+                'allstate_prior': float(allstate_prior.detach()), 'control_prior': float(control_prior.detach()),
                 'train_base': self.train_base, 'actor_parameter_names': self.actor_parameter_names,
                 'actor_step_accepted': accepted,
                 'actor_step_attempts': attempt + 1, 'actor_step_lr': used_lr,
-                'initial_action_change_rms': action_change, 'actor_parameter_change_l2': parameter_change,
+                'initial_action_change_rms': action_change, 'initial_action_change_max_sample_rms': action_change,
+                'actor_parameter_change_l2': parameter_change,
                 'cold_max_sample_action_rms': cold_max_rms, 'cold_max_abs_action_diff': cold_max_abs,
                 'retention_max_sample_action_rms': retention_max_rms, 'retention_max_abs_action_diff': retention_max_abs,
+                'allstate_max_sample_action_rms': allstate_max_rms, 'allstate_max_abs_action_diff': allstate_max_abs,
+                'control_max_sample_action_rms': control_max_rms, 'control_max_abs_action_diff': control_max_abs,
+                'control_pure_moving_equal': pure_moving_equal, 'control_group_metrics': control_groups,
+                'retention_scope': 'source sample action constraints only; physical acceptance pending',
                 'action_metrics_are_rejected_candidate': not accepted,
                 'critic_loss': float(critic_loss.detach()), 'critic_value_mean': float(values.mean()),
                 'critic_target_mean': float(targets.mean()), 'cold_count': int(cold.sum())}
@@ -288,4 +352,4 @@ class StopImaginationTrainer:
         return copy.deepcopy({'actor_optimizer': self.actor_opt.state_dict(), 'value': self.value.state_dict(),
                               'value_optimizer': self.value_opt.state_dict(), 'train_base': self.train_base,
                               'actor_parameter_names': self.actor_parameter_names,
-                              'cold_retention': self.cold_retention})
+                              'cold_retention': self.cold_retention, 'control_retention': self.control_retention})

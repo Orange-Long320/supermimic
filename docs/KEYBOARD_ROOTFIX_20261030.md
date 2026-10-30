@@ -109,3 +109,9 @@ retained120独立full0/full7均未通过；seed0五运动后最差停止净漂�
 CPU实际合成retained120与precision20已通过全部共同来源和策略张量边界断言，candidate SHA 2c9fd4f82f5023b44aaccef4194eb422dc636b5ea4d49f8baf5da3102021bfeb，输出keyboard_composed_feedback_20261030_r1，source d351f37；GPU1 full0诊断进行中，非accepted。
 
 已准备显式--preserve-moving-feedback：只允许有效BPTT移动/合成权重保留新投影，采集走真实完整策略，冻结全部原移动张量并记录投影SHA。默认仍删除历史移动反馈，保持旧默认动作/噪声运算顺序；检查冻结动作时不改变context状态。新停止ck直接保存pose/retention SHA，清旧顶层组件元数据，来源以checkpoint SHA追溯。拟在必要时用--train-base开放独立站立encoder/decoder容量，固定真实cold留出及每样本累计动作界继续生效，原共享移动encoder/decoder及移动反馈均冻结；这是一项待验证容量对照，尚未启动。
+
+stop_base_r1实际完成：GPU1预检被其他用户占用拦下、未启动；等本任务GPU2全部7项验收结束后，改GPU2，tmux sm-stop-base-capacity-1030，wrapper2271415/train2271672，source4cd6c93。先为合成源重新采20秒cold留出，8/8通过。20轮仅5次有效全站立BPTT更新（最后lr回溯至1.25e-5），无训练失败/重置，峰值714.33MiB。独立hold20通过全部门限（最差净移0.0167m），但full0严重失败：前进停止净移0.4609m/arm0.4094rad/s，小跑停止1.0710m/arm0.6420rad/s。拒绝权重，不延长此配方。
+
+实际约束缺口：teacher累计界此前只保护cold，单次动作界是整批RMS；运动后少数状态可能越过模型数据支持范围，cold保持及平均WM误差通过并不证明新动作可靠。新helper要求固定完整control留出（真实66秒五运动及松键过渡），重算完整初始化策略动作≤2e-5；对fixed control与全部真实/反事实初态都检查每样本累计RMS≤0.03/最大元素≤0.15，单步改为最差样本RMS≤0.02；保留cold800、原Adam回溯，并增加全部状态teacher prior。纯运动留出动作须逐位一致。训练/控制器必需--control-retention，不允许遗漏。尚未做新GPU验证，不据此宣布修复。
+
+collector新增保留BPTT moving projection模式和完整真实转移raw.pt：state_before、原动作/实际执行动作、command/feedback、时间/阶段/终止、末state及固定xi，逐步核对xi未变，保留输入/产物SHA。仅采样930维obs进入retention，不把每步obs大文件保存。raw供后续分阶段1/8/32模型和动作梯度核验，当前未改WM训练目标。代码静态通过，新的完整control采集待执行。

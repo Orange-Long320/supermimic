@@ -24,6 +24,7 @@ def main():
     p.add_argument('--gpu', type=int, required=True)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--num-envs', type=int, default=8)
+    p.add_argument('--preserve-moving-feedback', action='store_true', help='Collect the complete BPTT movement-feedback policy')
     a = p.parse_args()
     python = Path('/home/2025-Long.xh/HHD/venvs/supermimic/bin/python')
     if Path(sys.prefix).resolve() != python.parent.parent.resolve() or os.path.realpath(sys.executable) != os.path.realpath(python):
@@ -38,13 +39,39 @@ def main():
               'source_sha256': sha(a.checkpoint), 'reference_sha256': sha(a.reference),
               'standing_pose_sha256': sha(a.standing_pose), 'walk_sha256': sha(a.dataset / 'walk.npz'),
               'entry_sha256': sha(Path(__file__)), 'seed': a.seed, 'num_envs': a.num_envs,
-              'scope': 'fixed sampled original-policy retention states; movement tracking and full control are not accepted'}
+              'preserve_moving_feedback': a.preserve_moving_feedback,
+              'scope': ('fixed complete-policy control retention; movement tracking and full control are not accepted'
+                        if a.preserve_moving_feedback else 'fixed sampled original-policy retention states; movement tracking and full control are not accepted')}
     def save_report():
         tmp = a.out / 'report.json.tmp'
         tmp.write_text(json.dumps(record, indent=2) + '\n')
         tmp.replace(a.out / 'report.json')
     save_report()
     env = None
+    raw = {k: [] for k in ('state_before', 'action', 'executed_action', 'command', 'feedback',
+                           'phase_start_s', 'time_s', 'terminated', 'timeout')}
+    xi_initial = None
+    final_state = None
+
+    def save_raw():
+        if xi_initial is None or final_state is None:
+            return
+        import torch
+        arrays = {key: torch.stack(values) if values else None for key, values in raw.items()}
+        arrays.update(final_state=final_state, xi=xi_initial, env_id=torch.arange(a.num_envs),
+            source_sha256=record['source_sha256'], reference_sha256=record['reference_sha256'],
+            standing_pose_sha256=record['standing_pose_sha256'], walk_sha256=record['walk_sha256'],
+            preserve_moving_feedback=a.preserve_moving_feedback, moving_projection_sha256=record.get('moving_projection_sha256'),
+            dt=record.get('dt'), alignment='row t: before state, policy and executed action, command and feedback; next state is row t+1 or final_state',
+            xi_scope='one value per environment; checked unchanged before and after each completed step')
+        target = a.out / 'raw.pt'
+        temporary = a.out / 'raw.pt.tmp'
+        torch.save(arrays, temporary)
+        temporary.replace(target)
+        record['raw_path'] = str(target.resolve())
+        record['raw_sha256'] = sha(target)
+        record['raw_transitions'] = len(raw['state_before'])
+
     try:
         active = subprocess.check_output(['nvidia-smi', '-i', str(a.gpu), '--query-compute-apps=pid', '--format=csv,noheader'], text=True).strip()
         record['gpu_processes'] = active
@@ -58,6 +85,8 @@ def main():
             os.environ.pop(key, None)
         import torch
         from supermimic.envs import SuperMimicEnvCfgArgs, make_env
+        from supermimic.envs.sim_context import SimContext
+        from supermimic.envs.tracking_env_cfg import FOOT_GEOM_REGEX, ANCHOR_BODY
         from supermimic.eval.benchmark import load_policy_from_checkpoint
         from supermimic.locomotion.config import VelocityCfg
         from supermimic.locomotion.keyboard import CommandMailbox
@@ -72,6 +101,41 @@ def main():
         policy, saved = load_policy_from_checkpoint(a.checkpoint, 'cuda:0')
         if not hasattr(policy, 'standing_skill') or policy.standing_skill.feedback_dim != 6:
             raise ValueError('A six-input standing expert is required')
+        projection_sha = None
+        if a.preserve_moving_feedback:
+            if not hasattr(policy, 'velocity_feedback_weight') or source.get('standing_skill', {}).get('moving_feedback') is not True:
+                raise ValueError('Preserving movement requires an enabled velocity feedback projection')
+            records = [(key, source.get(key)) for key in ('supermimic_velocity_feedback', 'supermimic_composed_feedback')
+                       if isinstance(source.get(key), dict)]
+            if len(records) != 1:
+                raise ValueError('Expected exactly one movement or composed BPTT record')
+            kind, meta = records[0]
+            if (meta.get('algorithm') != 'supermimic_bptt' or not isinstance(meta.get('actor_updates'), int)
+                    or meta['actor_updates'] <= 0 or meta.get('reference_sha256') != record['reference_sha256']
+                    or meta.get('standing_pose_sha256') != record['standing_pose_sha256']):
+                raise ValueError('Invalid movement BPTT provenance, reference or pose')
+            if kind == 'supermimic_composed_feedback':
+                components = source.get('composed_training')
+                if not isinstance(components, dict) or set(components) != {'stop', 'moving'}:
+                    raise ValueError('Composed source lacks component training records')
+                common = meta.get('source_common_sha')
+                stop, moving = components['stop'], components['moving']
+                evidence = meta.get('stop_pose_evidence', {})
+                info = meta.get('components', {})
+                if (not common or any(not isinstance(v, dict) or v.get('algorithm') != 'supermimic_bptt'
+                        or v.get('source_sha256') != common or v.get('reference_sha256') != record['reference_sha256']
+                        or not isinstance(v.get('actor_updates'), int) or v['actor_updates'] <= 0 for v in (stop, moving))
+                        or meta['actor_updates'] != stop['actor_updates'] + moving['actor_updates']
+                        or moving.get('standing_pose_sha256') != record['standing_pose_sha256']
+                        or (stop.get('standing_pose_sha256') and stop['standing_pose_sha256'] != record['standing_pose_sha256'])
+                        or not isinstance(evidence, dict) or evidence.get('standing_pose_sha256') != record['standing_pose_sha256']
+                        or not isinstance(info, dict) or not isinstance(info.get('base'), dict)
+                        or info['base'].get('sha256') != common):
+                    raise ValueError('Invalid composed component provenance')
+            elif not meta.get('source_sha256'):
+                raise ValueError('Movement BPTT source hash missing')
+            projection_sha = hashlib.sha256(policy.velocity_feedback_weight.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+        record['moving_projection_sha256'] = projection_sha
         cfg = SuperMimicEnvCfgArgs(npz_files=[str(a.dataset / 'walk.npz')], num_envs=a.num_envs,
                                    seed=a.seed, future_frames=saved['env']['future_frames'], episode_length_s=71.,
                                    action_noise_std=0., obs_noise=False, reset_noise=False, domain_randomization=False,
@@ -87,6 +151,10 @@ def main():
         cmd.set_manual_command((0., 0., 0.))
         observations, _ = env.reset()
         context, mailbox = StandingContext(cmd, env), CommandMailbox()
+        sim_context = SimContext(env, FOOT_GEOM_REGEX, ANCHOR_BODY)
+        xi_initial = sim_context.read().detach().cpu().clone()
+        final_state = cmd.state_io.read().detach().cpu().clone()
+        action_term = env.action_manager.get_term('joint_pos')
         schedule = [(0., (0.,0.,0.)), (3.,(.3,0.,0.)), (10.,(0.,0.,0.)),
                     (15.,(-.2,0.,0.)), (22.,(0.,0.,0.)), (27.,(0.,0.,.4)),
                     (34.,(0.,0.,0.)), (39.,(0.,0.,-.4)), (46.,(0.,0.,0.)),
@@ -100,7 +168,7 @@ def main():
         phase_sums = []
         previous_phase = None
         record.update(status='collecting', dt=env.step_dt, expected_steps=steps,
-                      original_moving_feedback_disabled=True, control_matmul_precision='ieee',
+                      original_moving_feedback_disabled=not a.preserve_moving_feedback, control_matmul_precision='ieee',
                       noise=False, auto_reset=False, schedule=schedule,
                       sampling='every ten steps plus every near-zero ramp step',
                       torch=torch.__version__, cuda_runtime=torch.version.cuda,
@@ -122,7 +190,10 @@ def main():
                 actual = cmd.velocity_command.clone()
                 obs = observations['policy'].clone()
                 feedback = context.features(actual).clone()
-                action = policy.velocity_action(obs, actual, feedback, disable_moving_feedback=True)
+                action = policy.velocity_action(obs, actual, feedback, disable_moving_feedback=not a.preserve_moving_feedback)
+                physical_before = cmd.state_io.read().detach().cpu().clone()
+                if not torch.equal(sim_context.read().detach().cpu(), xi_initial):
+                    raise RuntimeError('Simulation context changed before step; constant xi trace rejected')
                 if not all(torch.isfinite(t).all() for t in (obs, actual, feedback, action)):
                     raise FloatingPointError('Non-finite rollout observation, command, feedback or action')
                 norms = actual.square().sum(-1).sqrt()
@@ -138,6 +209,19 @@ def main():
                 term, timeout = term.clone(), timeout.clone()
                 terminated_any |= term; timeout_any |= timeout
                 state = cmd.state_io.read()
+                executed = action_term.executed_raw.detach().cpu().clone()
+                final_state = state.detach().cpu().clone()
+                raw['state_before'].append(physical_before)
+                raw['action'].append(action.detach().cpu().clone())
+                raw['executed_action'].append(executed)
+                raw['command'].append(actual.detach().cpu().clone())
+                raw['feedback'].append(feedback.detach().cpu().clone())
+                raw['phase_start_s'].append(torch.tensor(phase, dtype=torch.float64))
+                raw['time_s'].append(torch.tensor(age, dtype=torch.float64))
+                raw['terminated'].append(term.detach().cpu().clone())
+                raw['timeout'].append(timeout.detach().cpu().clone())
+                if not torch.equal(sim_context.read().detach().cpu(), xi_initial):
+                    raise RuntimeError('Simulation context changed after step; constant xi trace rejected')
                 if not torch.isfinite(state).all():
                     raise FloatingPointError('Non-finite physical state')
                 if age - phase >= 1.:
@@ -147,6 +231,7 @@ def main():
         if previous_phase is not None:
             phase_sums.append({'start': previous_phase, 'samples': phase_count,
                                'mean_velocity': (total / max(phase_count, 1)).cpu().tolist()})
+        save_raw()
         result = {k: torch.cat(v, 0) for k, v in samples.items()}
         norms = result['command'].square().sum(-1).sqrt()
         expected = result['command'].new_tensor([[.3,0,0],[-.2,0,0],[0,0,.4],[0,0,-.4],[.6,0,0]])
@@ -162,12 +247,14 @@ def main():
         if not failed:
             result.update(source_sha256=record['source_sha256'], reference_sha256=record['reference_sha256'],
                           standing_pose_sha256=record['standing_pose_sha256'], seed=a.seed,
-                          scope=record['scope'], sampling=record['sampling'])
+                          scope=record['scope'], sampling=record['sampling'],
+                          preserve_moving_feedback=a.preserve_moving_feedback, moving_projection_sha256=projection_sha)
             path = a.out / 'retention.pt'
             torch.save(result, path)
             record.update(retention_path=str(path.resolve()), retention_sha256=sha(path), retention_samples=len(result['age']))
         save_report()
     except BaseException as error:
+        save_raw()
         (a.out / 'retention.pt').unlink(missing_ok=True)
         record.update(status='failed', error=repr(error), finished_epoch=time.time())
         save_report()

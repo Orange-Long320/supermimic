@@ -30,7 +30,7 @@ def sampleable_start_mask(replay, history):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for key in ('checkpoint', 'dataset', 'reference', 'standing-pose', 'standing-retention', 'out'):
+    for key in ('checkpoint', 'dataset', 'reference', 'standing-pose', 'standing-retention', 'control-retention', 'out'):
         p.add_argument('--' + key, type=Path, required=True)
     p.add_argument('--num-envs', type=int, default=256)
     p.add_argument('--batch', type=int, default=128)
@@ -90,6 +90,13 @@ def main():
             raise ValueError(f'Standing retention {key} does not match this initialization')
     if any(key not in retention for key in ('obs', 'feedback', 'source_action', 'age')):
         raise ValueError('Standing retention is missing observations, feedback, source actions or ages')
+    control_retention = torch.load(a.control_retention, map_location='cpu', weights_only=False)
+    for key, expected_hash in (('source_sha256', sha(a.checkpoint)), ('reference_sha256', sha(a.reference)),
+                               ('standing_pose_sha256', sha(a.standing_pose))):
+        if control_retention.get(key) != expected_hash:
+            raise ValueError(f'Control retention {key} does not match this initialization')
+    if any(key not in control_retention for key in ('obs', 'command', 'feedback', 'source_action')):
+        raise ValueError('Control retention is missing aligned policy inputs and source actions')
     moving_projection_sha = None
     if a.preserve_moving_feedback:
         if not hasattr(policy, 'velocity_feedback_weight') or source.get('standing_skill', {}).get('moving_feedback') is not True:
@@ -166,6 +173,8 @@ def main():
         lr=a.lr, horizon=32, train_base=a.train_base)
     trainer.set_cold_retention(retention['obs'].to('cuda:0'), retention['feedback'].to('cuda:0'),
                                retention['source_action'].to('cuda:0'))
+    trainer.set_control_retention(*(control_retention[k].to('cuda:0')
+                                   for k in ('obs', 'command', 'feedback', 'source_action')))
     trainable_keys = {'standing_skill.' + name for name in trainer.actor_parameter_names}
     actual_trainable = {name for name, param in policy.named_parameters() if param.requires_grad}
     if trainable_keys != actual_trainable:
@@ -206,11 +215,13 @@ def main():
         model_gate_position_heading_32=[.03,.08], actor_lr=a.lr, actor_lr_source=lr_source,
         train_base=a.train_base, trainable_policy_parameters=sorted(trainable_keys),
         standing_retention_sha256=sha(a.standing_retention), standing_retention_samples=len(retention['obs']),
+        control_retention_sha256=sha(a.control_retention), control_retention_samples=len(control_retention['obs']),
         standing_retention_source_action_max_abs_diff=trainer.cold_retention['source_action_max_abs_diff'])
     a.out.mkdir(parents=True, exist_ok=False)
     (a.out / 'launch.json').write_text(json.dumps(dict(argv=sys.argv, gpu=gpu, checkpoint_sha256=sha(a.checkpoint),
         reference_sha256=sha(a.reference), pose_sha256=sha(a.standing_pose), walk_sha256=sha(a.dataset / 'walk.npz'),
         entry_sha256=sha(__file__), standing_retention_sha256=sha(a.standing_retention),
+        control_retention_sha256=sha(a.control_retention),
         actor_lr=a.lr, actor_lr_source=lr_source, train_base=a.train_base,
         preserve_moving_feedback=a.preserve_moving_feedback, moving_projection_sha256=moving_projection_sha,
         trainable_policy_parameters=sorted(trainable_keys), ema=ema.metadata(),
@@ -294,6 +305,7 @@ def main():
             ck.pop(key, None)
         ck['supermimic_stop'] = dict(algorithm='supermimic_bptt', iteration=iteration, source_sha256=sha(a.checkpoint), reference_sha256=sha(a.reference),
             standing_pose_sha256=sha(a.standing_pose), standing_retention_sha256=sha(a.standing_retention),
+            control_retention_sha256=sha(a.control_retention),
             entry_sha256=sha(__file__), config={k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()},
             trace=trace, wm_optimizer=wm_opt.state_dict(), actor_state=trainer.save_state(),
             actor_updates=actor_updates, control_matmul_precision='ieee', source_commit=os.environ.get('SM_SOURCE_COMMIT', 'unspecified'),
