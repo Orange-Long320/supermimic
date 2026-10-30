@@ -17,7 +17,8 @@ from supermimic.envs.mdp.motion_library import MotionLibrary
 
 class SkillGoal:
     def __init__(self, dataset, profile, root_position, root_quat_wxyz,
-                 *, sustained=True, straight=True, horizon=10, jog_brake_fade=None, stand_anchor_gain=1.):
+                 *, sustained=True, straight=True, horizon=10, jog_brake_fade=None, stand_anchor_gain=1.,
+                 stand_gain_quiet_time=0., stand_gain_speed_limit=.08):
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -55,6 +56,12 @@ class SkillGoal:
             raise ValueError('stand anchor gain must be between 1 and 2')
         self.stand_anchor_gain = stand_anchor_gain
         self.stand_gain = 1.
+        if not 0. <= stand_gain_quiet_time <= 5. or not 0. < stand_gain_speed_limit <= .5:
+            raise ValueError('invalid stand gain quiet gate')
+        self.stand_gain_quiet_time = stand_gain_quiet_time
+        self.stand_gain_speed_limit = stand_gain_speed_limit
+        self.stand_quiet_steps = 0
+        self.last_position = None
 
     @staticmethod
     def rotation(wxyz):
@@ -81,7 +88,12 @@ class SkillGoal:
         # Experimental feedback scaling once the complete committed window is
         # standing. Ramped so an immediate mode change cannot jump the anchor.
         stable_reference = mode == 'stand' and np.allclose(window, self.scheduler.stand, atol=1e-7)
-        target_gain = self.stand_anchor_gain if stable_reference else 1.
+        position = np.asarray(position, dtype=float)
+        speed = np.linalg.norm(position[:2]-self.last_position[:2])/self.scheduler.dt if self.last_position is not None else float('inf')
+        self.last_position = position.copy()
+        quiet = stable_reference and (self.stand_gain_quiet_time == 0. or speed <= self.stand_gain_speed_limit)
+        self.stand_quiet_steps = self.stand_quiet_steps+1 if quiet else 0
+        target_gain = self.stand_anchor_gain if quiet and self.stand_quiet_steps*self.scheduler.dt >= self.stand_gain_quiet_time else 1.
         self.stand_gain += np.clip(target_gain-self.stand_gain, -.02, .02)
         delta_pos[:2] *= self.stand_gain
         delta_rot = (actual_rot.inv()*target_rot).as_matrix()[:, :2].reshape(-1)

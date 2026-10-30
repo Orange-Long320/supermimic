@@ -79,8 +79,8 @@ def main():
         stops.append(item)
     if len(events) != len(changes): raise ValueError('release event count mismatch')
     stand = None
-    if len(changes):
-        begin = nearest(t[changes[-1]]+5); duration = t[-1]-t[begin]
+    if len(changes) or np.all(modes == 'stand'):
+        begin = nearest((t[changes[-1]] if len(changes) else t[0])+5); duration = t[-1]-t[begin]
         if duration > 0:
             pos = xyz[begin:,:2]; dist = np.linalg.norm(pos-pos[0], axis=1)
             stand={'settled_seconds': float(duration), 'net_displacement_m': float(dist[-1]),
