@@ -1,0 +1,1241 @@
+{
+  "status": "paired_evaluation_complete",
+  "algorithm": "supermimic_bptt",
+  "source_commit": "6bc9a01d085968017a7945edc64c15cacd128a1c",
+  "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1",
+  "run_dir": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1",
+  "session": "sm-supermimic-stop-ema-r1",
+  "gpu": 2,
+  "controller_pid": 2206258,
+  "train_pid": 2206299,
+  "start_china": "2026-10-30T11:16:08.730321+08:00",
+  "finish_china": "2026-10-30T11:33:46.338012+08:00",
+  "train_iterations": 20,
+  "actor_updates": 5,
+  "ema": {
+    "decay": 0.99,
+    "updates": 5,
+    "scope": "standing_skill",
+    "evaluation_only": true,
+    "initialization": "copy first effective actor update",
+    "update_unit": "effective BPTT actor optimizer step"
+  },
+  "train_wall_seconds": 192.4135964056477,
+  "peak_pytorch_allocated_mib": 630.978515625,
+  "interpreter": {
+    "executable": "/home/2025-Long.xh/HHD/venvs/supermimic/bin/python",
+    "python": "3.12.13 (main, Jun  2 2026, 22:27:15) [Clang 22.1.3 ]",
+    "torch": "2.14.1+cu130",
+    "cuda_runtime": "13.0",
+    "cuda_available": true,
+    "device_count": 1,
+    "device_name": "NVIDIA GeForce RTX 3090"
+  },
+  "controller_argv": [
+    "/home/2025-Long.xh/HHD/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1/scripts/run_supermimic_stop.py",
+    "--source",
+    "/home/2025-Long.xh/HHD/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1",
+    "--checkpoint",
+    "/home/2025-Long.xh/HHD/data/supermimic/logs/keyboard_control_precision_20261030_r1/train/candidate_1200.pt",
+    "--dataset",
+    "/home/2025-Long.xh/HHD/data/supermimic/data/video/gait_six_with_stand_20261029_r1",
+    "--reference",
+    "/home/2025-Long.xh/HHD/data/supermimic/data/video/gait_six_with_stand_20261029_r1/stand_bent.npz",
+    "--standing-pose",
+    "/home/2025-Long.xh/HHD/data/supermimic/logs/keyboard_initial_stop_20261029_r1/bent_arm_standing.json",
+    "--baseline0",
+    "/home/2025-Long.xh/HHD/data/supermimic/logs/keyboard_rootfix_continue_20261029_r2/capacity_physical_66s.json",
+    "--baseline7",
+    "/home/2025-Long.xh/HHD/data/supermimic/logs/keyboard_rootfix_continue_20261029_r2/capacity_seed7.json",
+    "--out",
+    "/home/2025-Long.xh/HHD/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1",
+    "--source-commit",
+    "6bc9a01d085968017a7945edc64c15cacd128a1c",
+    "--gpu",
+    "2",
+    "--iterations",
+    "20",
+    "--num-envs",
+    "128",
+    "--hours",
+    ".25",
+    "--ema-decay",
+    ".99"
+  ],
+  "training_argv": [
+    "/home/2025-Long.xh/HHD/venvs/supermimic/bin/python",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1/scripts/train_supermimic_stop.py",
+    "--checkpoint",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_control_precision_20261030_r1/train/candidate_1200.pt",
+    "--dataset",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/data/video/gait_six_with_stand_20261029_r1",
+    "--reference",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/data/video/gait_six_with_stand_20261029_r1/stand_bent.npz",
+    "--standing-pose",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_initial_stop_20261029_r1/bent_arm_standing.json",
+    "--out",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/train",
+    "--iterations",
+    "20",
+    "--num-envs",
+    "128",
+    "--hours",
+    "0.25",
+    "--ema-decay",
+    "0.99"
+  ],
+  "input_sha256": {
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1/scripts/train_supermimic_stop.py": "8c0b639a568410c5d7d881f9f1cc5c93e6132cb6f532f15c3ce22cbf57157095",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1/scripts/supermimic_stop_imagination.py": "edc01288b2e5bfc35c524c3573147c38164241121cb7fbfa7a2913ba6de48ec3",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1/scripts/supermimic_stop_ema.py": "6a5160b7a3598123667c2538f2e3251ff529e55bfd163d39200446278feef5de",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1/scripts/evaluate_standing_skill.py": "8b88a9fc55c169b12d33a6b57d4bf85f03efd1dbdd58739349dc23fbca68f1d2",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1/scripts/run_control_feedback.py": "4852934702b4f895d153b1071ed9bdf4ea9b34e0a6d0adbbb9deb2c7d7ae7937",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_source_r1/scripts/run_supermimic_stop.py": "bd7878d0fa503159d9e90df83b78259d661b14fd6724c9fb3fecbef05bea4ccf",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_control_precision_20261030_r1/train/candidate_1200.pt": "e6f92efeb6d7f87d37ee3311a7d1a28a8989eb41ca2f772bfbd291ad7d64ddb8",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/data/video/gait_six_with_stand_20261029_r1/stand_bent.npz": "b820fe5a0d62deea9a7b12b42d9c3f4f9617a5974b991ec1d438f2a8d057ebfa",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_initial_stop_20261029_r1/bent_arm_standing.json": "5aa4f3c31a1e2746af9c5867a85aea54532215ee2d7103309a53e9d09f104819",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_rootfix_continue_20261029_r2/capacity_physical_66s.json": "b925557b1f890aaedfd58120792b18a88e8ad3bed16e070175b18d2a79314a4f",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_rootfix_continue_20261029_r2/capacity_seed7.json": "27ac661661821d7330eac745e09001c4e21b883bc27ebdbb6f2b1b8122bfe83f",
+    "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/data/video/gait_six_with_stand_20261029_r1/walk.npz": "8e7813254aa415246ef1a895bdc89350e2b1c134dab73114e7da55fa8f07dd63"
+  },
+  "source_manifest_sha256": "d058460e53fee1e353989eb7779779e4fb5b30c814c79b04bc477335c005a6ed",
+  "paired_checkpoints": {
+    "online": {
+      "path": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/train/candidate_20.pt",
+      "sha256": "7de0355e1a97323a6bfe42e9b454fbd1ce8b042683480fd712c4427cb9bb015a"
+    },
+    "ema": {
+      "path": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/train/ema/candidate_20.pt",
+      "sha256": "2b1c4248fd2f53f732cea8fe26662d321031f820e1f195b33dd1781524be82ab"
+    }
+  },
+  "verified_conditions": {
+    "full0": {
+      "initial_state_sha256": "3e477b2ff83fba4a02d4c9290c724bfb33f1b54b0812ed8f2e82901d7b4021c0",
+      "initial_observation_sha256": "0336709a6beed5b5d0123229cb375a46c5ac755e5d1733f98aae1b4ba687cb07",
+      "schedule": [
+        [
+          0.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          3.0,
+          [
+            0.3,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          10.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          15.0,
+          [
+            -0.2,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          22.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          27.0,
+          [
+            0.0,
+            0.0,
+            0.4
+          ]
+        ],
+        [
+          34.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          39.0,
+          [
+            0.0,
+            0.0,
+            -0.4
+          ]
+        ],
+        [
+          46.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          51.0,
+          [
+            0.6,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          58.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      ],
+      "seed": 0,
+      "duration_s": 66.0,
+      "num_envs": 8,
+      "control_matmul_precision": "ieee",
+      "velocity_config": {
+        "enabled": true,
+        "fraction": 0.5,
+        "forward": [
+          -0.5,
+          0.8
+        ],
+        "lateral": [
+          0.0,
+          0.0
+        ],
+        "yaw": [
+          -0.8,
+          0.8
+        ],
+        "resample_seconds": 4.0,
+        "standing_probability": 0.25,
+        "reference_probability": 0.5,
+        "reference_tolerance": 0.05,
+        "alignment_weight": 0.1,
+        "stop_relabel_fraction": 0.25,
+        "min_height_fraction": 0.6,
+        "max_tilt": 0.7,
+        "encoder_hidden": [
+          256,
+          256
+        ]
+      },
+      "action_joint_names": [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_pitch_joint",
+        "waist_roll_joint",
+        "head_yaw_joint",
+        "head_pitch_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_yaw_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_roll_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_yaw_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_roll_joint"
+      ],
+      "teacher_action_override": false,
+      "standing_feedback_disabled": false,
+      "moving_feedback_disabled": false
+    },
+    "full7": {
+      "initial_state_sha256": "86f478c7d3d3993cacecbb3d4f5c6ec102564ef6fb1765320a14fab2b9192524",
+      "initial_observation_sha256": "0336709a6beed5b5d0123229cb375a46c5ac755e5d1733f98aae1b4ba687cb07",
+      "schedule": [
+        [
+          0.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          3.0,
+          [
+            0.3,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          10.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          15.0,
+          [
+            -0.2,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          22.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          27.0,
+          [
+            0.0,
+            0.0,
+            0.4
+          ]
+        ],
+        [
+          34.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          39.0,
+          [
+            0.0,
+            0.0,
+            -0.4
+          ]
+        ],
+        [
+          46.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          51.0,
+          [
+            0.6,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          58.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      ],
+      "seed": 7,
+      "duration_s": 66.0,
+      "num_envs": 8,
+      "control_matmul_precision": "ieee",
+      "velocity_config": {
+        "enabled": true,
+        "fraction": 0.5,
+        "forward": [
+          -0.5,
+          0.8
+        ],
+        "lateral": [
+          0.0,
+          0.0
+        ],
+        "yaw": [
+          -0.8,
+          0.8
+        ],
+        "resample_seconds": 4.0,
+        "standing_probability": 0.25,
+        "reference_probability": 0.5,
+        "reference_tolerance": 0.05,
+        "alignment_weight": 0.1,
+        "stop_relabel_fraction": 0.25,
+        "min_height_fraction": 0.6,
+        "max_tilt": 0.7,
+        "encoder_hidden": [
+          256,
+          256
+        ]
+      },
+      "action_joint_names": [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_pitch_joint",
+        "waist_roll_joint",
+        "head_yaw_joint",
+        "head_pitch_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_yaw_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_roll_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_yaw_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_roll_joint"
+      ],
+      "teacher_action_override": false,
+      "standing_feedback_disabled": false,
+      "moving_feedback_disabled": false
+    },
+    "hold20": {
+      "initial_state_sha256": "3284b3737e41d3cc6001bde35b459842dff98dbd710bb3e568316bc1fd96c1cf",
+      "initial_observation_sha256": "0336709a6beed5b5d0123229cb375a46c5ac755e5d1733f98aae1b4ba687cb07",
+      "schedule": [
+        [
+          0.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      ],
+      "seed": 23,
+      "duration_s": 20.0,
+      "num_envs": 8,
+      "control_matmul_precision": "ieee",
+      "velocity_config": {
+        "enabled": true,
+        "fraction": 0.5,
+        "forward": [
+          -0.5,
+          0.8
+        ],
+        "lateral": [
+          0.0,
+          0.0
+        ],
+        "yaw": [
+          -0.8,
+          0.8
+        ],
+        "resample_seconds": 4.0,
+        "standing_probability": 0.25,
+        "reference_probability": 0.5,
+        "reference_tolerance": 0.05,
+        "alignment_weight": 0.1,
+        "stop_relabel_fraction": 0.25,
+        "min_height_fraction": 0.6,
+        "max_tilt": 0.7,
+        "encoder_hidden": [
+          256,
+          256
+        ]
+      },
+      "action_joint_names": [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_pitch_joint",
+        "waist_roll_joint",
+        "head_yaw_joint",
+        "head_pitch_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_yaw_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_roll_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_yaw_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_roll_joint"
+      ],
+      "teacher_action_override": false,
+      "standing_feedback_disabled": false,
+      "moving_feedback_disabled": false
+    },
+    "cold0": {
+      "initial_state_sha256": "3e477b2ff83fba4a02d4c9290c724bfb33f1b54b0812ed8f2e82901d7b4021c0",
+      "initial_observation_sha256": "0336709a6beed5b5d0123229cb375a46c5ac755e5d1733f98aae1b4ba687cb07",
+      "schedule": [
+        [
+          0.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      ],
+      "seed": 0,
+      "duration_s": 3.0,
+      "num_envs": 8,
+      "control_matmul_precision": "ieee",
+      "velocity_config": {
+        "enabled": true,
+        "fraction": 0.5,
+        "forward": [
+          -0.5,
+          0.8
+        ],
+        "lateral": [
+          0.0,
+          0.0
+        ],
+        "yaw": [
+          -0.8,
+          0.8
+        ],
+        "resample_seconds": 4.0,
+        "standing_probability": 0.25,
+        "reference_probability": 0.5,
+        "reference_tolerance": 0.05,
+        "alignment_weight": 0.1,
+        "stop_relabel_fraction": 0.25,
+        "min_height_fraction": 0.6,
+        "max_tilt": 0.7,
+        "encoder_hidden": [
+          256,
+          256
+        ]
+      },
+      "action_joint_names": [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_pitch_joint",
+        "waist_roll_joint",
+        "head_yaw_joint",
+        "head_pitch_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_yaw_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_roll_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_yaw_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_roll_joint"
+      ],
+      "teacher_action_override": false,
+      "standing_feedback_disabled": false,
+      "moving_feedback_disabled": false
+    },
+    "cold7": {
+      "initial_state_sha256": "86f478c7d3d3993cacecbb3d4f5c6ec102564ef6fb1765320a14fab2b9192524",
+      "initial_observation_sha256": "0336709a6beed5b5d0123229cb375a46c5ac755e5d1733f98aae1b4ba687cb07",
+      "schedule": [
+        [
+          0.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      ],
+      "seed": 7,
+      "duration_s": 3.0,
+      "num_envs": 8,
+      "control_matmul_precision": "ieee",
+      "velocity_config": {
+        "enabled": true,
+        "fraction": 0.5,
+        "forward": [
+          -0.5,
+          0.8
+        ],
+        "lateral": [
+          0.0,
+          0.0
+        ],
+        "yaw": [
+          -0.8,
+          0.8
+        ],
+        "resample_seconds": 4.0,
+        "standing_probability": 0.25,
+        "reference_probability": 0.5,
+        "reference_tolerance": 0.05,
+        "alignment_weight": 0.1,
+        "stop_relabel_fraction": 0.25,
+        "min_height_fraction": 0.6,
+        "max_tilt": 0.7,
+        "encoder_hidden": [
+          256,
+          256
+        ]
+      },
+      "action_joint_names": [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_pitch_joint",
+        "waist_roll_joint",
+        "head_yaw_joint",
+        "head_pitch_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_yaw_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_roll_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_yaw_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_roll_joint"
+      ],
+      "teacher_action_override": false,
+      "standing_feedback_disabled": false,
+      "moving_feedback_disabled": false
+    },
+    "extended42": {
+      "initial_state_sha256": "3284b3737e41d3cc6001bde35b459842dff98dbd710bb3e568316bc1fd96c1cf",
+      "initial_observation_sha256": "0336709a6beed5b5d0123229cb375a46c5ac755e5d1733f98aae1b4ba687cb07",
+      "schedule": [
+        [
+          0.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          3.0,
+          [
+            0.3,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          10.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          15.0,
+          [
+            -0.2,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          22.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      ],
+      "seed": 23,
+      "duration_s": 42.0,
+      "num_envs": 8,
+      "control_matmul_precision": "ieee",
+      "velocity_config": {
+        "enabled": true,
+        "fraction": 0.5,
+        "forward": [
+          -0.5,
+          0.8
+        ],
+        "lateral": [
+          0.0,
+          0.0
+        ],
+        "yaw": [
+          -0.8,
+          0.8
+        ],
+        "resample_seconds": 4.0,
+        "standing_probability": 0.25,
+        "reference_probability": 0.5,
+        "reference_tolerance": 0.05,
+        "alignment_weight": 0.1,
+        "stop_relabel_fraction": 0.25,
+        "min_height_fraction": 0.6,
+        "max_tilt": 0.7,
+        "encoder_hidden": [
+          256,
+          256
+        ]
+      },
+      "action_joint_names": [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_pitch_joint",
+        "waist_roll_joint",
+        "head_yaw_joint",
+        "head_pitch_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_yaw_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_roll_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_yaw_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_roll_joint"
+      ],
+      "teacher_action_override": false,
+      "standing_feedback_disabled": false,
+      "moving_feedback_disabled": false
+    },
+    "direct58": {
+      "initial_state_sha256": "69f061981e945bc37d19ab767e25c5b71f58a01abf3fbde63139cb9103852b05",
+      "initial_observation_sha256": "0336709a6beed5b5d0123229cb375a46c5ac755e5d1733f98aae1b4ba687cb07",
+      "schedule": [
+        [
+          0.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          3.0,
+          [
+            0.3,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          10.0,
+          [
+            -0.2,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          17.0,
+          [
+            0.0,
+            0.0,
+            0.4
+          ]
+        ],
+        [
+          24.0,
+          [
+            0.0,
+            0.0,
+            -0.4
+          ]
+        ],
+        [
+          31.0,
+          [
+            0.6,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          38.0,
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      ],
+      "seed": 41,
+      "duration_s": 58.0,
+      "num_envs": 8,
+      "control_matmul_precision": "ieee",
+      "velocity_config": {
+        "enabled": true,
+        "fraction": 0.5,
+        "forward": [
+          -0.5,
+          0.8
+        ],
+        "lateral": [
+          0.0,
+          0.0
+        ],
+        "yaw": [
+          -0.8,
+          0.8
+        ],
+        "resample_seconds": 4.0,
+        "standing_probability": 0.25,
+        "reference_probability": 0.5,
+        "reference_tolerance": 0.05,
+        "alignment_weight": 0.1,
+        "stop_relabel_fraction": 0.25,
+        "min_height_fraction": 0.6,
+        "max_tilt": 0.7,
+        "encoder_hidden": [
+          256,
+          256
+        ]
+      },
+      "action_joint_names": [
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+        "waist_pitch_joint",
+        "waist_roll_joint",
+        "head_yaw_joint",
+        "head_pitch_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "left_wrist_yaw_joint",
+        "left_wrist_pitch_joint",
+        "left_wrist_roll_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_shoulder_yaw_joint",
+        "right_elbow_joint",
+        "right_wrist_yaw_joint",
+        "right_wrist_pitch_joint",
+        "right_wrist_roll_joint"
+      ],
+      "teacher_action_override": false,
+      "standing_feedback_disabled": false,
+      "moving_feedback_disabled": false
+    }
+  },
+  "variant_passed": {
+    "online": false,
+    "ema": false
+  },
+  "passed_cases": {
+    "online": 3,
+    "ema": 2
+  },
+  "cases": [
+    {
+      "variant": "online",
+      "case": "full0",
+      "passed": false,
+      "issues": [
+        "move_tracking@3.0",
+        "move_regression@3.0",
+        "stop_yaw@10.0",
+        "stop_arm@10.0",
+        "stop_position_drift@10.0",
+        "stop_heading_drift@10.0",
+        "move_tracking@15.0",
+        "move_regression@15.0",
+        "stop_position_drift@22.0",
+        "move_tracking@27.0",
+        "move_regression@27.0",
+        "stop_heading_drift@34.0",
+        "move_regression@39.0",
+        "stop_position_drift@46.0",
+        "move_tracking@51.0",
+        "move_regression@51.0",
+        "stop_position_drift@58.0",
+        "stop_heading_drift@58.0"
+      ],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.07044396344670133,
+      "worst_max_stop_drift_m": 0.09705910935794818,
+      "worst_stop_arm_velocity_rms_rad_s": 0.16426554322242737,
+      "mean_stop_planar_speed_mps": 0.01825779618229717,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-online-full0.json",
+      "sha256": "f277e67567ee1ef73b71637acdc0141f18f0c4f526135bce3633eb10ae2c23ba"
+    },
+    {
+      "variant": "ema",
+      "case": "full0",
+      "passed": false,
+      "issues": [
+        "move_tracking@3.0",
+        "move_regression@3.0",
+        "stop_position_drift@10.0",
+        "stop_heading_drift@10.0",
+        "move_tracking@15.0",
+        "move_regression@15.0",
+        "stop_position_drift@22.0",
+        "stop_heading_drift@22.0",
+        "move_tracking@27.0",
+        "move_regression@39.0",
+        "stop_position_drift@46.0",
+        "stop_heading_drift@46.0",
+        "move_tracking@51.0",
+        "move_regression@51.0",
+        "stop_yaw@58.0",
+        "stop_arm@58.0",
+        "stop_position_drift@58.0",
+        "stop_heading_drift@58.0"
+      ],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.14239306919400566,
+      "worst_max_stop_drift_m": 0.15278826357014352,
+      "worst_stop_arm_velocity_rms_rad_s": 0.23165884613990784,
+      "mean_stop_planar_speed_mps": 0.02072431577835232,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-ema-full0.json",
+      "sha256": "c0ca0658f5132179ad8a113bb8445ba6f3e047a076924fff52db950cf1c9f69d"
+    },
+    {
+      "variant": "online",
+      "case": "full7",
+      "passed": false,
+      "issues": [
+        "move_tracking@3.0",
+        "move_regression@3.0",
+        "stop_position_drift@10.0",
+        "stop_heading_drift@10.0",
+        "move_regression@15.0",
+        "stop_arm@22.0",
+        "stop_position_drift@22.0",
+        "move_tracking@27.0",
+        "move_regression@27.0",
+        "stop_position_drift@34.0",
+        "move_regression@39.0",
+        "stop_position_drift@46.0",
+        "stop_heading_drift@46.0",
+        "move_tracking@51.0",
+        "move_regression@51.0",
+        "stop_position_drift@58.0",
+        "stop_heading_drift@58.0"
+      ],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.14977655701602255,
+      "worst_max_stop_drift_m": 0.14977655701602255,
+      "worst_stop_arm_velocity_rms_rad_s": 0.12646465003490448,
+      "mean_stop_planar_speed_mps": 0.019761040108278394,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-online-full7.json",
+      "sha256": "a4288852a9b67ea3f404a011ef9afe32d1f95b0f623470f0fbeb742917f1bf21"
+    },
+    {
+      "variant": "ema",
+      "case": "full7",
+      "passed": false,
+      "issues": [
+        "move_tracking@3.0",
+        "move_regression@3.0",
+        "stop_yaw@10.0",
+        "stop_arm@10.0",
+        "stop_position_drift@10.0",
+        "move_tracking@15.0",
+        "move_regression@15.0",
+        "stop_position_drift@22.0",
+        "stop_heading_drift@22.0",
+        "move_tracking@27.0",
+        "move_regression@27.0",
+        "stop_position_drift@46.0",
+        "move_tracking@51.0",
+        "move_regression@51.0",
+        "stop_position_drift@58.0"
+      ],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.11922325011513041,
+      "worst_max_stop_drift_m": 0.11922325011513041,
+      "worst_stop_arm_velocity_rms_rad_s": 0.1902521401643753,
+      "mean_stop_planar_speed_mps": 0.020351307233795524,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-ema-full7.json",
+      "sha256": "1897f7a9ddff9de7f4c5ee9dd62161ad5104effa800846723206e287e9a0069d"
+    },
+    {
+      "variant": "online",
+      "case": "hold20",
+      "passed": true,
+      "issues": [],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.01633160710321617,
+      "worst_max_stop_drift_m": 0.03144569399608238,
+      "worst_stop_arm_velocity_rms_rad_s": 0.019864991307258606,
+      "mean_stop_planar_speed_mps": 0.005729504628106952,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-online-hold20.json",
+      "sha256": "f169acb7de1e07343021b429cb7353f77892fc51c9c9f80489f1379954d055f3"
+    },
+    {
+      "variant": "ema",
+      "case": "hold20",
+      "passed": false,
+      "issues": [
+        "stop_position_drift@0.0"
+      ],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.05742632573085506,
+      "worst_max_stop_drift_m": 0.06030757449912857,
+      "worst_stop_arm_velocity_rms_rad_s": 0.019434964284300804,
+      "mean_stop_planar_speed_mps": 0.0059615393984131515,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-ema-hold20.json",
+      "sha256": "7628b9025ea1840a515ce233e391704663dee521f19a144d910b47a0714c24e7"
+    },
+    {
+      "variant": "online",
+      "case": "cold0",
+      "passed": true,
+      "issues": [],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.028155854888525338,
+      "worst_max_stop_drift_m": 0.028155854888525338,
+      "worst_stop_arm_velocity_rms_rad_s": 0.0514574833214283,
+      "mean_stop_planar_speed_mps": 0.020736154401674867,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-online-cold0.json",
+      "sha256": "e54304f4f9d8d0cf4c14feea6d8ca150d9ce4662f1124648ecf65a0412d0f262"
+    },
+    {
+      "variant": "ema",
+      "case": "cold0",
+      "passed": true,
+      "issues": [],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.017565719859857176,
+      "worst_max_stop_drift_m": 0.020575116920227596,
+      "worst_stop_arm_velocity_rms_rad_s": 0.048950910568237305,
+      "mean_stop_planar_speed_mps": 0.01893568132072687,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-ema-cold0.json",
+      "sha256": "84cf1b1a8c7d1731fb25e337c150c4ce974bfdfa3d0aba11f7179f08ca6c6ece"
+    },
+    {
+      "variant": "online",
+      "case": "cold7",
+      "passed": true,
+      "issues": [],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.02759855408082919,
+      "worst_max_stop_drift_m": 0.02759855408082919,
+      "worst_stop_arm_velocity_rms_rad_s": 0.05710955709218979,
+      "mean_stop_planar_speed_mps": 0.021113942144438624,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-online-cold7.json",
+      "sha256": "c219bb5e3dc9f8f3f1badfb171323e4e4584c5c495d561937fdeddd9a6b7faee"
+    },
+    {
+      "variant": "ema",
+      "case": "cold7",
+      "passed": true,
+      "issues": [],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.02279252876373692,
+      "worst_max_stop_drift_m": 0.026430362623666475,
+      "worst_stop_arm_velocity_rms_rad_s": 0.04858686774969101,
+      "mean_stop_planar_speed_mps": 0.0205465336330235,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-ema-cold7.json",
+      "sha256": "930d70b9b576461a172dce9e2191c8edbbe9f7020e73344e574d1432832457a9"
+    },
+    {
+      "variant": "online",
+      "case": "extended42",
+      "passed": false,
+      "issues": [
+        "move_tracking@3.0",
+        "stop_position_drift@10.0",
+        "move_tracking@15.0",
+        "stop_position_drift@22.0"
+      ],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.06846775820356925,
+      "worst_max_stop_drift_m": 0.06846775820356925,
+      "worst_stop_arm_velocity_rms_rad_s": 0.052895184606313705,
+      "mean_stop_planar_speed_mps": 0.010686641384381801,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-online-extended42.json",
+      "sha256": "d7495d4886528e65aaffccb0722d418ffcad5c6cd191c316a6a4cf65b107b54e"
+    },
+    {
+      "variant": "ema",
+      "case": "extended42",
+      "passed": false,
+      "issues": [
+        "move_tracking@3.0",
+        "stop_position_drift@10.0",
+        "stop_heading_drift@10.0",
+        "move_tracking@15.0",
+        "stop_position_drift@22.0"
+      ],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.06937416796532146,
+      "worst_max_stop_drift_m": 0.06937416796532146,
+      "worst_stop_arm_velocity_rms_rad_s": 0.07469989359378815,
+      "mean_stop_planar_speed_mps": 0.010974401142448187,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-ema-extended42.json",
+      "sha256": "a8749148c2a9a6aba113fc1d9c803fd72cc3b8c3c79beb2dea2cf723e77d8257"
+    },
+    {
+      "variant": "online",
+      "case": "direct58",
+      "passed": false,
+      "issues": [
+        "move_tracking@3.0",
+        "move_tracking@10.0",
+        "move_tracking@17.0",
+        "move_tracking@31.0",
+        "stop_arm@38.0",
+        "stop_position_drift@38.0",
+        "stop_heading_drift@38.0"
+      ],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.047590488723624924,
+      "worst_max_stop_drift_m": 0.12787310444336508,
+      "worst_stop_arm_velocity_rms_rad_s": 0.12947745621204376,
+      "mean_stop_planar_speed_mps": 0.010609033342916518,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-online-direct58.json",
+      "sha256": "7e5f7c3ae96c6129410d6386d79dc05447c966040ed791fd0f57bd8c6c2ed75d"
+    },
+    {
+      "variant": "ema",
+      "case": "direct58",
+      "passed": false,
+      "issues": [
+        "move_tracking@3.0",
+        "move_tracking@10.0",
+        "move_tracking@17.0",
+        "stop_position_drift@38.0",
+        "stop_heading_drift@38.0"
+      ],
+      "survived_without_reset": 8,
+      "num_envs": 8,
+      "worst_net_stop_drift_m": 0.09697235486050985,
+      "worst_max_stop_drift_m": 0.12800906687237884,
+      "worst_stop_arm_velocity_rms_rad_s": 0.11696521937847137,
+      "mean_stop_planar_speed_mps": 0.01466230140067637,
+      "source": "/mnt/local_DATA_HHD/2025-Long.xh/data/supermimic/logs/keyboard_supermimic_stop_ema_20261030_r1/candidate_20-ema-direct58.json",
+      "sha256": "2f09b5df9d3c14b57c31150d21c380ce383cac2d532bf5300c14d3bdac997256"
+    }
+  ],
+  "accepted_files": [],
+  "evidence_sha256": {
+    "controller.json": "24bc57ebd401dcf465f79311778ea437c98dd787a57f3d5590faca34a1186fe1",
+    "comparison.json": "9e08588e0421089a14ff7443b5d88d3a39a9e395075439f3063d518df34ec306",
+    "train/report.json": "f16822cf6c62d9b8290eb51d1c97d79334ade5589d169c06f4a79a55d9755d20",
+    "train/launch.json": "3dc838184987f9154f36c86ec226ee21f383cd0cf554f5e638420b90d07115a2"
+  },
+  "limitation": "20-iteration bounded trial with 5 effective actor/EMA updates; no convergence or long-run EMA claim; both variants fail full acceptance"
+}
