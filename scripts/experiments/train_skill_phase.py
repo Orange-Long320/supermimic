@@ -17,6 +17,7 @@ def main():
     p.add_argument('--phase',choices=('prepare','capacity','train'),required=True)
     p.add_argument('--dataset',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True);p.add_argument('--gpu',type=int,default=0);p.add_argument('--proof',type=Path)
+    p.add_argument('--compiled',action='store_true');p.add_argument('--hours',type=float,default=1.)
     a=p.parse_args()
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():raise ValueError('Dedicated server environment required')
     from supermimic.robots.paths import select_robot
@@ -64,7 +65,7 @@ def main():
     if torch.cuda.device_count()!=1:raise ValueError('Expected one visible GPU')
     torch.set_num_threads(2);torch.cuda.set_per_process_memory_fraction(.8,0)
     ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
-    if a.phase=='capacity' and (ck['iteration']!=70000 or sha(a.checkpoint)!=manifest['initial_checkpoint_sha256']):raise ValueError('Expected recorded LAFAN70000')
+    if a.phase=='capacity' and (ck['iteration']!=manifest.get('initial_checkpoint_iteration',70000) or sha(a.checkpoint)!=manifest['initial_checkpoint_sha256']):raise ValueError('Initial checkpoint does not match dataset manifest')
     def restore(obj,d):
         for k,v in d.items():
             current=getattr(obj,k)
@@ -76,7 +77,7 @@ def main():
     cfg.env.num_envs=4096;cfg.env.replay_capacity=256;cfg.env.anchor_obs=True;cfg.env.episode_length_s=10
     cfg.env.action_noise_std=.1;cfg.env.reset_noise=cfg.env.obs_noise=cfg.env.domain_randomization=True;cfg.env.sampling_mode='return';cfg.policy_trainer.obs_noise=True
     cfg.wm_trainer.batch_size=cfg.policy_trainer.batch_size=1024;cfg.wm_trainer.batches_per_update=10
-    cfg.wm_trainer.compile=cfg.policy_trainer.compile=None
+    cfg.wm_trainer.compile=cfg.policy_trainer.compile='default' if a.compiled else None
     cfg.wm_trainer.lr=cfg.policy_trainer.lr=cfg.policy_trainer.critic_lr=2e-4
     cfg.resume=None;cfg.warmstart_world_model=None
     if a.phase=='train':
@@ -85,7 +86,8 @@ def main():
         if proof['status']!='completed' or proof['updates']<1 or proof['device_peak_mib']>20000 or proof['dataset_sha256']!=sha(a.dataset/'manifest.json') or proof['checkpoint_sha256']!=sha(a.checkpoint):raise ValueError('Capacity proof mismatch')
         cfg.resume=a.checkpoint
     cfg.run_name=a.out.name;cfg.log_root=a.out.parent;cfg.schedule.total_iterations=100 if a.phase=='capacity' else 320000
-    cfg.schedule.max_hours=.15 if a.phase=='capacity' else 1.;cfg.schedule.lr_final_ratio=1.;cfg.schedule.log_interval=20;cfg.schedule.checkpoint_interval=100 if a.phase=='capacity' else 500
+    if a.hours<=0:raise ValueError('Hours must be positive')
+    cfg.schedule.max_hours=.15 if a.phase=='capacity' else a.hours;cfg.schedule.lr_final_ratio=1.;cfg.schedule.log_interval=20;cfg.schedule.checkpoint_interval=100 if a.phase=='capacity' else 500
     a.out.mkdir(parents=True,exist_ok=False)
     record={'status':'initializing','phase':a.phase,'pid':os.getpid(),'gpu':a.gpu,'argv':sys.argv,'dataset_sha256':sha(a.dataset/'manifest.json'),'checkpoint_input':str(a.checkpoint),'checkpoint_input_sha256':sha(a.checkpoint),'source_iteration':ck['iteration'],'configuration':asdict(cfg),'weights_only_transfer':a.phase=='capacity','physics_validated':False,'python':sys.executable,'torch':torch.__version__,'cuda_runtime':torch.version.cuda}
     def save():(a.out/'result.json').write_text(json.dumps(record,indent=2,default=str)+'\n')
