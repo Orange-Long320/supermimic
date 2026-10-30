@@ -125,12 +125,23 @@ def main():
     trace = []
     total_falls = total_timeouts = actor_updates = 0
     started = time.monotonic()
+    runtime_config = dict(algorithm='supermimic_bptt', imagination_horizon=32, wm_window=32,
+        wm_batches_per_update=a.wm_batches, wm_batch=a.wm_batch, actor_batch=a.batch,
+        history=history, dt=env.step_dt, gamma=trainer.cfg.gamma, gae_lambda=trainer.cfg.gae_lambda,
+        collection_steps_per_update=32, episode_seconds=66., num_envs=E, replay_capacity=T,
+        obs_noise=False, reset_noise=False, domain_randomization=False, stop_collection_noise=.03,
+        movement_collection_noise=0., actual_stop_and_cold_stratified=True,
+        moving_core_frozen=True, moving_feedback=False, optimizer_initialization='fresh',
+        control_matmul_precision='ieee', actor_update='deterministic BPTT through frozen world model',
+        model_gate_velocity_8=[.10,.10,.15], model_gate_velocity_32=[.20,.20,.30],
+        model_gate_position_heading_32=[.03,.08])
     a.out.mkdir(parents=True, exist_ok=False)
     (a.out / 'launch.json').write_text(json.dumps(dict(argv=sys.argv, gpu=gpu, checkpoint_sha256=sha(a.checkpoint),
         reference_sha256=sha(a.reference), pose_sha256=sha(a.standing_pose), walk_sha256=sha(a.dataset / 'walk.npz'),
         entry_sha256=sha(__file__), ema=ema.metadata(),
         ema_helper_sha256=sha(Path(__file__).with_name('supermimic_stop_ema.py')),
         model_gate='diagnostic only; physical policy acceptance required'), indent=2) + '\n')
+    (a.out/'runtime_config.json').write_text(json.dumps(runtime_config, indent=2)+'\n')
 
     def verify_core(x):
         for key, old in frozen.items():
@@ -211,6 +222,7 @@ def main():
             entry_sha256=sha(__file__), config={k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()},
             trace=trace, wm_optimizer=wm_opt.state_dict(), actor_state=trainer.save_state(),
             actor_updates=actor_updates, control_matmul_precision='ieee', source_commit=os.environ.get('SM_SOURCE_COMMIT', 'unspecified'),
+            runtime_config=runtime_config,
             validation='model gate only; policy physical acceptance pending')
         ck['policy_ema'] = dict(ema.metadata(), variant='online',
                                 shadow_state={k: v.detach().cpu().clone() for k, v in ema.model.state_dict().items()})
