@@ -6,6 +6,8 @@
 
 服务器运行目录 `/home/2025-Long.xh/HHD/data/supermimic/logs/official_x2_sim_20261030_r1/`。项目源码是 `93f598e` 的隔离副本，加之后续记录在 Git 的 `120ddf6` 和本记录提交中的脚本修改；原始官方包未覆盖。ROS 限定 `ROS_DOMAIN_ID=179`、`ROS_LOCALHOST_ONLY=1`，CycloneDDS；网络插件绑定 `127.0.0.1:51879`。安装到运行目录的 Ubuntu / ROS 镜像 deb 包及 SHA-256 保存在 `debs/`、`dependency-sha256.txt`，未修改系统安装。Fast DDS 首次尝试在官方插件加载时崩溃（`gdb.log`），改用官方推荐的 CycloneDDS 后启动。仿真初始化使用 `initial-pose.json` 中的站姿末帧（配置副本修改）；每次运行只在开始时初始化，运行中不重置。
 
+这次启动器与环境分别保存在运行目录的 `start-sim.sh`、`ros-env.sh`；`all-schedule.json` 为自动测试输入，`source-integration/scripts/deploy/` 保留了实际运行版本。消息桥和命令桥使用 ROS 的系统 Python 3.10，推理使用项目 Python 3.12，通过本机 UDP 19179/19180 交换数据。启动顺序是先启动两座桥，再启动策略并等待 `policy ready for simulator`，最后启动仿真；每次重新启动仿真也要重启状态桥以清空旧数据。每轮使用新的输出目录。任务结束后这些测试进程已关闭。
+
 ## 实现及证据
 
 - `skill_goal.py` 从独立 FK、五个参考动作、站姿及阶段队列生成 729 维目标。回放先前物理轨迹：前进和小跑各 1400 帧，未来窗口最大绝对差分别 `1.20e-7` 和 `2.39e-7`，锚点位置最大差分别 `7.21e-6` 和 `3.04e-5` 米。只证明记录输入的计算对齐，不证明实机估计。
