@@ -44,8 +44,8 @@ def main():
             frame_keys=('joint_pos','joint_vel','body_pos_w','body_quat_w','body_lin_vel_w','body_ang_vel_w')
             for key in frame_keys:
                 values=arrays[key]
-                if np.max(np.abs(values[stand:]-values[stand]))>1e-5:raise ValueError('Expected stationary final reference: '+key)
-                arrays[key]=np.concatenate([values[:stand],np.repeat(values[stand:stand+1],200,axis=0)],axis=0)
+                if len(values)<stand+3 or np.max(np.abs(values[stand+2:]-values[-1]))>1e-5:raise ValueError('Expected stationary final reference: '+key)
+                arrays[key]=np.concatenate([values[:stand+2],np.repeat(values[-1:],198,axis=0)],axis=0)
             q=arrays['joint_pos'];hard=float(np.maximum(np.maximum(m.jnt_range[1:,0]-q,q-m.jnt_range[1:,1]),0).max())
             if hard>1e-4 or not all(np.isfinite(v).all() for v in arrays.values() if np.issubdtype(v.dtype,np.number)):raise ValueError('Input check failed')
             out=a.dataset/(name+'.npz');np.savez(out,**arrays)
