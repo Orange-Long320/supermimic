@@ -42,7 +42,7 @@ def main():
     def sole():
         return np.array([min(float((v@d.geom_xmat[g].reshape(3,3).T+d.geom_xpos[g])[:,2].min()) for g,v in group) for group in geoms])
     def project(pos,quat,q):
-        n=len(q);outp=pos.copy();outq=q.copy();anchor=[None,None];prev=None;errors=[];support=[];ground_shift=[]
+        n=len(q);outp=pos.copy();outq=q.copy();anchor=[None,None];anchor_rot=[None,None];prev=None;errors=[];support=[];ground_shift=[]
         for i in range(n):
             d.qpos[:]=np.r_[pos[i],quat[i],q[i]];mujoco.mj_kinematics(m,d); rawfoot=d.xpos[feet].copy();rawsole=sole()
             # Select the lower foot; double support only if both have similar clearance.
@@ -50,18 +50,23 @@ def main():
             target=rawfoot.copy();target[:,2]-=rawsole.min()
             for s in range(2):
                 if stance[s]:
-                    if anchor[s] is None:anchor[s]=np.r_[rawfoot[s,:2],rawfoot[s,2]-rawsole[s]]
+                    if anchor[s] is None:
+                        anchor[s]=np.r_[rawfoot[s,:2],rawfoot[s,2]-rawsole[s]]
+                        anchor_rot[s]=d.xmat[feet[s]].reshape(3,3).copy()
                     target[s]=anchor[s]
-                else:anchor[s]=None
+                else:anchor[s]=None;anchor_rot[s]=None
             initial=np.r_[pos[i,2]-rawsole.min(),np.clip(q[i,leg],lo,hi)] if prev is None else prev.copy()
             initial[0]=np.clip(initial[0],pos[i,2]-.18,pos[i,2]+.03)
             lower=np.r_[pos[i,2]-.18,lo];upper=np.r_[pos[i,2]+.03,hi]
             def residual(x):
                 d.qpos[:]=np.r_[pos[i],quat[i],q[i]];d.qpos[2]=x[0];d.qpos[7+leg]=x[1:];mujoco.mj_kinematics(m,d)
                 diff=(d.xpos[feet]-target)*np.where(stance[:,None],60.,8.)
+                heights=sole()
+                ground=np.where(stance,heights,np.minimum(heights,0.))
+                orient=np.concatenate([Rotation.from_matrix(anchor_rot[s].T@d.xmat[feet[s]].reshape(3,3)).as_rotvec() if stance[s] else np.zeros(3) for s in range(2)])
                 smooth=np.zeros_like(x[1:]) if prev is None else .03*(x[1:]-prev[1:])
-                return np.r_[diff.ravel(),.04*(x[1:]-np.clip(q[i,leg],lo,hi)),smooth,.1*(x[0]-(pos[i,2]-rawsole.min()))]
-            fit=least_squares(residual,initial,bounds=(lower,upper),max_nfev=28,ftol=1e-7,xtol=1e-7,gtol=1e-7)
+                return np.r_[diff.ravel(),150*ground,4*orient,.04*(x[1:]-np.clip(q[i,leg],lo,hi)),smooth,.1*(x[0]-(pos[i,2]-rawsole.min()))]
+            fit=least_squares(residual,initial,bounds=(lower,upper),max_nfev=40,ftol=1e-7,xtol=1e-7,gtol=1e-7)
             residual(fit.x);outp[i,2]=fit.x[0];outq[i,leg]=fit.x[1:];prev=fit.x
             errors.append(np.linalg.norm(d.xpos[feet]-target,axis=1));support.append(stance.copy());ground_shift.append(outp[i,2]-pos[i,2])
         return outp,outq,np.asarray(errors),np.asarray(support),np.asarray(ground_shift)
