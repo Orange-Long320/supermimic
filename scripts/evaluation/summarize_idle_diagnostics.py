@@ -8,7 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
-def summarize(folder):
+def summarize(folder, hold_seconds=10.):
     result = json.loads((folder/'policy/result.json').read_text())
     frames = folder/'policy/frames.jsonl'
     rows = [json.loads(line) for line in frames.open()]
@@ -33,9 +33,9 @@ def summarize(folder):
     for start in ends:
         next_motion = np.flatnonzero(mode[start:] != 'stand')
         end = start+int(next_motion[0]) if len(next_motion) else len(rows)
-        h = np.flatnonzero((t >= t[start]+5.) & (t < t[start]+15.) & (np.arange(len(t)) < end))
+        h = np.flatnonzero((t >= t[start]+5.) & (t < t[start]+5.+hold_seconds) & (np.arange(len(t)) < end))
         item = dict(release_s=float(t[start]), observed_stand_after_release_s=float(t[end-1]-t[start]),
-                    full_ten_second_hold=False)
+                    requested_hold_seconds=hold_seconds, full_ten_second_hold=False, full_requested_hold=False)
         if t[end-1] >= t[start]+4.:
             i = int(np.searchsorted(t, t[start]+4.))
             item['stop_displacement_4s_m'] = float(np.linalg.norm(pos[i,:2]-pos[start,:2]))
@@ -44,12 +44,13 @@ def summarize(folder):
             dq = np.sqrt(np.mean(qvel[h]**2,axis=1))
             item.update(hold_seconds=float(t[h[-1]]-t[h[0]]),
                         full_ten_second_hold=bool(t[h[-1]] >= t[start]+14.95),
+                        full_requested_hold=bool(t[h[-1]] >= t[start]+5.+hold_seconds-.05),
                         hold_max_displacement_m=float(distance.max()), hold_net_displacement_m=float(distance[-1]),
                         hold_peak_joint_speed_rms_rad_s=float(dq.max()),
                         hold_peak_joint_motion_after_release_s=float(t[h[dq.argmax()]]-t[start]))
         holds.append(item)
     valid = bool(result['failure'] is None and len(ends) == 3 and mode[-1] == 'stand'
-                 and holds[-1]['full_ten_second_hold'])
+                 and holds[-1]['full_requested_hold'])
     return dict(failure=result['failure'], seconds=result['control_seconds'], frames=len(rows),
                 resets=result['resets_after_start'], max_overlap=result['max_future_overlap_error'],
                 movement_forward_speed_m_s=movement, holds=holds, complete_terminal_hold=valid,
@@ -64,16 +65,19 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--runs', type=Path, nargs='+', required=True)
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--hold-seconds', type=float, default=10.)
     a = p.parse_args()
     if a.out.exists():
         raise FileExistsError(a.out)
+    if a.hold_seconds <= 0:
+        raise ValueError('Positive hold window required')
     results = {}
     for run in a.runs:
         comparison = json.loads((run/'comparison.json').read_text())
         for trial in comparison['trials']:
             path = run/trial['planner']
             if (path/'policy/result.json').exists():
-                results[run.name+'/'+trial['planner']] = summarize(path)
+                results[run.resolve().name+'/'+trial['planner']] = summarize(path, a.hold_seconds)
     a.out.write_text(json.dumps(dict(trials=results,
         scope='Read-only recorded-state diagnosis. Failed or truncated trials cannot qualify for the terminal hold metric. Geometry/contact-force and multi-seed acceptance are separate.'), indent=2)+'\n')
     for name, r in results.items():

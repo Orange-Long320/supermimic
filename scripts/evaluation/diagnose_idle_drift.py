@@ -65,17 +65,24 @@ def feet_geometry(model, positions, quats, joints, names):
                 and model.geom_type[i] == mujoco.mjtGeom.mjGEOM_SPHERE and model.geom_contype[i]] for b in feet]
     if any(not g for g in spheres):
         raise ValueError('Expected official foot collision spheres')
-    ankle, gap = [], []
+    ankle, gap, com, outline = [], [], [], []
+    all_spheres = [i for group in spheres for i in group]
+    root = model.body('pelvis').id
     for pos, quat, q in zip(positions, quats, joints):
         data.qpos[:7] = np.r_[pos, quat]
         data.qpos[adr] = q
         mujoco.mj_kinematics(model, data)
+        mujoco.mj_comPos(model, data)
         ankle.append(data.xpos[feet].copy())
         gap.append([float(np.min(data.geom_xpos[g,2]-model.geom_size[g,0])) for g in spheres])
-    return np.asarray(ankle), np.asarray(gap)
+        com.append(data.subtree_com[root].copy())
+        p = data.geom_xpos[all_spheres,:2]
+        radius = model.geom_size[all_spheres,0,None]
+        outline.append(np.r_[np.min(p-radius,axis=0),np.max(p+radius,axis=0)])
+    return np.asarray(ankle), np.asarray(gap), np.asarray(com), np.asarray(outline)
 
 
-def analyze(folder, profile, scene):
+def analyze(folder, profile, scene, hold_seconds=10.):
     rows = [json.loads(line) for line in (folder/'policy/frames.jsonl').open()]
     result = json.loads((folder/'policy/result.json').read_text())
     t = np.array([r['elapsed'] for r in rows])
@@ -93,9 +100,12 @@ def analyze(folder, profile, scene):
     predicted_step = Rotation.from_euler('z', yaw[:-1,None]).apply(g[:-1,2*n+6:2*n+9])*.02
     integration_error = np.linalg.norm(np.diff(reference[:,:2], axis=0)-predicted_step[:,:2], axis=1)
     model = mujoco.MjModel.from_xml_path(str(scene))
-    actual_feet, actual_gap = feet_geometry(model, pos, quat, q, spec['joint_names'])
+    actual_feet, actual_gap, actual_com, actual_outline = feet_geometry(model, pos, quat, q, spec['joint_names'])
     default = np.array([spec['default_joint_pos'][name] for name in spec['joint_names']])
-    target_feet, target_gap = feet_geometry(model, reference, rq, g[:,:n]+default, spec['joint_names'])
+    target_feet, target_gap, target_com, _ = feet_geometry(model, reference, rq, g[:,:n]+default, spec['joint_names'])
+    outside = np.maximum(np.maximum(actual_outline[:,:2]-target_com[:,:2],
+                                    target_com[:,:2]-actual_outline[:,2:]),0.)
+    target_com_outside = np.linalg.norm(outside,axis=1)
     dq_rms = np.sqrt(np.mean(v*v, axis=1))
     reference_error = reference[:,:2]-pos[:,:2]
     releases = np.flatnonzero((mode[:-1] == 'walk') & (mode[1:] == 'stand'))+1
@@ -104,7 +114,7 @@ def analyze(folder, profile, scene):
         motion = np.flatnonzero(mode[start:] != 'stand')
         end = start+int(motion[0]) if len(motion) else len(rows)
         release = t[start]
-        hold = np.flatnonzero((t >= release+5.) & (t < release+15.) & (np.arange(len(t)) < end))
+        hold = np.flatnonzero((t >= release+5.) & (t < release+5.+hold_seconds) & (np.arange(len(t)) < end))
         transition = np.flatnonzero((t >= release) & (t < release+1.) & (np.arange(len(t)) < end))
         static = np.flatnonzero((np.max(np.abs(g-g[-1]), axis=1) < 1e-7) & (np.arange(len(t)) >= start) & (np.arange(len(t)) < end))
         item = dict(release_s=float(release), observed_hold_after_5s=len(hold)*.02,
@@ -122,7 +132,10 @@ def analyze(folder, profile, scene):
                         root_error_at_hold_start_m=reference_error[hold[0]].tolist(),
                         root_error_at_hold_end_m=reference_error[hold[-1]].tolist(),
                         root_error_norm_mean_m=float(np.mean(np.linalg.norm(reference_error[hold], axis=1))),
-                        root_error_norm_max_m=float(np.max(np.linalg.norm(reference_error[hold], axis=1))))
+                        root_error_norm_max_m=float(np.max(np.linalg.norm(reference_error[hold], axis=1))),
+                        actual_ankle_max_excursions_m=np.linalg.norm(actual_feet[hold,:,:2]-actual_feet[hold[0],:,:2],axis=2).max(axis=0).tolist(),
+                        target_com_outside_actual_foot_aabb_min_m=float(target_com_outside[hold].min()),
+                        target_com_outside_actual_foot_aabb_max_m=float(target_com_outside[hold].max()))
         if len(transition) > 1:
             z_rate = np.diff(g[transition,-1])/.02
             mismatch = z_rate-.5*(g[transition[:-1],2*n+8]+g[transition[1:],2*n+8])
@@ -134,7 +147,8 @@ def analyze(folder, profile, scene):
         stops.append(item)
     arrays = dict(time=t, mode=mode, position=pos, reference_position=reference, reference_error=reference_error,
                   goal=g, joint_speed_rms=dq_rms, actual_ankle=actual_feet, target_ankle=target_feet,
-                  actual_foot_gap=actual_gap, target_foot_gap=target_gap)
+                  actual_foot_gap=actual_gap, target_foot_gap=target_gap, actual_com=actual_com,
+                  target_com=target_com, actual_foot_outline_aabb=actual_outline)
     direct_error = None
     if all('reference_root_position' in row for row in rows):
         direct_error = float(np.max(np.abs(reference[:,:2]-np.array([row['reference_root_position'][:2] for row in rows]))))
@@ -151,12 +165,13 @@ def main():
     for name in ('run', 'profile', 'scene', 'out'):
         p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--trials', nargs='+')
+    p.add_argument('--hold-seconds', type=float, default=10.)
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=False)
     names = a.trials or [x['planner'] for x in json.loads((a.run/'comparison.json').read_text())['trials']]
     outputs = {}
     for name in names:
-        outputs[name], arrays = analyze(a.run/name, a.profile, a.scene)
+        outputs[name], arrays = analyze(a.run/name, a.profile, a.scene, a.hold_seconds)
         np.savez_compressed(a.out/(name+'.npz'), **arrays)
     report = dict(trials=outputs, scope='Recorded-state kinematic and timing diagnosis; no contact forces or causal acceptance from this audit alone')
     (a.out/'result.json').write_text(json.dumps(report, indent=2)+'\n')
