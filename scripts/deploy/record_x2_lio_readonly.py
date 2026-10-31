@@ -11,6 +11,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--seconds', type=float, default=20.)
+    parser.add_argument('--include-raw', action='store_true',
+                        help='also capture existing raw packet topic for timestamp auditing')
     args = parser.parse_args()
     if not 1 <= args.seconds <= 60:
         parser.error('--seconds must be between 1 and 60')
@@ -33,6 +35,10 @@ def main():
         '/aima/hal/sensor/lidar_chest_front/imu': (Imu, 'sensor_msgs/msg/Imu'),
         '/tf_static': (TFMessage, 'tf2_msgs/msg/TFMessage'),
     }
+    if args.include_raw:
+        from aimdk_msgs.msg import LidarRawData
+        topics['/aima/hal/sensor/lidar_chest_front/lidar_raw_data'] = (
+            LidarRawData, 'aimdk_msgs/msg/LidarRawData')
     for topic, (_, msg_type) in topics.items():
         writer.create_topic(rosbag2_py.TopicMetadata(
             name=topic, type=msg_type, serialization_format='cdr'))
