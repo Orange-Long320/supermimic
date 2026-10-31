@@ -61,6 +61,7 @@ def main():
     proc = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
     error = None
     sent = {topic: 0 for topic in pubs}
+    last_cloud_end = None
     try:
         deadline = time.monotonic() + 15
         while not all(p.get_subscription_count() for p in pubs.values()):
@@ -85,14 +86,25 @@ def main():
                 if proc.poll() is not None:
                     raise RuntimeError('FAST-LIO exited during replay')
                 rclpy.spin_once(node, timeout_sec=min(.01, max(0, due-time.monotonic())))
-            pubs[topic].publish(deserialize_message(raw, types[topic]))
+            msg = deserialize_message(raw, types[topic])
+            if topic == cloud_topic:
+                fields = {f.name: f for f in msg.fields}
+                offsets = np.ndarray(msg.width * msg.height, dtype='<f4', buffer=msg.data,
+                                     offset=fields['time'].offset, strides=(msg.point_step,))
+                last_cloud_end = (msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+                                  + float(np.max(offsets)))
+            pubs[topic].publish(msg)
             sent[topic] += 1
             rclpy.spin_once(node, timeout_sec=0)
-        drain = time.monotonic() + 3
+        drain = time.monotonic() + 15
         while time.monotonic() < drain:
             rclpy.spin_once(node, timeout_sec=.05)
+            if trajectory and last_cloud_end is not None and trajectory[-1][0] >= last_cloud_end - .001:
+                break
         if len(trajectory) < 2:
             raise RuntimeError('No usable FAST-LIO trajectory was received')
+        if trajectory[-1][0] < last_cloud_end - .001:
+            raise RuntimeError('FAST-LIO did not cover the final input scan')
     except BaseException as exc:
         error = repr(exc)
         raise
@@ -115,6 +127,7 @@ def main():
                    delimiter=',', header='stamp,x,y,z,qx,qy,qz,qw', comments='')
         report = {'samples': len(trajectory), 'sent': sent, 'error': error,
                   'child_return_code': proc.returncode, 'replay_rate': args.rate,
+                  'last_input_cloud_end_stamp': last_cloud_end,
                   'time_semantics_verified': False, 'motion_accuracy_validated': False,
                   'scope': 'server localhost-only offline sensor replay; no prior map, '
                            'no leg odometry input, no live robot connection or motor outputs'}
@@ -122,6 +135,8 @@ def main():
             a = np.asarray(trajectory)
             report.update({'finite': bool(np.isfinite(a).all()),
                 'sensor_span_s': float(a[-1, 0]-a[0, 0]),
+                'final_scan_lag_s': float(last_cloud_end-a[-1, 0]) if last_cloud_end is not None else None,
+                'output_gap_max_s': float(np.max(np.diff(a[:, 0]))) if len(a)>1 else None,
                 'net_translation_m': float(np.linalg.norm(a[-1, 1:4]-a[0, 1:4])),
                 'max_translation_from_first_m': float(np.max(np.linalg.norm(a[:, 1:4]-a[0, 1:4], axis=1))),
                 'quaternion_norm_minmax': [float(np.linalg.norm(a[:, 4:], axis=1).min()),
