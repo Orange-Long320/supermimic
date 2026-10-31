@@ -46,6 +46,8 @@ def main():
                    help='Diagnostic comparison of preparation and trained actuator gains')
     p.add_argument('--waist-orientation-assist',action='store_true',
                    help='Simulation candidate: use waist posture to balance a single-point suspension')
+    p.add_argument('--diagnostic-initial-limit-grace',action='store_true',
+                   help='Counterfactual only: disable initially violated model limits until each joint reenters its original range')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
@@ -71,6 +73,14 @@ def main():
     floor=mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_GEOM,'floor')
     feet=[mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_BODY,s+'_ankle_roll_link') for s in ('left','right')]
     raw=np.asarray(snapshot['joint_position']);ref=np.asarray(candidate['startup']['position'])
+    original_joint_limited=m.jnt_limited.copy();original_joint_ranges=m.jnt_range.copy()
+    grace_joints={int(j) for j,q in zip(joint,raw) if m.jnt_limited[j]
+                  and not m.jnt_range[j,0]<=q<=m.jnt_range[j,1]}
+    initial_grace_names=[mujoco.mj_id2name(m,mujoco.mjtObj.mjOBJ_JOINT,j) for j in sorted(grace_joints)]
+    if a.diagnostic_initial_limit_grace:
+        for j in grace_joints:m.jnt_limited[j]=False
+    else:grace_joints=set()
+    grace_events=[]
     root=np.asarray(snapshot['position']).copy();root[:2]=0.
     d.qpos[:7]=np.r_[root,snapshot['quat_wxyz']];d.qpos[qa]=raw
     d.qvel[va]=snapshot['joint_velocity'];mujoco.mj_forward(m,d)
@@ -116,7 +126,7 @@ def main():
         omega=body_velocity[:3].copy();proposed=None
         try:
             if (a.unload_before_handover and unload_start is None and now>=path.duration
-                    and np.max(np.abs(q-ref-balance_bias))<thresholds.position_error
+                    and np.max(np.abs(q-ref-(balance_bias if a.waist_orientation_assist else 0.)))<thresholds.position_error
                     and np.max(np.abs(qd))<thresholds.joint_speed and np.linalg.norm(omega)<thresholds.angular_speed
                     and rows and min(rows[-1]['normal_n'])>10.):
                 unload_start=now;events.append({'time_s':now,'phase':'support_transfer_started'})
@@ -170,6 +180,11 @@ def main():
             previous=(current_target-default)/scale
             maximum_tension=0.;support_force=np.zeros(3)
             for _ in range(substeps):
+                for j in tuple(grace_joints):
+                    value=d.qpos[m.jnt_qposadr[j]]
+                    if original_joint_ranges[j,0]<=value<=original_joint_ranges[j,1]:
+                        m.jnt_limited[j]=original_joint_limited[j];grace_joints.remove(j)
+                        grace_events.append(dict(time_s=float(d.time),joint=mujoco.mj_id2name(m,mujoco.mjtObj.mjOBJ_JOINT,j)))
                 d.qfrc_applied[:]=0.
                 if a.support_fraction:
                     point=d.xpos[torso]+d.xmat[torso].reshape(3,3)@local_attach
@@ -234,6 +249,11 @@ def main():
             'unload_at_handover':a.unload_at_handover,
             'counterfactual_capture_test':a.diagnostic_handover_tilt is not None,
             'counterfactual_scope':'Simulation entry gate experiment only; does not change hardware thresholds or approval',
+            'counterfactual_initial_limit_grace':a.diagnostic_initial_limit_grace,
+            'initial_limit_grace_scope':'Diagnostic in-memory model change only; not encoder correction, measured limit validation or hardware permission',
+            'initial_limit_grace_joints':initial_grace_names if a.diagnostic_initial_limit_grace else [],
+            'initial_limit_restored_events':grace_events,
+            'initial_limit_grace_unrestored':[mujoco.mj_id2name(m,mujoco.mjtObj.mjOBJ_JOINT,j) for j in sorted(grace_joints)],
             'previous_action_history':'actual commanded PD target, normalized by selected action default/scale; no invented history',
             'events':events,'failure':failure,'frames':len(rows),'active_start_s':active_start,
             'active_seconds':0. if active_start is None or not rows else rows[-1]['time_s']-active_start,
