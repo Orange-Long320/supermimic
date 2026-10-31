@@ -18,6 +18,8 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--rate', type=float, default=.5)
+    parser.add_argument('--reliable-inputs', action='store_true',
+                        help='use the instrumented binary with lossless finite-bag input queues')
     args = parser.parse_args()
     if os.environ.get('ROS_LOCALHOST_ONLY') != '1' or not os.environ.get('ROS_DOMAIN_ID'):
         parser.error('An explicit isolated ROS_DOMAIN_ID and ROS_LOCALHOST_ONLY=1 are required')
@@ -30,7 +32,7 @@ def main():
     from rclpy.serialization import deserialize_message
     from sensor_msgs.msg import Imu, PointCloud2
     from nav_msgs.msg import Odometry
-    from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
     cloud_topic, imu_topic = '/supermimic/x2_lio_r1/cloud', '/supermimic/x2_lio_r1/imu'
     odom_topic = '/supermimic/x2_lio_r1/odometry'
@@ -39,8 +41,10 @@ def main():
                 start_parameter_services=False)
     qos = QoSProfile(depth=200, reliability=ReliabilityPolicy.RELIABLE,
                      durability=DurabilityPolicy.VOLATILE)
-    pubs = {cloud_topic: node.create_publisher(PointCloud2, cloud_topic, qos),
-            imu_topic: node.create_publisher(Imu, imu_topic, qos)}
+    pub_qos = (QoSProfile(history=HistoryPolicy.KEEP_ALL, reliability=ReliabilityPolicy.RELIABLE,
+                          durability=DurabilityPolicy.VOLATILE) if args.reliable_inputs else qos)
+    pubs = {cloud_topic: node.create_publisher(PointCloud2, cloud_topic, pub_qos),
+            imu_topic: node.create_publisher(Imu, imu_topic, pub_qos)}
     types = {cloud_topic: PointCloud2, imu_topic: Imu}
     trajectory = []
 
@@ -55,6 +59,8 @@ def main():
                str((args.prepared / 'fastlio.yaml').resolve()),
                '-r', '/Odometry:=' + odom_topic, '-r', '/tf:=/supermimic/x2_lio_r1/tf',
                '-r', '__node:=supermimic_fastlio_offline']
+    if args.reliable_inputs:
+        command += ['-p', 'sm_offline_reliable_inputs:=true']
     (args.out / 'command.json').write_text(json.dumps({'argv': command,
         'ROS_DOMAIN_ID': os.environ['ROS_DOMAIN_ID'], 'ROS_LOCALHOST_ONLY': '1'}, indent=2))
     log = (args.out / 'fastlio.log').open('w')
@@ -127,6 +133,7 @@ def main():
                    delimiter=',', header='stamp,x,y,z,qx,qy,qz,qw', comments='')
         report = {'samples': len(trajectory), 'sent': sent, 'error': error,
                   'child_return_code': proc.returncode, 'replay_rate': args.rate,
+                  'reliable_offline_inputs': args.reliable_inputs,
                   'last_input_cloud_end_stamp': last_cloud_end,
                   'time_semantics_verified': False, 'motion_accuracy_validated': False,
                   'scope': 'server localhost-only offline sensor replay; no prior map, '
@@ -138,6 +145,10 @@ def main():
                 report['native_cloud_callbacks_match_sent'] = counts['cloud_callbacks'] == sent[cloud_topic]
                 report['native_imu_callbacks_match_sent'] = counts['imu_callbacks'] == sent[imu_topic]
                 report['odom_received_matches_native_publications'] = counts['odom_publications'] == len(trajectory)
+        report['input_delivery_complete'] = bool(report.get('native_cloud_callbacks_match_sent') and
+                                                  report.get('native_imu_callbacks_match_sent'))
+        if args.reliable_inputs and not report['input_delivery_complete'] and report['error'] is None:
+            report['error'] = 'Offline input callback counts differ from published counts'
         if trajectory:
             a = np.asarray(trajectory)
             report.update({'finite': bool(np.isfinite(a).all()),
@@ -150,6 +161,8 @@ def main():
                                             float(np.linalg.norm(a[:, 4:], axis=1).max())]})
         (args.out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
         print(json.dumps(report, indent=2))
+    if args.reliable_inputs and report['error']:
+        raise RuntimeError(report['error'])
 
 
 if __name__ == '__main__':

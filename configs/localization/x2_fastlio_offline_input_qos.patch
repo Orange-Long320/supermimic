@@ -1,0 +1,18 @@
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -922,0 +923,8 @@
++        const bool sm_reliable_inputs = this->declare_parameter<bool>("sm_offline_reliable_inputs", false);
++        const rclcpp::QoS sm_cloud_qos = sm_reliable_inputs
++            ? rclcpp::QoS(rclcpp::KeepAll()).reliable()
++            : rclcpp::QoS(rclcpp::SensorDataQoS());
++        const rclcpp::QoS sm_imu_qos = sm_reliable_inputs
++            ? rclcpp::QoS(rclcpp::KeepAll()).reliable()
++            : rclcpp::QoS(10);
++
+@@ -929,3 +937,3 @@
+-            sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+-        }
+-        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
++            sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, sm_cloud_qos, standard_pcl_cbk);
++        }
++        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, sm_imu_qos, imu_cbk);
