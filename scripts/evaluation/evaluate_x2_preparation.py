@@ -44,11 +44,14 @@ def main():
     p.add_argument('--unload-seconds',type=float,default=5.)
     p.add_argument('--prep-gain-source',choices=('sdk','policy'),default='sdk',
                    help='Diagnostic comparison of preparation and trained actuator gains')
+    p.add_argument('--waist-orientation-assist',action='store_true',
+                   help='Simulation candidate: use waist posture to balance a single-point suspension')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
             or not 1<=a.handover_seconds<=10 or not 1<=a.unload_seconds<=10
             or (a.unload_at_handover and (not a.unload or a.unload_before_handover))
+            or (a.orientation_assist and a.waist_orientation_assist)
             or (a.diagnostic_handover_tilt is not None and not .15<a.diagnostic_handover_tilt<=.35)):
         raise ValueError('Invalid scenario')
     a.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
@@ -90,6 +93,20 @@ def main():
     active_start=None;failure=None;events=[];rows=[];last_phase=entry.phase;unload_start=None
     support_force=np.zeros(3)
     balance_bias=np.zeros(n)
+    waist=names.index('waist_pitch_joint');waist_pendulum_jacobian=None
+    if a.waist_orientation_assist:
+        # Derive the hanging equilibrium response from this model's COM and
+        # attachment, rather than assuming a foot is fixed while suspended.
+        scratch=mujoco.MjData(m);scratch.qpos[:7]=[0.,0.,.65,1.,0.,0.,0.];scratch.qpos[qa]=ref
+        angles=[];epsilon=1e-4
+        for delta in (-epsilon,epsilon):
+            scratch.qpos[qa[waist]]=ref[waist]+delta;mujoco.mj_forward(m,scratch)
+            attach=scratch.xpos[torso]+scratch.xmat[torso].reshape(3,3)@local_attach
+            vector=scratch.subtree_com[pelvis]-attach
+            angles.append(float(np.arctan2(vector[0],-vector[2])))
+        waist_pendulum_jacobian=(angles[1]-angles[0])/(2*epsilon)
+        if not np.isfinite(waist_pendulum_jacobian) or abs(waist_pendulum_jacobian)<.05:
+            raise ValueError('Suspension waist response cannot be resolved')
     initial_outside=[name for name,q,lo,hi in zip(names,raw,candidate['measured_lower_candidate'],candidate['measured_upper_candidate']) if not lo<=q<=hi]
     substeps=round(.02/m.opt.timestep)
     for step in range(round((path.duration+thresholds.settle_timeout+2.+a.active_seconds)/.02)):
@@ -99,7 +116,7 @@ def main():
         omega=body_velocity[:3].copy();proposed=None
         try:
             if (a.unload_before_handover and unload_start is None and now>=path.duration
-                    and np.max(np.abs(q-ref))<thresholds.position_error
+                    and np.max(np.abs(q-ref-balance_bias))<thresholds.position_error
                     and np.max(np.abs(qd))<thresholds.joint_speed and np.linalg.norm(omega)<thresholds.angular_speed
                     and rows and min(rows[-1]['normal_n'])>10.):
                 unload_start=now;events.append({'time_s':now,'phase':'support_transfer_started'})
@@ -115,7 +132,15 @@ def main():
             bias=None
             if entry.phase in (EntryPhase.PREPARE,EntryPhase.SETTLE,EntryPhase.HISTORY):
                 desired=path.sample(now)[0]
-                if a.orientation_assist and (not a.unload_before_handover or unload_start is not None):
+                if a.waist_orientation_assist:
+                    pitch=float(np.arcsin(np.clip(gravity[0],-1.,1.)))
+                    requested=np.zeros(n)
+                    requested[waist]=np.clip(-(pitch+.2*omega[1])/waist_pendulum_jacobian,
+                        max(-.3,candidate['measured_lower_candidate'][waist]-ref[waist]),
+                        min(.3,candidate['measured_upper_candidate'][waist]-ref[waist]))
+                    balance_bias+=np.clip(requested-balance_bias,-.04*.02,.04*.02)
+                    desired=desired+balance_bias
+                elif a.orientation_assist and (not a.unload_before_handover or unload_start is not None):
                     roll=float(np.arctan2(-gravity[1],-gravity[2]));pitch=float(np.arcsin(np.clip(gravity[0],-1.,1.)))
                     requested=np.zeros(n);ramp=float(np.clip(now/2.,0.,1.));ramp=10*ramp**3-15*ramp**4+6*ramp**5
                     for side,foot in zip(('left','right'),feet):
@@ -131,7 +156,7 @@ def main():
                     balance_bias+=np.clip(requested-balance_bias,-.08*.02,.08*.02)
                     desired=desired+balance_bias
                 if compensator is not None: bias=compensator.update(desired,q,qd,.02)+balance_bias
-                elif a.orientation_assist: bias=balance_bias.copy()
+                elif a.orientation_assist or a.waist_orientation_assist: bias=balance_bias.copy()
             support_ready=(not a.unload_before_handover or (unload_start is not None and now-unload_start>=5.
                            and np.linalg.norm(support_force)<.05*weight and rows and min(rows[-1]['normal_n'])>10.))
             current_target,target_v,kp_now,kd_now=entry.step(now,q,qd,omega,gravity,policy_target=proposed,
@@ -202,6 +227,8 @@ def main():
                                ', used only as a simulation candidate',
             'load_compensation_sim_only':a.load_compensation,
             'orientation_assist_sim_only':a.orientation_assist,
+            'waist_orientation_assist_sim_only':a.waist_orientation_assist,
+            'waist_pendulum_jacobian_rad_per_rad':waist_pendulum_jacobian,
             'orientation_assist_axes':'body-frame foot rotational Jacobian; no hardcoded ankle sign',
             'support_transfer_before_handover':a.unload_before_handover,'support_transfer_start_s':unload_start,
             'unload_at_handover':a.unload_at_handover,
