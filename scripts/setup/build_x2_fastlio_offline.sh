@@ -14,7 +14,7 @@ cmake -S src/livox_ros_driver2 -B build/interfaces \
   -DPYTHON_EXECUTABLE=/usr/bin/python3 -DPython3_EXECUTABLE=/usr/bin/python3
 cmake --build build/interfaces -j2
 cmake --install build/interfaces
-source "$workspace/install/setup.bash"
+source "$workspace/install/share/livox_ros_driver2/local_setup.bash"
 cmake -S src/FAST_LIO_ROS2 -B build/fast_lio \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$workspace/install" \
   -DPYTHON_EXECUTABLE=/usr/bin/python3 -DPython3_EXECUTABLE=/usr/bin/python3 \
