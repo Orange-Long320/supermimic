@@ -143,11 +143,12 @@ def main():
         'measured_outside_pc2_urdf_by_joint': dict(measured_bad),
         'target_frames_outside_pc2_urdf': dict(output_frames_bad),
         'target_outside_pc2_urdf_by_joint': {k: dict(v) for k, v in output_bad.items()},
+        'target_bounds_comparison_semantics': 'PD setpoints are not measured joint angles; this count alone does not establish policy failure',
         'worst_target_violation': worst, 'first_recorded_input': first,
         'hardware_encoder_zero_direction_validated': False,
         'online_pelvis_source_validated': False,
         'motor_deployment_gate_passed': False,
-        'reason': 'Recorded inputs/targets fail bounds; file geometry agreement cannot validate physical calibration.'}
+        'reason': 'Measured inputs are incompatible with file bounds; physical calibration and hardware PD command ranges remain unvalidated.'}
     (args.out/'report.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')
     print(json.dumps({k: report[k] for k in ('frames', 'max_zero_axis_error_deg', 'max_zero_anchor_error_m',
           'max_joint_limit_difference_rad', 'measured_outside_pc2_urdf_by_joint',

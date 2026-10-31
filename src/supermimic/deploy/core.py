@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from collections import deque
 from enum import Enum
-from math import isfinite, sqrt
+from math import acos, isfinite, sqrt
 from typing import Protocol
 
 
@@ -36,13 +36,17 @@ class Contract:
     names: tuple[str, ...]
     default: tuple[float, ...]
     scale: tuple[float, ...]
-    lower: tuple[float, ...]
+    lower: tuple[float, ...]  # measured joint bounds; distinct from PD setpoints
     upper: tuple[float, ...]
     max_target_step: tuple[float, ...]
     max_state_age: float
     max_skew: float
     history: int
     goal_dim: int
+    # Supply only from a verified command interface. None preserves the original
+    # conservative bounds; never infer permissive setpoint bounds from a policy.
+    target_lower: tuple[float, ...] | None = None
+    target_upper: tuple[float, ...] | None = None
 
     def __post_init__(self):
         n = len(self.names)
@@ -57,6 +61,57 @@ class Contract:
             raise DeploymentError('invalid scale or timing')
         if self.history < 1 or self.goal_dim < 1:
             raise DeploymentError('invalid policy dimensions')
+        if (self.target_lower is None) != (self.target_upper is None):
+            raise DeploymentError('both target bounds are required')
+        if self.target_lower is not None:
+            if any(len(v) != n or not finite(v) for v in (self.target_lower, self.target_upper)):
+                raise DeploymentError('invalid target bounds')
+            if any(not lo <= q <= hi or lo >= hi
+                   for lo, q, hi in zip(self.target_lower, self.default, self.target_upper)):
+                raise DeploymentError('invalid target range or default')
+
+    @property
+    def target_bounds(self):
+        return (self.lower, self.upper) if self.target_lower is None else (self.target_lower, self.target_upper)
+
+
+@dataclass(frozen=True)
+class StartupPose:
+    """Explicit input-matching gate, not a motion generator or calibration.
+
+    Use the selected reference pose, not the action offset in Contract.default.
+    Tolerances must be supplied by the caller and independently validated.
+    """
+    names: tuple[str, ...]
+    position: tuple[float, ...]
+    position_tolerance: tuple[float, ...]
+    max_speed: tuple[float, ...]
+    gravity: tuple[float, float, float]
+    max_gravity_angle: float
+
+    def validate(self, spec):
+        n = len(spec.names)
+        if self.names != spec.names or any(len(v) != n or not finite(v)
+                for v in (self.position, self.position_tolerance, self.max_speed)):
+            raise DeploymentError('startup joint contract mismatch')
+        if any(t <= 0 or speed <= 0 or not lo <= q <= hi
+               for q, t, speed, lo, hi in zip(self.position, self.position_tolerance,
+                                            self.max_speed, spec.lower, spec.upper)):
+            raise DeploymentError('invalid startup pose or tolerances')
+        if (len(self.gravity) != 3 or not finite((*self.gravity, self.max_gravity_angle))
+                or abs(sum(v*v for v in self.gravity)-1.) > 1e-6
+                or not 0 < self.max_gravity_angle < 3.141592653589793):
+            raise DeploymentError('invalid startup gravity')
+
+    def matches(self, joints, gravity):
+        if any(abs(j.position-q) > tolerance or abs(j.velocity) > speed
+               for j, q, tolerance, speed in zip(joints, self.position, self.position_tolerance, self.max_speed)):
+            return False
+        norm = sqrt(sum(v*v for v in gravity))
+        if norm < 1e-8:
+            return False
+        cosine = sum(a*b for a, b in zip(gravity, self.gravity))/norm
+        return acos(max(-1., min(1., cosine))) <= self.max_gravity_angle
 
 
 def order_and_validate(state: State, spec: Contract, now: float):
@@ -99,8 +154,12 @@ class Mode(Enum):
 
 class ShadowController:
     """Computes position targets for logging only. No ROS publishing or actuation."""
-    def __init__(self, spec: Contract, policy: Policy, goals: GoalProvider):
+    def __init__(self, spec: Contract, policy: Policy, goals: GoalProvider, *, startup: StartupPose | None = None):
         self.spec, self.policy, self.goals = spec, policy, goals
+        self.startup = startup
+        if startup is not None:
+            startup.validate(spec)
+        self.startup_complete = False
         self.mode, self.reason = Mode.DISARMED, None
         self.previous_action = (0.,) * len(spec.names)
         self.previous_target = None
@@ -117,6 +176,7 @@ class ShadowController:
         self.previous_target = None
         self.history.clear()
         self.reason = None
+        self.startup_complete = False
 
     def step(self, state: State, command: str, now: float):
         if self.mode != Mode.SHADOW:
@@ -126,6 +186,12 @@ class ShadowController:
             # IMU orientation is wxyz, body-to-world; project world gravity into body.
             w, x, y, z = state.orientation_wxyz
             gravity = (2*(w*y-x*z), -2*(w*x+y*z), -1+2*(x*x+y*y))
+            if self.startup is not None and not self.startup_complete:
+                if command != 'stand':
+                    raise DeploymentError('startup requires stand command')
+                if not self.startup.matches(joints, gravity):
+                    self.history.clear()
+                    return None
             terms = (tuple(j.position-q for j, q in zip(joints, self.spec.default)),
                      tuple(j.velocity for j in joints), state.angular_velocity, gravity, self.previous_action)
             self.history.append(terms)
@@ -141,9 +207,11 @@ class ShadowController:
                 raise DeploymentError('invalid policy action')
             target = tuple(q + s*a for q, s, a in zip(self.spec.default, self.spec.scale, action))
             previous = self.previous_target or tuple(j.position for j in joints)
-            if any(not lo <= q <= hi or abs(q-p) > step for q, p, lo, hi, step in zip(target, previous, self.spec.lower, self.spec.upper, self.spec.max_target_step)):
-                raise DeploymentError('target outside position or step limits')
+            lower, upper = self.spec.target_bounds
+            if any(not lo <= q <= hi or abs(q-p) > step for q, p, lo, hi, step in zip(target, previous, lower, upper, self.spec.max_target_step)):
+                raise DeploymentError('target outside command or step limits')
             self.previous_action, self.previous_target = action, target
+            self.startup_complete = True
             return target
         except Exception as exc:
             self.mode, self.reason = Mode.FAULT, str(exc)

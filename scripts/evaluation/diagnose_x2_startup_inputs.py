@@ -35,6 +35,8 @@ def main():
     for key in ('profile', 'frames', 'urdf', 'policy', 'out'):
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--samples', type=int, default=25)
+    parser.add_argument('--simulation-frames', type=Path, action='append', default=[])
+    parser.add_argument('--current-sensors', type=Path)
     args = parser.parse_args()
     if args.samples < 2:
         raise ValueError('At least two diagnostic samples required')
@@ -130,18 +132,49 @@ def main():
                    'difference_rad': float(q-r), 'difference_deg': float(np.degrees(q-r))}
                   for n, q, r in zip(names, measured_q, ref_q)]
     difference.sort(key=lambda r: abs(r['difference_rad']), reverse=True)
+    simulation_comparison = []
+    stiffness = np.asarray([spec['stiffness'][n] for n in names])
+    damping = np.asarray([spec['damping'][n] for n in names])
+    effort = np.asarray([spec['effort_limit'][n] for n in names])
+    for path in args.simulation_frames:
+        simulated = [json.loads(line) for line in path.open()]
+        target = np.asarray([r['target'] for r in simulated])
+        actual = np.asarray([r['joint_pos'] for r in simulated])
+        velocity = np.asarray([r['joint_vel'] for r in simulated])
+        estimated_torque = stiffness*(target-actual)-damping*velocity
+        simulation_comparison.append({'path': str(path), 'sha256': digest(path), 'frames': len(simulated),
+             'target_frames_outside_pc2_urdf': int(((target<pc2_bounds[:, 0])|(target>pc2_bounds[:, 1])).any(axis=1).sum()),
+             'measured_frames_outside_pc2_urdf': int(((actual<pc2_bounds[:, 0])|(actual>pc2_bounds[:, 1])).any(axis=1).sum()),
+             'max_unclipped_profile_pd_effort_ratio': float(np.max(np.abs(estimated_torque)/effort)),
+             'effort_scope': 'Algebraic estimate using training gains/limits, not measured actuator torque or hardware saturation behavior'})
+    current = None
+    if args.current_sensors:
+        samples = json.loads(args.current_sensors.read_text())
+        named = {j['name']: j for group in ('leg', 'waist', 'arm', 'head')
+                 for j in samples['latest'][group]['joints']}
+        if set(named) != set(names):
+            raise ValueError('Current named joint set mismatch')
+        q = np.asarray([named[n]['position'] for n in names])
+        current = {'sha256': digest(args.current_sensors), 'scope': samples['scope'],
+                   'all_joint_error_codes_zero': all(not j['error_code'] for j in named.values()),
+                   'maximum_change_from_recorded_rad': float(np.max(np.abs(q-measured_q))),
+                   'outside_pc2_urdf': [n for j, n in enumerate(names) if q[j]<pc2_bounds[j, 0] or q[j]>pc2_bounds[j, 1]],
+                   'joint_position_rad': dict(zip(names, q.tolist())),
+                   'calibration_validated': False}
     result = {'scope': __doc__, 'sha256': {k: digest(getattr(args, k)) for k in ('profile', 'frames', 'urdf', 'policy')},
               'selected_checkpoint': 11500, 'source_rows': len(rows), 'sampled_rows': len(indices),
               'sample_indices': indices.tolist(), 'factors': factors, 'cases': cases,
               'recorded_baseline_max_action_error': baseline_error,
+              'target_bounds_comparison_semantics': 'PD setpoint versus file joint bounds only; not measured motion or a hardware acceptance gate',
               'elapsed_cpu_s': time.perf_counter()-started, 'reference_joint_position_rad': dict(zip(names, ref_q.tolist())),
               'reference_position_outside_pc2_urdf': [names[i] for i in np.flatnonzero((ref_q<pc2_bounds[:, 0])|(ref_q>pc2_bounds[:, 1]))],
               'measured_minus_reference': difference,
+              'simulation_comparison': simulation_comparison, 'current_readonly_sample': current,
               'physical_encoder_calibration_validated': False, 'startup_trajectory_validated': False,
               'motor_deployment_allowed': False}
     (args.out/'report.json').write_text(json.dumps(result, indent=2, allow_nan=False)+'\n')
     print(json.dumps({'sampled_rows': len(indices), 'recorded_baseline_max_action_error': baseline_error,
-                      'passing_counterfactual_cases': [c for c in cases if not c['pc2_bad_frames']],
+                      'counterfactual_cases_with_targets_inside_file_joint_bounds': [c for c in cases if not c['pc2_bad_frames']],
                       'largest_posture_differences': difference[:8]}, indent=2))
 
 
