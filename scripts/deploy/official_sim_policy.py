@@ -80,6 +80,7 @@ def main():
     p.add_argument('--idle-entry-offset', type=int, choices=(0, 5, 10))
     p.add_argument('--idle-anchor-mode', choices=('fixed', 'zero-xy'), default='fixed', help='zero-xy removes position feedback for causal diagnosis only')
     p.add_argument('--idle-velocity-feedback', action='store_true', help='Experimental measured-velocity damping during static Idle')
+    p.add_argument('--foot-aligned-scene', type=Path, help='Official scene for experimental foot-aligned Idle IK')
     a = p.parse_args()
     if a.schedule and a.keyboard_port: raise ValueError('Select schedule or keyboard, not both')
     if (not 128 <= a.ros_domain <= 232 or os.environ.get('ROS_LOCALHOST_ONLY') != '1'
@@ -126,7 +127,7 @@ def main():
     tracker = SkillGoal(a.dataset, a.profile, [0., 0., .65], [1., 0., 0., 0.], jog_brake_fade=a.jog_brake_fade, stand_anchor_gain=a.stand_anchor_gain, stand_gain_quiet_time=a.stand_gain_quiet_time, planner=a.planner,
                         planner_ablation=a.planner_ablation, idle_join_frames=a.idle_join_frames,
                         idle_entry_offset=a.idle_entry_offset, idle_anchor_mode=a.idle_anchor_mode,
-                        idle_velocity_feedback=a.idle_velocity_feedback)
+                        idle_velocity_feedback=a.idle_velocity_feedback, foot_aligned_scene=a.foot_aligned_scene)
     schedule = json.loads(a.schedule.read_text()) if a.schedule else None
     valid = ('stand', 'walk', 'jog', 'backward', 'turn_left_inplace', 'turn_right_inplace')
     if schedule and (schedule[0][0] != 0 or any(m not in valid for _, m in schedule) or any(schedule[i][0] >= schedule[i+1][0] for i in range(len(schedule)-1))):
@@ -201,7 +202,7 @@ def main():
                 elapsed = now-control_started
                 mode = keyboard.read() if keyboard else (next(m for t, m in reversed(schedule) if elapsed >= t) if schedule else (a.mode if 3. <= elapsed < a.seconds-3. else 'stand'))
                 reference_root_position = tracker.position.copy()
-                goal = tracker.goal(position, quat, q, mode, joint_velocity=qvel, sample_time=odom['time'])
+                goal = tracker.goal(position, quat, q, mode, joint_velocity=qvel, sample_time=odom['time'], base_angular_velocity=state.angular_velocity)
                 window = tracker.scheduler.window().copy()
                 overlap_error = float(np.max(np.abs(previous_window[1:]-window[:-1]))) if previous_window is not None else 0.
                 previous_window = window
@@ -235,11 +236,13 @@ def main():
                        'stand_gain': tracker.stand_gain, 'stand_quiet_steps': tracker.stand_quiet_steps,
                        'phase_source': tracker.scheduler.source, 'phase_index': tracker.scheduler.index,
                        'planned_frames': len(tracker.scheduler.plan)}
-                if a.idle_velocity_feedback:
+                if a.idle_velocity_feedback or a.foot_aligned_scene:
                     row.update(raw_anchor_translation=tracker.raw_anchor_translation.tolist(),
                                reference_root_position=reference_root_position.tolist(),
                                idle_root_velocity_world=tracker.idle_root_velocity.tolist(),
                                idle_velocity_lookahead_s=tracker.idle_lookahead)
+                if a.foot_aligned_scene:
+                    row['foot_idle_status'] = tracker.foot_idle.status
                 if not a.compact_log: row.update(observation=obs, goal=goal.tolist(), action=action)
                 frame_log.write(json.dumps(row)+'\n')
                 frame_count += 1
@@ -256,6 +259,7 @@ def main():
     except Exception as exc:
         failure = str(exc)
     finally:
+        tracker.close()
         if not frame_count and failure is None:
             failure = 'no policy frames received before timeout'
         frame_log.close()
@@ -272,6 +276,8 @@ def main():
                   'idle_entry_offset': a.idle_entry_offset,
                   'idle_anchor_mode': a.idle_anchor_mode,
                   'idle_velocity_feedback': a.idle_velocity_feedback,
+                  'foot_aligned_scene': str(a.foot_aligned_scene) if a.foot_aligned_scene else None,
+                  'foot_idle_events': tracker.foot_idle.events if tracker.foot_idle else [],
                   'max_future_overlap_error': max_overlap_error,
                   'scope': 'official simulator exploratory run, simulation odometry ground truth'}
         (a.out/'result.json').write_text(json.dumps(report, indent=2)+'\n')

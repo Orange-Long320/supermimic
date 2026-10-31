@@ -20,7 +20,7 @@ class SkillGoal:
                  *, sustained=True, straight=True, horizon=10, jog_brake_fade=None, stand_anchor_gain=1.,
                  stand_gain_quiet_time=0., stand_gain_speed_limit=.08, planner='baseline',
                  planner_ablation='none', idle_join_frames=None, idle_entry_offset=None,
-                 idle_anchor_mode='fixed', idle_velocity_feedback=False):
+                 idle_anchor_mode='fixed', idle_velocity_feedback=False, foot_aligned_scene=None):
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -98,6 +98,12 @@ class SkillGoal:
         self.stand_gain_speed_limit = stand_gain_speed_limit
         self.stand_quiet_steps = 0
         self.last_position = None
+        self.foot_idle = None
+        if foot_aligned_scene is not None:
+            if planner != 'context-idle' or idle_velocity_feedback or idle_anchor_mode != 'fixed' or stand_anchor_gain != 1. or planner_ablation != 'none':
+                raise ValueError('Foot-aligned Idle requires the unmodified context planner and anchor')
+            from supermimic.deploy.foot_idle_session import FootIdleSession
+            self.foot_idle = FootIdleSession(foot_aligned_scene,spec,self.scheduler)
 
     @staticmethod
     def rotation(wxyz):
@@ -118,7 +124,7 @@ class SkillGoal:
         self.fk(self.reference, [0., 0., row[-1]], quat, row[:self.nj]+self.default)
         return self.reference.xpos[self.foot_ids].copy()
 
-    def goal(self, position, quat_wxyz, joints, mode, joint_velocity=None, sample_time=None):
+    def goal(self, position, quat_wxyz, joints, mode, joint_velocity=None, sample_time=None, base_angular_velocity=None):
         self.has_motion_request = self.has_motion_request or mode != 'stand'
         if self.idle_velocity_feedback:
             if sample_time is None:
@@ -128,6 +134,8 @@ class SkillGoal:
             if joint_velocity is None:
                 raise ValueError('Context planner requires measured joint velocity')
             self.scheduler.set_context(np.asarray(joints)-self.default, joint_velocity)
+        if self.foot_idle is not None:
+            self.foot_idle.prepare(self,position,quat_wxyz,joints,joint_velocity,base_angular_velocity,sample_time,mode)
         self.scheduler.select(mode)
         window = self.scheduler.window()
         g = window[0]
@@ -166,8 +174,14 @@ class SkillGoal:
         return np.r_[window.reshape(-1), delta_pos, delta_rot].astype(np.float32)
 
     def advance(self):
+        if self.foot_idle is not None and self.foot_idle.advance(self):
+            return
         g = self.scheduler.window()[0]
         velocity = g[2*self.nj+6:2*self.nj+9]
         self.position[:2] += Rotation.from_euler('z', self.yaw).apply(velocity)[:2]*self.scheduler.dt
         self.yaw += float(g[2*self.nj+5])*self.scheduler.dt
         self.scheduler.advance()
+
+    def close(self):
+        if self.foot_idle is not None:
+            self.foot_idle.close()
