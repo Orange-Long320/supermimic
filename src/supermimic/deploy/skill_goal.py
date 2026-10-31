@@ -18,7 +18,7 @@ from supermimic.envs.mdp.motion_library import MotionLibrary
 class SkillGoal:
     def __init__(self, dataset, profile, root_position, root_quat_wxyz,
                  *, sustained=True, straight=True, horizon=10, jog_brake_fade=None, stand_anchor_gain=1.,
-                 stand_gain_quiet_time=0., stand_gain_speed_limit=.08):
+                 stand_gain_quiet_time=0., stand_gain_speed_limit=.08, planner='baseline'):
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -50,6 +50,21 @@ class SkillGoal:
                 clips[name+'_stop'][:, 2*self.nj+5] = 0.
         loops = {n: choose_cycle(dataset/(n+'.npz'), speed) for n, speed in [('walk', .22), ('jog', .5)]} if sustained else {}
         self.scheduler = SkillPhase({n: clips[n] for n in names}, {n: clips[n+'_stop'] for n in names}, brake, self.nj, horizon=horizon, loops=loops, jog_brake_fade=jog_brake_fade)
+        if planner not in ('baseline', 'context-idle'):
+            raise ValueError('Unknown reference planner')
+        self.planner = planner
+        if planner == 'context-idle':
+            from supermimic.control.idle_planner import ContextIdlePlanner
+            self.foot_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, side+'_ankle_roll_link')
+                             for side in ('left', 'right')]
+            if min(self.foot_ids) < 0:
+                raise ValueError('Missing planner foot bodies')
+            limits = np.asarray([self.model.jnt_range[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)]
+                                 for n in self.names])-self.default[:, None]
+            velocity = np.asarray([spec['velocity_limit'][n] for n in self.names])
+            self.scheduler = ContextIdlePlanner({n: clips[n] for n in names}, {n: clips[n+'_stop'] for n in names},
+                brake, self.nj, horizon=horizon, loops=loops, joint_limits=limits, velocity_limits=velocity,
+                foot_features=self.planner_feet)
         self.position = np.asarray(root_position, dtype=float).copy()
         self.yaw = self.rotation(root_quat_wxyz).as_euler('xyz')[2]
         if not 1. <= stand_anchor_gain <= 2.:
@@ -74,7 +89,19 @@ class SkillGoal:
         mujoco.mj_kinematics(self.model, data)
         return data.xpos[self.anchor].copy(), self.rotation(data.xquat[self.anchor])
 
-    def goal(self, position, quat_wxyz, joints, mode):
+    def planner_feet(self, row):
+        """Heading-frame ankle geometry; this does not measure support."""
+        grav = row[2*self.nj:2*self.nj+3]
+        quat = Rotation.from_euler('xyz', [np.arctan2(-grav[1], -grav[2]),
+                                           np.arcsin(np.clip(grav[0], -1., 1.)), 0.]).as_quat()[[3,0,1,2]]
+        self.fk(self.reference, [0., 0., row[-1]], quat, row[:self.nj]+self.default)
+        return self.reference.xpos[self.foot_ids].copy()
+
+    def goal(self, position, quat_wxyz, joints, mode, joint_velocity=None):
+        if self.planner == 'context-idle':
+            if joint_velocity is None:
+                raise ValueError('Context planner requires measured joint velocity')
+            self.scheduler.set_context(np.asarray(joints)-self.default, joint_velocity)
         self.scheduler.select(mode)
         window = self.scheduler.window()
         g = window[0]

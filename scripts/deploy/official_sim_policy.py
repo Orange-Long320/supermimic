@@ -73,10 +73,13 @@ def main():
     p.add_argument('--compact-log', action='store_true', help='Log measured joints and per-step diagnostics without full network vectors')
     p.add_argument('--seconds', type=float, default=10.)
     p.add_argument('--sim-only', action='store_true', required=True)
+    p.add_argument('--ros-domain', type=int, default=179)
+    p.add_argument('--planner', choices=('baseline', 'context-idle'), default='baseline')
     a = p.parse_args()
     if a.schedule and a.keyboard_port: raise ValueError('Select schedule or keyboard, not both')
-    if os.environ.get('ROS_LOCALHOST_ONLY') != '1' or os.environ.get('ROS_DOMAIN_ID') != '179':
-        raise RuntimeError('Requires isolated simulation ROS domain 179 and ROS_LOCALHOST_ONLY=1')
+    if (not 128 <= a.ros_domain <= 232 or os.environ.get('ROS_LOCALHOST_ONLY') != '1'
+            or os.environ.get('ROS_DOMAIN_ID') != str(a.ros_domain)):
+        raise RuntimeError('Requires the explicitly selected isolated simulation ROS domain and localhost only')
     if a.out.exists() or a.seconds <= 0:
         raise ValueError('New output and positive duration required')
     import numpy as np
@@ -115,11 +118,13 @@ def main():
         commands.sendto(json.dumps({'target': target}, allow_nan=False).encode(), ('127.0.0.1', a.command_port))
     a.out.mkdir(parents=True)
     history, previous = deque(maxlen=10), (0.,)*n
-    tracker = SkillGoal(a.dataset, a.profile, [0., 0., .65], [1., 0., 0., 0.], jog_brake_fade=a.jog_brake_fade, stand_anchor_gain=a.stand_anchor_gain, stand_gain_quiet_time=a.stand_gain_quiet_time)
+    tracker = SkillGoal(a.dataset, a.profile, [0., 0., .65], [1., 0., 0., 0.], jog_brake_fade=a.jog_brake_fade, stand_anchor_gain=a.stand_anchor_gain, stand_gain_quiet_time=a.stand_gain_quiet_time, planner=a.planner)
     schedule = json.loads(a.schedule.read_text()) if a.schedule else None
     valid = ('stand', 'walk', 'jog', 'backward', 'turn_left_inplace', 'turn_right_inplace')
     if schedule and (schedule[0][0] != 0 or any(m not in valid for _, m in schedule) or any(schedule[i][0] >= schedule[i+1][0] for i in range(len(schedule)-1))):
         raise ValueError('Invalid schedule')
+    if a.planner == 'context-idle' and (a.keyboard_port or not schedule or any(m not in ('stand', 'walk') for _, m in schedule)):
+        raise ValueError('Context planner prototype requires a scripted Walk/Idle schedule')
     keyboard = Keyboard(a.keyboard_port) if a.keyboard_port else None
     initialized = False; control_started = None; failure = None; failure_context = None
     frame_count = 0; first_elapsed = None; last_elapsed = None; max_overlap_error = None
@@ -187,7 +192,7 @@ def main():
                     if keyboard: keyboard.mark_ready()
                 elapsed = now-control_started
                 mode = keyboard.read() if keyboard else (next(m for t, m in reversed(schedule) if elapsed >= t) if schedule else (a.mode if 3. <= elapsed < a.seconds-3. else 'stand'))
-                goal = tracker.goal(position, quat, q, mode)
+                goal = tracker.goal(position, quat, q, mode, joint_velocity=qvel)
                 window = tracker.scheduler.window().copy()
                 overlap_error = float(np.max(np.abs(previous_window[1:]-window[:-1]))) if previous_window is not None else 0.
                 previous_window = window
@@ -248,6 +253,7 @@ def main():
                   'jog_brake_fade': a.jog_brake_fade, 'phase_events': tracker.scheduler.events,
                   'stand_anchor_gain': a.stand_anchor_gain,
                   'stand_gain_quiet_time': a.stand_gain_quiet_time,
+                  'planner': a.planner, 'ros_domain': a.ros_domain,
                   'max_future_overlap_error': max_overlap_error,
                   'scope': 'official simulator exploratory run, simulation odometry ground truth'}
         (a.out/'result.json').write_text(json.dumps(report, indent=2)+'\n')

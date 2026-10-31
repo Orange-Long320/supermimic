@@ -17,9 +17,11 @@ def main():
     p.add_argument('--profile', type=Path, required=True)
     p.add_argument('--port', type=int, required=True)
     p.add_argument('--sim-only', action='store_true', required=True)
+    p.add_argument('--ros-domain', type=int, default=179)
     a = p.parse_args()
-    if os.environ.get('ROS_LOCALHOST_ONLY') != '1' or os.environ.get('ROS_DOMAIN_ID') != '179':
-        raise RuntimeError('Requires isolated simulation ROS domain 179 and ROS_LOCALHOST_ONLY=1')
+    if (not 128 <= a.ros_domain <= 232 or os.environ.get('ROS_LOCALHOST_ONLY') != '1'
+            or os.environ.get('ROS_DOMAIN_ID') != str(a.ros_domain)):
+        raise RuntimeError('Requires the explicitly selected isolated simulation ROS domain and localhost only')
     spec = json.loads(a.profile.read_text())
     names = spec['joint_names']
     if spec['robot'] != 'x2_ultra' or len(names) != 31 or len(set(names)) != 31:
