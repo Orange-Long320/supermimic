@@ -18,6 +18,8 @@ def main():
     p.add_argument('--dataset',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True);p.add_argument('--gpu',type=int,default=0);p.add_argument('--proof',type=Path)
     p.add_argument('--compiled',action='store_true');p.add_argument('--hours',type=float,default=1.)
+    p.add_argument('--anchor-obs',action=argparse.BooleanOptionalAction,default=True,
+                   help='Use --no-anchor-obs for the native future-only candidate; capacity transfer required')
     p.add_argument('--additional-steps',type=int,help='Additional vectorized environment iterations for train-steps')
     p.add_argument('--checkpoint-interval',type=int,help='Checkpoint interval in environment iterations for train-steps')
     p.add_argument('--share-gpu',action='store_true',help='Explicitly permit an occupied GPU for train-steps')
@@ -94,9 +96,12 @@ def main():
             if is_dataclass(current):restore(current,v)
             else:setattr(obj,k,tuple(v) if isinstance(current,tuple) else v)
     cfg=TrainConfig();restore(cfg,ck['config'])
+    source_anchor=cfg.env.anchor_obs
+    if source_anchor != a.anchor_obs and (a.phase!='capacity' or a.anchor_obs):
+        raise ValueError('Observation changes require a no-anchor capacity transfer, not full resume')
     if cfg.robot!='x2_ultra' or cfg.env.box or cfg.env.terrain_manifest or cfg.env.sole_profile:raise ValueError('Unexpected checkpoint configuration')
     cfg.data.npz_dir=a.dataset;cfg.data.clips=[c['name'] for c in manifest['clips']];cfg.data.manifest=None;cfg.data.library=None;cfg.data.limit=None
-    cfg.env.num_envs=4096;cfg.env.replay_capacity=256;cfg.env.anchor_obs=True;cfg.env.episode_length_s=10
+    cfg.env.num_envs=4096;cfg.env.replay_capacity=256;cfg.env.anchor_obs=a.anchor_obs;cfg.env.episode_length_s=10
     cfg.env.action_noise_std=.1;cfg.env.reset_noise=cfg.env.obs_noise=cfg.env.domain_randomization=True;cfg.env.sampling_mode='return';cfg.policy_trainer.obs_noise=True
     cfg.wm_trainer.batch_size=cfg.policy_trainer.batch_size=1024;cfg.wm_trainer.batches_per_update=10
     cfg.wm_trainer.compile=cfg.policy_trainer.compile='default' if a.compiled else None
@@ -120,6 +125,8 @@ def main():
     cfg.schedule.checkpoint_interval=a.checkpoint_interval if a.checkpoint_interval is not None else 100 if a.phase=='capacity' else 500
     a.out.mkdir(parents=True,exist_ok=False)
     record={'status':'initializing','phase':a.phase,'pid':os.getpid(),'gpu':a.gpu,'argv':sys.argv,'dataset_sha256':sha(a.dataset/'manifest.json'),'checkpoint_input':str(a.checkpoint),'checkpoint_input_sha256':sha(a.checkpoint),'source_iteration':ck['iteration'],'configuration':asdict(cfg),'weights_only_transfer':a.phase=='capacity','physics_validated':False,'python':sys.executable,'torch':torch.__version__,'cuda_runtime':torch.version.cuda}
+    record.update(anchor_obs=a.anchor_obs,source_anchor_obs=source_anchor,
+                  initialization='remove anchor columns; fresh optimizers' if source_anchor != a.anchor_obs else 'unchanged input contract')
     if a.phase=='train-steps':
         record.update(capacity_run='skipped at user request',additional_env_iterations=a.additional_steps,
                       target_saved_iteration=cfg.schedule.total_iterations)
@@ -144,6 +151,12 @@ def main():
     try:
         trainer=Trainer(cfg)
         if a.phase=='capacity':
+            if source_anchor != a.anchor_obs:
+                from supermimic.policy.no_anchor import remove_anchor_weights
+                from supermimic.robots.dimensions import GOAL_FEAT_DIM
+                future=cfg.env.future_frames*GOAL_FEAT_DIM
+                ck['policy']=remove_anchor_weights(ck['policy'],future_dim=future)
+                ck['critic']=remove_anchor_weights(ck['critic'],future_dim=future,feature_dim=trainer.wm.spec.feature_dim)
             for key,module in [('wm',trainer.wm),('policy',trainer.policy),('critic',trainer.critic)]:module.load_state_dict(ck[key],strict=True)
             if trainer.iteration or trainer.num_updates:raise ValueError('Expected fresh counters')
         del ck

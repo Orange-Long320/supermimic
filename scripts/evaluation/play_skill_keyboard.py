@@ -55,7 +55,7 @@ def main():
         initial = len(z['joint_pos'])-1
     env_cfg = make_env_cfg(SuperMimicEnvCfgArgs(npz_files=[str(stand)], num_envs=1, seed=0,
         future_frames=cfg['env']['future_frames'], episode_length_s=1000., action_noise_std=0., obs_noise=False,
-        reset_noise=False, domain_randomization=False, record_transitions=False, sampling_mode='start', anchor_obs=True))
+        reset_noise=False, domain_randomization=False, record_transitions=False, sampling_mode='start', anchor_obs=cfg['env']['anchor_obs']))
     env_cfg.auto_reset = False
     del env_cfg.terminations['clip_end']
     env = ManagerBasedRlEnv(env_cfg, device='cuda:0')

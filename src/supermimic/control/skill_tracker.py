@@ -41,6 +41,7 @@ def choose_cycle(path, minimum_speed):
 class SkillTracker:
     def __init__(self, env, dataset, cfg, loop_profile='baseline', straight_heading=False):
         self.env = env
+        self.anchor_obs = cfg['env']['anchor_obs']
         self.cmd = env.command_manager.get_term('motion')
         names = ['walk', 'backward', 'turn_left_inplace', 'turn_right_inplace', 'jog']
         files = [dataset / (n + '.npz') for n in names] + [dataset / (n + '_stop.npz') for n in names]
@@ -76,6 +77,8 @@ class SkillTracker:
     def goal(self, mode):
         self.scheduler.select(mode)
         window = self.scheduler.window()
+        if not self.anchor_obs:
+            return torch.as_tensor(window.reshape(1, -1), device=self.env.device)
         g = window[0]
         grav = g[2*NJ:2*NJ+3]
         roll = np.arctan2(-grav[1], -grav[2])
@@ -91,6 +94,9 @@ class SkillTracker:
         return torch.cat([torch.as_tensor(window.reshape(1, -1), device=device), anchor], dim=-1)
 
     def advance(self):
+        if not self.anchor_obs:
+            self.scheduler.advance()
+            return
         g = self.scheduler.window()[0]
         lin = g[2*NJ+6:2*NJ+9]
         self.pos[:2] += Rotation.from_euler('z', self.yaw).apply(lin)[:2] * self.scheduler.dt

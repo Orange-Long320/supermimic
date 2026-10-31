@@ -29,7 +29,7 @@ def main():
     with np.load(stand_file) as z:initial=len(z['joint_pos'])-1
     env_cfg=make_env_cfg(SuperMimicEnvCfgArgs(npz_files=[str(stand_file)],num_envs=1,seed=0,
         future_frames=cfg['env']['future_frames'],episode_length_s=1000.,action_noise_std=0.,obs_noise=False,
-        reset_noise=False,domain_randomization=False,record_transitions=False,sampling_mode='start',anchor_obs=True))
+        reset_noise=False,domain_randomization=False,record_transitions=False,sampling_mode='start',anchor_obs=cfg['env']['anchor_obs']))
     env_cfg.auto_reset=False
     # The backing stand clip is deliberately frozen; its clip-end timeout is
     # irrelevant to the scheduled goals. Physical termination terms remain.

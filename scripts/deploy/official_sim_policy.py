@@ -61,6 +61,7 @@ def main():
     p.add_argument('--profile', type=Path, required=True)
     p.add_argument('--dataset', type=Path, required=True)
     p.add_argument('--policy', type=Path, required=True)
+    p.add_argument('--anchor-obs',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--state-port', type=int, required=True)
     p.add_argument('--command-port', type=int, required=True)
@@ -111,10 +112,20 @@ def main():
     if spec['robot'] != 'x2_ultra' or n != 31:
         raise ValueError('Expected X2 Ultra profile')
     model = TorchScriptPolicy(a.policy)
+    goal_dim=10*(2*n+10)+(9 if a.anchor_obs else 0)
+    manifest_path=a.policy.parent/'manifest.json'
+    if manifest_path.exists():
+        meta=json.loads(manifest_path.read_text())
+        if meta['goal_dim']!=goal_dim or meta.get('anchor_obs',True)!=a.anchor_obs:
+            raise ValueError('Export and simulator goal contracts differ')
+    if not a.anchor_obs:
+        import hashlib
+        if not manifest_path.exists() or meta.get('policy_sha256')!=hashlib.sha256(a.policy.read_bytes()).hexdigest():
+            raise ValueError('No-anchor simulation requires a matching hashed export manifest')
     # Limits here only reject obviously broken simulator inputs; they are not real robot limits.
     default = tuple(spec['default_joint_pos'][x] for x in names)
     scale = tuple(spec['action_scale'][x] for x in names)
-    contract = Contract(tuple(names), default, scale, (-10.,)*n, (10.,)*n, (10.,)*n, .15, .10, 10, 729)
+    contract = Contract(tuple(names), default, scale, (-10.,)*n, (10.,)*n, (10.,)*n, .15, .10, 10, goal_dim)
     with np.load(a.dataset/'walk_stop.npz', allow_pickle=False) as data:
         if tuple(data['joint_names']) != tuple(names): raise ValueError('reference joint order differs')
         stand = data['joint_pos'][-1].tolist()
@@ -129,7 +140,7 @@ def main():
                         planner_ablation=a.planner_ablation, idle_join_frames=a.idle_join_frames,
                         idle_entry_offset=a.idle_entry_offset, idle_anchor_mode=a.idle_anchor_mode,
                         idle_velocity_feedback=a.idle_velocity_feedback, foot_aligned_scene=a.foot_aligned_scene,
-                        foot_registration_only=a.foot_registration_only)
+                        foot_registration_only=a.foot_registration_only,anchor_obs=a.anchor_obs)
     schedule = json.loads(a.schedule.read_text()) if a.schedule else None
     valid = ('stand', 'walk', 'jog', 'backward', 'turn_left_inplace', 'turn_right_inplace')
     if schedule and (schedule[0][0] != 0 or any(m not in valid for _, m in schedule) or any(schedule[i][0] >= schedule[i+1][0] for i in range(len(schedule)-1))):
@@ -233,7 +244,7 @@ def main():
                        'imu_orientation_wxyz': state.orientation_wxyz,
                        'joint_effort': [effort_by_name[n] for n in names] if set(effort_by_name)==set(names) else None,
                        'joint_pos': q, 'joint_vel': qvel, 'target': target,
-                       'goal_current': window[0].tolist(), 'anchor': goal[-9:].tolist(),
+                       'goal_current': window[0].tolist(), 'anchor': goal[-9:].tolist() if a.anchor_obs else None,
                        'future_overlap_error': overlap_error,
                        'stand_gain': tracker.stand_gain, 'stand_quiet_steps': tracker.stand_quiet_steps,
                        'phase_source': tracker.scheduler.source, 'phase_index': tracker.scheduler.index,
@@ -266,6 +277,7 @@ def main():
             failure = 'no policy frames received before timeout'
         frame_log.close()
         report = {'frames': frame_count, 'failure': failure, 'mode': a.mode,
+                  'anchor_obs': a.anchor_obs,'goal_dim':goal_dim,
                   'failure_context': failure_context,
                   'elapsed': time.monotonic()-started, 'resets_after_start': 0,
                   'control_seconds': last_elapsed-first_elapsed if frame_count > 1 else 0.,

@@ -31,6 +31,8 @@ def main():
     args.out.mkdir(parents=True)
     exported.save(str(args.out / 'policy.pt'))
     meta = {'robot': ROBOT, 'joints': NJ, 'history': history, 'obs_dim': history*OBS_DIM,
+            'anchor_obs': cfg['env']['anchor_obs'],
+            'policy_sha256': hashlib.sha256((args.out/'policy.pt').read_bytes()).hexdigest(),
             'goal_dim': goal_dim, 'checkpoint_sha256': hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
             'torch_version': torch.__version__, 'single_vector_max_error': error,
             'scope': 'offline export only; inputs, hardware and physical behavior not validated'}

@@ -21,7 +21,11 @@ class SkillGoal:
                  stand_gain_quiet_time=0., stand_gain_speed_limit=.08, planner='baseline',
                  planner_ablation='none', idle_join_frames=None, idle_entry_offset=None,
                  idle_anchor_mode='fixed', idle_velocity_feedback=False, foot_aligned_scene=None,
-                 foot_registration_only=False):
+                 foot_registration_only=False, anchor_obs=True):
+        if not anchor_obs and (planner != 'baseline' or idle_anchor_mode != 'fixed' or idle_velocity_feedback
+                               or stand_anchor_gain != 1. or stand_gain_quiet_time != 0. or foot_aligned_scene is not None):
+            raise ValueError('No-anchor candidate requires the unchanged baseline skill scheduler')
+        self.anchor_obs = anchor_obs
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -141,6 +145,8 @@ class SkillGoal:
             self.foot_idle.prepare(self,position,quat_wxyz,joints,joint_velocity,base_angular_velocity,sample_time,mode)
         self.scheduler.select(mode)
         window = self.scheduler.window()
+        if not self.anchor_obs:
+            return window.reshape(-1).astype(np.float32)
         g = window[0]
         grav = g[2*self.nj:2*self.nj+3]
         roll = np.arctan2(-grav[1], -grav[2])
@@ -177,6 +183,9 @@ class SkillGoal:
         return np.r_[window.reshape(-1), delta_pos, delta_rot].astype(np.float32)
 
     def advance(self):
+        if not self.anchor_obs:
+            self.scheduler.advance()
+            return
         if self.foot_idle is not None and self.foot_idle.advance(self):
             return
         g = self.scheduler.window()[0]
