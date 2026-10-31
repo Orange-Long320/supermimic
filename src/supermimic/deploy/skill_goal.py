@@ -63,6 +63,7 @@ class SkillGoal:
         if idle_anchor_mode not in ('fixed', 'zero-xy'):
             raise ValueError('Unknown Idle anchor diagnostic')
         self.idle_anchor_mode = idle_anchor_mode
+        self.has_motion_request = False
         if planner == 'context-idle':
             from supermimic.control.idle_planner import ContextIdlePlanner
             self.foot_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, side+'_ankle_roll_link')
@@ -110,6 +111,7 @@ class SkillGoal:
         return self.reference.xpos[self.foot_ids].copy()
 
     def goal(self, position, quat_wxyz, joints, mode, joint_velocity=None):
+        self.has_motion_request = self.has_motion_request or mode != 'stand'
         if self.planner == 'context-idle':
             if joint_velocity is None:
                 raise ValueError('Context planner requires measured joint velocity')
@@ -124,7 +126,7 @@ class SkillGoal:
         target_pos, target_rot = self.fk(self.reference, [*self.position[:2], g[-1]], quat, g[:self.nj]+self.default)
         actual_pos, actual_rot = self.fk(self.actual, position, quat_wxyz, joints)
         stable_reference = mode == 'stand' and np.allclose(window, self.scheduler.stand, atol=1e-7)
-        if self.idle_anchor_mode == 'zero-xy' and stable_reference:
+        if self.idle_anchor_mode == 'zero-xy' and stable_reference and self.has_motion_request:
             # Causal diagnostic only: remove the global horizontal root error
             # while preserving pose, height, heading and all future features.
             # This follows the actual root and cannot qualify as position hold.
