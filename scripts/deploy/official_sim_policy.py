@@ -78,6 +78,7 @@ def main():
     p.add_argument('--planner-ablation', choices=('none', 'baseline-idle', 'baseline-motion'), default='none')
     p.add_argument('--idle-join-frames', type=int, choices=(10, 20, 30))
     p.add_argument('--idle-entry-offset', type=int, choices=(0, 5, 10))
+    p.add_argument('--idle-anchor-mode', choices=('fixed', 'zero-xy'), default='fixed', help='zero-xy removes position feedback for causal diagnosis only')
     a = p.parse_args()
     if a.schedule and a.keyboard_port: raise ValueError('Select schedule or keyboard, not both')
     if (not 128 <= a.ros_domain <= 232 or os.environ.get('ROS_LOCALHOST_ONLY') != '1'
@@ -123,7 +124,7 @@ def main():
     history, previous = deque(maxlen=10), (0.,)*n
     tracker = SkillGoal(a.dataset, a.profile, [0., 0., .65], [1., 0., 0., 0.], jog_brake_fade=a.jog_brake_fade, stand_anchor_gain=a.stand_anchor_gain, stand_gain_quiet_time=a.stand_gain_quiet_time, planner=a.planner,
                         planner_ablation=a.planner_ablation, idle_join_frames=a.idle_join_frames,
-                        idle_entry_offset=a.idle_entry_offset)
+                        idle_entry_offset=a.idle_entry_offset, idle_anchor_mode=a.idle_anchor_mode)
     schedule = json.loads(a.schedule.read_text()) if a.schedule else None
     valid = ('stand', 'walk', 'jog', 'backward', 'turn_left_inplace', 'turn_right_inplace')
     if schedule and (schedule[0][0] != 0 or any(m not in valid for _, m in schedule) or any(schedule[i][0] >= schedule[i+1][0] for i in range(len(schedule)-1))):
@@ -261,6 +262,7 @@ def main():
                   'planner': a.planner, 'ros_domain': a.ros_domain,
                   'planner_ablation': a.planner_ablation, 'idle_join_frames': a.idle_join_frames,
                   'idle_entry_offset': a.idle_entry_offset,
+                  'idle_anchor_mode': a.idle_anchor_mode,
                   'max_future_overlap_error': max_overlap_error,
                   'scope': 'official simulator exploratory run, simulation odometry ground truth'}
         (a.out/'result.json').write_text(json.dumps(report, indent=2)+'\n')

@@ -19,7 +19,8 @@ class SkillGoal:
     def __init__(self, dataset, profile, root_position, root_quat_wxyz,
                  *, sustained=True, straight=True, horizon=10, jog_brake_fade=None, stand_anchor_gain=1.,
                  stand_gain_quiet_time=0., stand_gain_speed_limit=.08, planner='baseline',
-                 planner_ablation='none', idle_join_frames=None, idle_entry_offset=None):
+                 planner_ablation='none', idle_join_frames=None, idle_entry_offset=None,
+                 idle_anchor_mode='fixed'):
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -59,6 +60,9 @@ class SkillGoal:
         if planner == 'baseline' and (planner_ablation != 'none' or idle_join_frames is not None or idle_entry_offset is not None):
             raise ValueError('Planner diagnostics require the experimental context planner')
         self.planner = planner
+        if idle_anchor_mode not in ('fixed', 'zero-xy'):
+            raise ValueError('Unknown Idle anchor diagnostic')
+        self.idle_anchor_mode = idle_anchor_mode
         if planner == 'context-idle':
             from supermimic.control.idle_planner import ContextIdlePlanner
             self.foot_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, side+'_ankle_roll_link')
@@ -119,10 +123,15 @@ class SkillGoal:
         quat = Rotation.from_euler('xyz', [roll, pitch, self.yaw]).as_quat()[[3, 0, 1, 2]]
         target_pos, target_rot = self.fk(self.reference, [*self.position[:2], g[-1]], quat, g[:self.nj]+self.default)
         actual_pos, actual_rot = self.fk(self.actual, position, quat_wxyz, joints)
+        stable_reference = mode == 'stand' and np.allclose(window, self.scheduler.stand, atol=1e-7)
+        if self.idle_anchor_mode == 'zero-xy' and stable_reference:
+            # Causal diagnostic only: remove the global horizontal root error
+            # while preserving pose, height, heading and all future features.
+            # This follows the actual root and cannot qualify as position hold.
+            target_pos[:2] += np.asarray(position)[:2]-self.position[:2]
         delta_pos = actual_rot.inv().apply(target_pos-actual_pos)
         # Experimental feedback scaling once the complete committed window is
         # standing. Ramped so an immediate mode change cannot jump the anchor.
-        stable_reference = mode == 'stand' and np.allclose(window, self.scheduler.stand, atol=1e-7)
         position = np.asarray(position, dtype=float)
         speed = np.linalg.norm(position[:2]-self.last_position[:2])/self.scheduler.dt if self.last_position is not None else float('inf')
         self.last_position = position.copy()
