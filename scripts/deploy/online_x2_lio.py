@@ -16,7 +16,7 @@ from scipy.spatial.transform import Rotation
 import yaml
 
 from prepare_x2_fastlio_bag import convert_cloud, lidar_pose_in_imu
-from supermimic.deploy.online_inertial import parse_filter_state, propagate_imu, fit_level_floor
+from supermimic.deploy.online_inertial import parse_filter_state, CachedImuPropagation, fit_level_floor
 from supermimic.deploy.pelvis_state import UrdfPelvisMount, pelvis_from_imu, pelvis_angular_velocity, gravity_level_rotation, latest_causal
 
 
@@ -66,7 +66,9 @@ def main():
             super().__init__('supermimic_online_pelvis_bridge', enable_rosout=False, start_parameter_services=False)
             self.started = time.monotonic(); self.session = uuid.uuid4().hex
             self.running = True
-            self.imu_rows = deque(maxlen=800); self.groups = {g: deque(maxlen=800) for g in ('leg', 'waist', 'head', 'arm')}
+            self.imu_rows = deque(maxlen=256); self.imu_stamps_ns = deque(maxlen=256)
+            self.groups = {g: deque(maxlen=128) for g in ('leg', 'waist', 'head', 'arm')}
+            self.propagation = CachedImuPropagation()
             self.counts = Counter(); self.rejects = Counter(); self.state = None
             self.level = None; self.shift = None; self.floor = None; self.cloud = None
             self.static_ready = False; self.mount_changed = False; self.last_pose = None
@@ -106,7 +108,9 @@ def main():
                       'imu nonmonotonic' if self.imu_rows and stamp <= self.imu_rows[-1][0] else None)
             if reason:
                 self.rejects[reason] += 1; return
-            self.imu_rows.append(row); self.imu_pub.publish(msg); self.counts['adapted_imu'] += 1
+            self.imu_rows.append(row)
+            self.imu_stamps_ns.append(msg.header.stamp.sec*10**9+msg.header.stamp.nanosec)
+            self.imu_pub.publish(msg); self.counts['adapted_imu'] += 1
 
         def on_cloud(self, msg):
             before = time.monotonic()
@@ -135,12 +139,14 @@ def main():
 
         def on_joints(self, msg, group):
             self.counts['joints_'+group] += 1
-            self.groups[group].append({'received_ns': time.time_ns(), 'header_ns': int(self.stamp(msg)*1e9),
+            self.groups[group].append({'received_ns': time.time_ns(),
+                                       'header_ns': msg.header.stamp.sec*10**9+msg.header.stamp.nanosec,
                                        'domain': int(msg.state.value),
                                        'joints': [(j.name, j.position, j.velocity, j.error_code) for j in msg.joints]})
 
-        def joints(self, stamp, *, with_rows=False):
-            rows = [latest_causal(list(v), time.time_ns(), at_ns=int(stamp*1e9), max_age_s=.05) for v in self.groups.values()]
+        def joints(self, stamp, *, with_rows=False, at_ns=None):
+            at_ns = int(stamp*1e9) if at_ns is None else at_ns
+            rows = [latest_causal(list(v), time.time_ns(), at_ns=at_ns, max_age_s=.05) for v in self.groups.values()]
             stamps = [r['header_ns'] for r in rows]
             if max(stamps)-min(stamps) > 30_000_000: raise ValueError('joint group skew')
             values = [j for r in rows for j in r['joints']]; lookup = {j[0]: j for j in values}
@@ -180,10 +186,11 @@ def main():
                 if self.state is None: raise ValueError('waiting for LIO correction')
                 now = time.time(); age = now-self.state.stamp
                 if not 0 <= age <= .2: raise ValueError('LIO correction stale')
-                propagated, gyro = propagate_imu(self.state, list(self.imu_rows), now)
+                propagated, gyro = self.propagation.advance(self.state, list(self.imu_rows), now)
                 imu_age = now-propagated.stamp
                 if not 0 <= imu_age <= .05: raise ValueError('latest IMU stale')
-                q, qd, joint_ages, joint_rows = self.joints(propagated.stamp, with_rows=True)
+                ns = self.imu_stamps_ns[-1]
+                q, qd, joint_ages, joint_rows = self.joints(propagated.stamp, with_rows=True, at_ns=ns)
                 ppi, rpi, chain_omega = mount.mount(q, qd)
                 position, rotation = pelvis_from_imu(propagated.position, propagated.rotation.as_matrix(), ppi, rpi)
                 position = self.level.apply(position); rotation = self.level.as_matrix()@rotation
@@ -204,7 +211,7 @@ def main():
                 position += self.shift
                 if not np.isfinite(np.r_[position, velocity, omega, rotation.ravel()]).all(): raise ValueError('nonfinite pelvis')
                 quat = Rotation.from_matrix(rotation).as_quat()
-                out = Odometry(); ns = int(propagated.stamp*1e9)
+                out = Odometry()
                 out.header.stamp.sec, out.header.stamp.nanosec = divmod(ns, 10**9)
                 out.header.frame_id = 'supermimic_world'; out.child_frame_id = 'pelvis'
                 out.pose.pose.position.x, out.pose.pose.position.y, out.pose.pose.position.z = map(float, position)
@@ -216,12 +223,13 @@ def main():
                                  'imu_age_s': imu_age, 'lio_age_s': age, 'joint_age_s': joint_ages,
                                  'position': position.tolist(), 'quat_xyzw': quat.tolist(),
                                  'angular_velocity_body': omega.tolist(), 'velocity_world': velocity.tolist()}
-                packet = dict(self.last_pose, schema=1, session_id=self.session, joint_names=names,
+                packet = dict(self.last_pose, schema=2, session_id=self.session, joint_names=names,
                               quat_wxyz=quat[[3, 0, 1, 2]].tolist(),
                               joint_position=q.tolist(), joint_velocity=qd.tolist(),
                               joint_stamps=[r['header_ns']*1e-9 for r in joint_rows],
                               joint_received_wall=[r['received_ns']*1e-9 for r in joint_rows],
                               joint_domains=[r['domain'] for r in joint_rows],
+                              state_stamp_ns=ns, joint_stamps_ns=[r['header_ns'] for r in joint_rows],
                               motor_output_enabled=False, eligible_for_control=False)
                 state_msg = String(); state_msg.data = json.dumps(packet, allow_nan=False)
                 self.policy_state_pub.publish(state_msg); self.counts['policy_state_published'] += 1

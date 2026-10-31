@@ -50,6 +50,10 @@ def main():
     for _ in range(20): output = policy.infer(fixture['obs'], fixture['goal'])
     fixture_error = float(np.max(np.abs(output-fixture['expected'])))
     if fixture_error > 1e-4: raise ValueError('Fixture mismatch')
+    warm_tracker = SkillGoal(r/'dataset', r/'fk-only/profile.json', [0., 0., .65], [1., 0., 0., 0.])
+    for _ in range(10): warm_tracker.goal([0., 0., .65], [1., 0., 0., 0.], default, 'stand')
+    # Discard all warmup state; real observation history is still collected later.
+    del warm_tracker
     tracker = SkillGoal(r/'dataset', r/'fk-only/profile.json', [0., 0., .65], [1., 0., 0., 0.])
     a.out.mkdir(parents=True, exist_ok=False)
     rclpy.init(); node = Node('supermimic_stream_policy_probe', enable_rosout=False, start_parameter_services=False)

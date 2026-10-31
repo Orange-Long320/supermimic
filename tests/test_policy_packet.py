@@ -6,10 +6,11 @@ from supermimic.deploy.policy_packet import validate_policy_packet
 class PolicyPacketTests(unittest.TestCase):
     def setUp(self):
         self.names = tuple('joint_'+str(i) for i in range(31))
-        self.packet = dict(schema=1, session_id='one', joint_names=list(self.names), position=[0., 0., .65],
+        self.packet = dict(schema=2, session_id='one', joint_names=list(self.names), position=[0., 0., .65],
             quat_wxyz=[1., 0., 0., 0.], angular_velocity_body=[0.]*3,
             joint_position=[0.]*31, joint_velocity=[0.]*31, joint_stamps=[9.988]*4,
             joint_received_wall=[9.991]*4, state_stamp=9.99, published_wall=9.995,
+            state_stamp_ns=9990000000, joint_stamps_ns=[9988000000]*4,
             joint_domains=[0]*4, motor_output_enabled=False)
 
     def test_valid_causal_packet(self):
@@ -17,6 +18,7 @@ class PolicyPacketTests(unittest.TestCase):
 
     def test_future_joint_not_hidden_by_fresh_receipt(self):
         self.packet['joint_stamps'][2] = 9.992
+        self.packet['joint_stamps_ns'][2] = 9992000000
         with self.assertRaisesRegex(ValueError, 'future joint'):
             validate_policy_packet(self.packet, self.names, 10.)
 

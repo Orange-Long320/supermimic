@@ -3,7 +3,7 @@ from math import isfinite, sqrt
 
 
 def validate_policy_packet(packet, names, now_wall, *, max_age=.05, max_skew=.03):
-    if packet['schema'] != 1 or tuple(packet['joint_names']) != tuple(names):
+    if packet['schema'] != 2 or tuple(packet['joint_names']) != tuple(names):
         raise ValueError('policy packet schema or joint order')
     if not isinstance(packet['session_id'], str) or not packet['session_id']:
         raise ValueError('policy packet session missing')
@@ -24,8 +24,15 @@ def validate_policy_packet(packet, names, now_wall, *, max_age=.05, max_skew=.03
     receives = [packet['published_wall'], *packet['joint_received_wall']]
     if not all(isfinite(x) for x in [now_wall, *stamps, *receives]):
         raise ValueError('invalid policy packet timestamps')
-    if any(t > packet['state_stamp'] for t in packet['joint_stamps']):
+    integer_stamps = [packet['state_stamp_ns'], *packet['joint_stamps_ns']]
+    if len(integer_stamps) != 5 or any(type(t) is not int or t < 0 for t in integer_stamps):
+        raise ValueError('invalid policy packet integer timestamps')
+    if any(t > packet['state_stamp_ns'] for t in packet['joint_stamps_ns']):
         raise ValueError('policy packet future joint acquisition')
+    canonical_stamps = [t*1e-9 for t in integer_stamps]
+    if any(abs(a-b)>5e-7 for a,b in zip(stamps, canonical_stamps)):
+        raise ValueError('policy packet timestamp representations disagree')
+    stamps = canonical_stamps
     if any(not 0 <= now_wall-t <= max_age for t in [*stamps, *receives]):
         raise ValueError('policy packet stale or future')
     if max(stamps)-min(stamps) > max_skew:

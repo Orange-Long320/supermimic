@@ -3,7 +3,8 @@ import unittest
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from supermimic.deploy.online_inertial import parse_filter_state, propagate_imu, fit_level_floor
+from supermimic.deploy.online_inertial import parse_filter_state, propagate_imu, fit_level_floor, CachedImuPropagation
+from dataclasses import replace
 
 
 class OnlineInertialTest(unittest.TestCase):
@@ -49,6 +50,21 @@ class OnlineInertialTest(unittest.TestCase):
         self.assertLess(quality['rms_m'], .003)
         wall = np.column_stack([np.ones(800), rng.uniform(-2, 2, 800), rng.uniform(-2, 1, 800)])
         with self.assertRaises(ValueError): fit_level_floor(wall, [0, 0, -.23])
+
+    def test_cached_integration_matches_full_and_new_bias_correction(self):
+        state=self.state();rows=self.samples(state, [1., .2, -.1], [.1, -.2, .3]);cache=CachedImuPropagation()
+        for count in (5, 9, 13, 21):
+            actual,gyro=cache.advance(state,rows[:count],rows[count-1][0])
+            expected,expected_gyro=propagate_imu(state,rows[:count],rows[count-1][0])
+            np.testing.assert_allclose(actual.position,expected.position,atol=1e-14)
+            np.testing.assert_allclose(actual.velocity,expected.velocity,atol=1e-14)
+            np.testing.assert_allclose(actual.rotation.as_matrix(),expected.rotation.as_matrix(),atol=1e-14)
+            np.testing.assert_allclose(gyro,expected_gyro,atol=1e-14)
+        correction=replace(state,stamp=1.05,position=np.ones(3),gyro_bias=np.zeros(3))
+        actual,_=cache.advance(correction,rows,1.1);expected,_=propagate_imu(correction,rows,1.1)
+        np.testing.assert_allclose(actual.position,expected.position,atol=1e-14)
+        np.testing.assert_allclose(actual.rotation.as_matrix(),expected.rotation.as_matrix(),atol=1e-14)
+        with self.assertRaisesRegex(ValueError,'stale'):cache.advance(correction,rows,1.26)
 
 
 if __name__ == '__main__': unittest.main()

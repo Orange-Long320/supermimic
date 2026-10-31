@@ -73,6 +73,25 @@ def propagate_imu(state, samples, now, *, max_horizon=.2, max_gap=.03):
     return replace(state, stamp=stamp, position=p, rotation=r, velocity=v), rows[-1, 1:4]-state.gyro_bias
 
 
+class CachedImuPropagation:
+    """Reuse already integrated IMU intervals until a new correction arrives.
+
+    The horizon always belongs to the original LIO correction, never the cache;
+    caching must not extend the lifetime of an old correction.
+    """
+    def __init__(self):
+        self.correction_stamp = None
+        self.cached = None
+
+    def advance(self, correction, samples, now, *, max_horizon=.2, max_gap=.03):
+        if not np.isfinite(now) or not 0 <= now-correction.stamp <= max_horizon:
+            raise ValueError('LIO correction stale')
+        seed = self.cached if self.correction_stamp == correction.stamp else correction
+        result, gyro = propagate_imu(seed, samples, now, max_horizon=max_horizon, max_gap=max_gap)
+        self.correction_stamp, self.cached = correction.stamp, result
+        return result, gyro
+
+
 def fit_level_floor(points, pelvis, *, seed=81):
     """Static initialization plane diagnostic in an already gravity-level frame."""
     points = np.asarray(points, dtype=float)
