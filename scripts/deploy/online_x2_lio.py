@@ -80,6 +80,7 @@ def main():
             self.imu_pub = self.create_publisher(Imu, prefix+'/imu', 400)
             self.pose_pub = self.create_publisher(Odometry, '/supermimic/pelvis/odometry', 5)
             self.status_pub = self.create_publisher(String, prefix+'/status', 5)
+            self.policy_state_pub = self.create_publisher(String, prefix+'/policy_state', best)
             self.subs = [self.create_subscription(Imu, '/aima/hal/sensor/lidar_chest_front/imu', self.on_imu, imu_qos),
                          self.create_subscription(PointCloud2, '/aima/hal/sensor/lidar_chest_front/lidar_pointcloud', self.on_cloud, best),
                          self.create_subscription(Float64MultiArray, prefix+'/filter_state', self.on_state, 20)]
@@ -135,9 +136,10 @@ def main():
         def on_joints(self, msg, group):
             self.counts['joints_'+group] += 1
             self.groups[group].append({'received_ns': time.time_ns(), 'header_ns': int(self.stamp(msg)*1e9),
+                                       'domain': int(msg.state.value),
                                        'joints': [(j.name, j.position, j.velocity, j.error_code) for j in msg.joints]})
 
-        def joints(self, stamp):
+        def joints(self, stamp, *, with_rows=False):
             rows = [latest_causal(list(v), time.time_ns(), at_ns=int(stamp*1e9), max_age_s=.05) for v in self.groups.values()]
             stamps = [r['header_ns'] for r in rows]
             if max(stamps)-min(stamps) > 30_000_000: raise ValueError('joint group skew')
@@ -145,7 +147,8 @@ def main():
             if len(values)!=31 or set(lookup)!=set(names) or any(j[3] for j in values): raise ValueError('joint set or error code')
             q = np.asarray([lookup[n][1] for n in names]); v = np.asarray([lookup[n][2] for n in names])
             if not np.isfinite(np.r_[q, v]).all(): raise ValueError('nonfinite joints')
-            return q, v, [(stamp*1e9-t)*1e-9 for t in stamps]
+            result = (q, v, [(stamp*1e9-t)*1e-9 for t in stamps])
+            return (*result, rows) if with_rows else result
 
         def on_tf(self, msg):
             for tf in msg.transforms:
@@ -180,7 +183,7 @@ def main():
                 propagated, gyro = propagate_imu(self.state, list(self.imu_rows), now)
                 imu_age = now-propagated.stamp
                 if not 0 <= imu_age <= .05: raise ValueError('latest IMU stale')
-                q, qd, joint_ages = self.joints(propagated.stamp)
+                q, qd, joint_ages, joint_rows = self.joints(propagated.stamp, with_rows=True)
                 ppi, rpi, chain_omega = mount.mount(q, qd)
                 position, rotation = pelvis_from_imu(propagated.position, propagated.rotation.as_matrix(), ppi, rpi)
                 position = self.level.apply(position); rotation = self.level.as_matrix()@rotation
@@ -213,6 +216,15 @@ def main():
                                  'imu_age_s': imu_age, 'lio_age_s': age, 'joint_age_s': joint_ages,
                                  'position': position.tolist(), 'quat_xyzw': quat.tolist(),
                                  'angular_velocity_body': omega.tolist(), 'velocity_world': velocity.tolist()}
+                packet = dict(self.last_pose, schema=1, session_id=self.session, joint_names=names,
+                              quat_wxyz=quat[[3, 0, 1, 2]].tolist(),
+                              joint_position=q.tolist(), joint_velocity=qd.tolist(),
+                              joint_stamps=[r['header_ns']*1e-9 for r in joint_rows],
+                              joint_received_wall=[r['received_ns']*1e-9 for r in joint_rows],
+                              joint_domains=[r['domain'] for r in joint_rows],
+                              motor_output_enabled=False, eligible_for_control=False)
+                state_msg = String(); state_msg.data = json.dumps(packet, allow_nan=False)
+                self.policy_state_pub.publish(state_msg); self.counts['policy_state_published'] += 1
                 self.frames.write(json.dumps(self.last_pose, allow_nan=False)+'\n')
                 self.last_reason = 'publishing diagnostic pelvis state'
             except ValueError as exc:
