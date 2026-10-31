@@ -38,9 +38,15 @@ def main():
     p.add_argument('--orientation-assist', action='store_true', help='Simulation candidate ankle tilt feedback')
     p.add_argument('--diagnostic-handover-tilt',type=float,
                    help='Counterfactual capture test only; override the .15 rad simulation entry tilt gate')
+    p.add_argument('--unload-at-handover',action='store_true',
+                   help='Diagnostic simultaneous policy blend and cable unloading')
+    p.add_argument('--handover-seconds',type=float,default=1.)
+    p.add_argument('--unload-seconds',type=float,default=5.)
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
+            or not 1<=a.handover_seconds<=10 or not 1<=a.unload_seconds<=10
+            or (a.unload_at_handover and (not a.unload or a.unload_before_handover))
             or (a.diagnostic_handover_tilt is not None and not .15<a.diagnostic_handover_tilt<=.35)):
         raise ValueError('Invalid scenario')
     a.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
@@ -69,7 +75,7 @@ def main():
     prep_kp=np.asarray([special.get(name,{}).get('kp',gains['default_kp']) for name in names])
     prep_kd=np.asarray([special.get(name,{}).get('kd',gains['default_kd']) for name in names])
     path=QuinticPose(raw,ref,np.full(n,.35),np.full(n,.4),minimum_duration=8.)
-    thresholds=EntryThresholds(.08,.12,.20,a.diagnostic_handover_tilt or .15,.5,12.,.031,10,1.)
+    thresholds=EntryThresholds(.08,.12,.20,a.diagnostic_handover_tilt or .15,.5,12.,.031,10,a.handover_seconds)
     entry=EntryController(path,thresholds,prep_kp,prep_kd,kp,kd)
     compensator=PreparationLoadCompensator(prep_kp,prep_kd,np.max(np.abs(limits),axis=1),
                     integral_gain=.3,max_bias_speed=.08,effort_fraction=.5) if a.load_compensation else None
@@ -141,8 +147,9 @@ def main():
                     point=d.xpos[torso]+d.xmat[torso].reshape(3,3)@local_attach
                     cable=anchor-point;length=float(np.linalg.norm(cable));direction=cable/length
                     jac=np.zeros((3,m.nv));mujoco.mj_jac(m,d,jac,None,point,torso)
-                    beginning=unload_start if a.unload_before_handover else (None if active_start is None else active_start+3.)
-                    unload=0. if not a.unload or beginning is None else float(np.clip((now-beginning)/5.,0.,1.))
+                    beginning=(unload_start if a.unload_before_handover else entry.handover_started if a.unload_at_handover
+                               else None if active_start is None else active_start+3.)
+                    unload=0. if not a.unload or beginning is None else float(np.clip((now-beginning)/a.unload_seconds,0.,1.))
                     blend=10*unload**3-15*unload**4+6*unload**5
                     tension=max(0.,a.spring*(length-rest-.5*blend)-damping*float((jac@d.qvel)@direction))
                     support_force=tension*direction;maximum_tension=max(maximum_tension,tension)
@@ -150,7 +157,7 @@ def main():
                 torque=kp_now*(current_target-d.qpos[qa])-kd_now*d.qvel[va]
                 d.ctrl[motors]=np.clip(torque,limits[:,0],limits[:,1]);mujoco.mj_step(m,d)
             mujoco.mj_forward(m,d)
-            normal=np.zeros(2);slip_force=np.zeros(2);other_contacts=[]
+            normal=np.zeros(2);slip_force=np.zeros(2);other_contacts=[];contact_details=[]
             for ci in range(d.ncon):
                 c=d.contact[ci];geoms=list(map(int,c.geom));wrench=np.zeros(6);mujoco.mj_contactForce(m,d,ci,wrench)
                 if floor in geoms:
@@ -159,7 +166,11 @@ def main():
                         side=feet.index(body);load=max(0.,float(wrench[0]));jac=np.zeros((3,m.nv))
                         mujoco.mj_jac(m,d,jac,None,c.pos,body);normal[side]+=load
                         slip_force[side]+=load*float(np.linalg.norm((jac@d.qvel)[:2]))
-                elif wrench[0]>1.:other_contacts.append(float(wrench[0]))
+                elif wrench[0]>1.:
+                    other_contacts.append(float(wrench[0]))
+                    contact_details.append({'geoms':[mujoco.mj_id2name(m,mujoco.mjtObj.mjOBJ_GEOM,g) for g in geoms],
+                        'bodies':[mujoco.mj_id2name(m,mujoco.mjtObj.mjOBJ_BODY,int(m.geom_bodyid[g])) for g in geoms],
+                        'normal_n':float(wrench[0]),'distance_m':float(c.dist)})
             rows.append({'time_s':now,'phase':entry.phase.value,'root':d.qpos[:3].tolist(),
                 'joint_position':q.tolist(),'target':current_target.tolist(),'kp':kp_now.tolist(),'kd':kd_now.tolist(),
                 'max_target_step_rad':float(np.max(np.abs(current_target-previous_target))),
@@ -170,7 +181,7 @@ def main():
                 'loaded_slip_m_s':np.divide(slip_force,normal,out=np.zeros(2),where=normal>1e-6).tolist(),
                 'max_tension_n':maximum_tension,'last_support_force':support_force.tolist(),
                 'actuator_effort_ratio':float(np.max(np.abs(d.actuator_force[motors])/np.max(np.abs(limits),axis=1))),
-                'non_floor_contact_forces_n':other_contacts})
+                'non_floor_contact_forces_n':other_contacts,'non_floor_contacts':contact_details})
             previous_target=current_target.copy()
             if active_start is not None and now-active_start>=a.active_seconds:break
         except ValueError as exc:failure={'time_s':now,'phase':entry.phase.value,'reason':str(exc)};break
@@ -179,8 +190,9 @@ def main():
     result={'scope':__doc__,'mujoco_version':mujoco.__version__,'sha256':{k:sha(getattr(a,k)) for k in ('scene','profile','policy','snapshot','candidate','prep_gains')},
             'support':{'fraction_preload':a.support_fraction,'attachment_body':'torso_link','attachment_local':local_attach.tolist(),
                 'spring_n_m':a.spring,'damping_ns_m':damping,'anchor_world':anchor.tolist(),'initial_rest_length_m':rest,'unload':a.unload,
-                'unload_model':('after supported joint settling' if a.unload_before_handover else 'after active+3s')+
-                               ', lengthen cable .5m over5s; fixed ceiling anchor, unilateral tension only',
+                'unload_model':('after supported joint settling' if a.unload_before_handover else
+                                'at handover start' if a.unload_at_handover else 'after active+3s')+
+                               f', lengthen cable .5m over {a.unload_seconds}s; fixed ceiling anchor, unilateral tension only',
                 'hardware_geometry_or_stiffness_validated':False},
             'initial_outside_file_envelope':initial_outside,'prep_duration_s':path.duration,'thresholds_sim_only':vars(thresholds),
             'prep_gain_source':'device SDK example, used only as a simulation candidate',
@@ -188,6 +200,7 @@ def main():
             'orientation_assist_sim_only':a.orientation_assist,
             'orientation_assist_axes':'body-frame foot rotational Jacobian; no hardcoded ankle sign',
             'support_transfer_before_handover':a.unload_before_handover,'support_transfer_start_s':unload_start,
+            'unload_at_handover':a.unload_at_handover,
             'counterfactual_capture_test':a.diagnostic_handover_tilt is not None,
             'counterfactual_scope':'Simulation entry gate experiment only; does not change hardware thresholds or approval',
             'previous_action_history':'actual commanded PD target, normalized by selected action default/scale; no invented history',
