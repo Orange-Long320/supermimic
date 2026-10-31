@@ -31,6 +31,12 @@ def config_hash(config):
     return hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
 
+def mode_matches(info, name, value):
+    # This device reports value=0 with a populated action_desc, as the installed
+    # SDK example also uses action_desc for requests. Reject a conflicting code.
+    return info['description']==name and info['value'] in (0,value)
+
+
 def authorize(plan_path, consent_path):
     if consent_path is None:raise ValueError('Explicit user confirmation before motor power is required')
     c=json.loads(consent_path.read_text());sha=hashlib.sha256(plan_path.read_bytes()).hexdigest()
@@ -94,9 +100,20 @@ def main():
           for g in ('leg','waist','head','arm')]
     def action(name,value):
         req=SetMcAction.Request();req.header.stamp=node.get_clock().now().to_msg()
-        req.source='node.set_mc_action';req.command.action_desc=name;req.command.action.value=value
+        req.source='node.set_mc_action';req.command.action_desc=name
         f=setter.call_async(req);rclpy.spin_until_future_complete(node,f,timeout_sec=3.)
-        if not f.done() or f.result() is None:raise RuntimeError('Action response ambiguous; no blind retransmit')
+        if not f.done() or f.result() is None:
+            # Reconcile using the read-only mode service, never retransmit a
+            # potentially executing position trajectory without knowing its state.
+            for _ in range(6):
+                req=GetMcAction.Request();req.request.header.stamp=node.get_clock().now().to_msg()
+                query=getter.call_async(req);rclpy.spin_until_future_complete(node,query,timeout_sec=.25)
+                if query.done() and query.result() is not None:
+                    info=query.result().info
+                    actual={'value':info.current_action.value,'description':info.action_desc,'status':info.status.value}
+                    if mode_matches(actual,name,value) and actual['status'] in (100,200):
+                        events.append({'time':time.time(),'requested':name,'response_reconciled_by_actual_mode':actual});return
+            raise RuntimeError('Action response and actual mode unconfirmed; no blind retransmit')
         result=f.result();events.append({'time':time.time(),'requested':name,'response':str(result)})
         if result.response.status.value!=CommonState.SUCCESS:raise RuntimeError('Native action rejected')
     try:
@@ -136,11 +153,11 @@ def main():
                 if future.done() and future.result() is not None:
                     info=future.result().info;last_mode={'value':info.current_action.value,'description':info.action_desc,'status':info.status.value}
                     mode_received=time.monotonic()
-                    if last_mode['value']!=100 and not (last_mode['status']==200 and now-started<5.):
+                    if not mode_matches(last_mode,'JOINT_DEFAULT',100) and not (last_mode['status']==200 and now-started<5.):
                         raise RuntimeError('Native mode differs from joint stand')
                 samples.append({'elapsed':now-started,'mode':last_mode,'groups':json.loads(json.dumps(groups))});last_poll=now
             if now-mode_received>1.:raise RuntimeError('Native mode feedback stale')
-        if last_mode is None or last_mode['value']!=100 or last_mode['status']!=100:
+        if last_mode is None or not mode_matches(last_mode,'JOINT_DEFAULT',100) or last_mode['status']!=100:
             raise RuntimeError('Joint-position stand mode not confirmed running')
     except Exception as exc:
         failure=str(exc)
