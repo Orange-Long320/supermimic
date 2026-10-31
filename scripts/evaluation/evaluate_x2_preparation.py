@@ -34,6 +34,7 @@ def main():
     p.add_argument('--unload',action='store_true')
     p.add_argument('--active-seconds',type=float,default=15.)
     p.add_argument('--load-compensation', action='store_true')
+    p.add_argument('--orientation-assist', action='store_true', help='Simulation candidate ankle tilt feedback')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120): raise ValueError('Invalid scenario')
@@ -73,6 +74,7 @@ def main():
     anchor=point+np.array([0.,0.,2.]);mass=float(m.body_mass.sum());weight=mass*abs(m.opt.gravity[2])
     rest=2.-a.support_fraction*weight/a.spring;damping=100.
     active_start=None;failure=None;events=[];rows=[];last_phase=entry.phase
+    balance_bias=np.zeros(n)
     initial_outside=[name for name,q,lo,hi in zip(names,raw,candidate['measured_lower_candidate'],candidate['measured_upper_candidate']) if not lo<=q<=hi]
     substeps=round(.02/m.opt.timestep)
     for step in range(round((path.duration+thresholds.settle_timeout+2.+a.active_seconds)/.02)):
@@ -91,9 +93,18 @@ def main():
                 action=np.asarray(policy.infer(obs,tuple(float(v) for v in goal)))
                 proposed=default+scale*action;tracker.advance()
             bias=None
-            if compensator is not None and entry.phase in (EntryPhase.PREPARE,EntryPhase.SETTLE,EntryPhase.HISTORY):
+            if entry.phase in (EntryPhase.PREPARE,EntryPhase.SETTLE,EntryPhase.HISTORY):
                 desired=path.sample(now)[0]
-                bias=compensator.update(desired,q,qd,.02)
+                if a.orientation_assist:
+                    roll=float(np.arctan2(-gravity[1],-gravity[2]));pitch=float(np.arcsin(np.clip(gravity[0],-1.,1.)))
+                    requested=np.zeros(n);ramp=float(np.clip(now/2.,0.,1.));ramp=10*ramp**3-15*ramp**4+6*ramp**5
+                    for side in ('left','right'):
+                        requested[names.index(side+'_ankle_pitch_joint')]=ramp*np.clip(pitch+.1*omega[1],-.25,.25)
+                        requested[names.index(side+'_ankle_roll_joint')]=ramp*np.clip(roll+.1*omega[0],-.15,.15)
+                    balance_bias+=np.clip(requested-balance_bias,-.08*.02,.08*.02)
+                    desired=desired+balance_bias
+                if compensator is not None: bias=compensator.update(desired,q,qd,.02)+balance_bias
+                elif a.orientation_assist: bias=balance_bias.copy()
             current_target,target_v,kp_now,kd_now=entry.step(now,q,qd,omega,gravity,policy_target=proposed,preparation_bias=bias)
             if entry.phase!=last_phase:
                 events.append({'time_s':now,'phase':entry.phase.value})
@@ -131,6 +142,7 @@ def main():
                 'joint_position':q.tolist(),'target':current_target.tolist(),'kp':kp_now.tolist(),'kd':kd_now.tolist(),
                 'max_target_step_rad':float(np.max(np.abs(current_target-previous_target))),
                 'max_joint_error_rad':float(np.max(np.abs(q-ref))), 'max_joint_speed_rad_s':float(np.max(np.abs(qd))),
+                'preparation_bias':entry.preparation_bias.tolist(),'balance_bias':balance_bias.tolist(),
                 'angular_speed_rad_s':float(np.linalg.norm(omega)), 'gravity_body':gravity.tolist(), 'normal_n':normal.tolist(),
                 'loaded_slip_m_s':np.divide(slip_force,normal,out=np.zeros(2),where=normal>1e-6).tolist(),
                 'max_tension_n':maximum_tension,'last_support_force':support_force.tolist(),
@@ -149,6 +161,7 @@ def main():
             'initial_outside_file_envelope':initial_outside,'prep_duration_s':path.duration,'thresholds_sim_only':vars(thresholds),
             'prep_gain_source':'device SDK example, used only as a simulation candidate',
             'load_compensation_sim_only':a.load_compensation,
+            'orientation_assist_sim_only':a.orientation_assist,
             'previous_action_history':'actual commanded PD target, normalized by selected action default/scale; no invented history',
             'events':events,'failure':failure,'frames':len(rows),'active_start_s':active_start,
             'active_seconds':0. if active_start is None or not rows else rows[-1]['time_s']-active_start,
