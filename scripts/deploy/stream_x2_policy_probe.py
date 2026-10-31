@@ -38,6 +38,7 @@ def main():
     from std_msgs.msg import String
     from supermimic.deploy.torch_policy import BufferedTorchPolicy
     from supermimic.deploy.policy_packet import validate_policy_packet
+    from supermimic.deploy.deferred_policy_log import DeferredPolicyLog
     from supermimic.deploy.skill_goal import SkillGoal
     torch.set_num_threads(1)
     if bool(a.numpy_policy) != bool(a.numpy_sha256): raise ValueError('Both NumPy archive and expected SHA required')
@@ -57,10 +58,27 @@ def main():
     tracker = SkillGoal(r/'dataset', r/'fk-only/profile.json', [0., 0., .65], [1., 0., 0., 0.])
     a.out.mkdir(parents=True, exist_ok=False)
     rclpy.init(); node = Node('supermimic_stream_policy_probe', enable_rosout=False, start_parameter_services=False)
-    latest = {}; received = 0
+    latest = {}; received = 0; last_arrival = None
+    arrival_intervals = []; acquisition_intervals = []; publication_intervals = []
+    gap_attribution = Counter(); gap_examples = []
     def receive(msg):
-        nonlocal latest, received
+        nonlocal latest, received, last_arrival
         latest = json.loads(msg.data); received += 1
+        arrival = (time.monotonic(), latest['published_wall'], latest['state_stamp_ns'])
+        if last_arrival is not None:
+            recv_gap, pub_gap = arrival[0]-last_arrival[0], arrival[1]-last_arrival[1]
+            source_gap = (arrival[2]-last_arrival[2])*1e-9
+            arrival_intervals.append(recv_gap); publication_intervals.append(pub_gap)
+            acquisition_intervals.append(source_gap)
+            if source_gap > .03:
+                cause = 'producer publication gap' if pub_gap > .03 else 'acquisition jump within regular publications'
+                gap_attribution[cause] += 1
+                if len(gap_examples) < 20:
+                    gap_examples.append(dict(receive_gap_s=recv_gap, publication_gap_s=pub_gap,
+                        acquisition_gap_s=source_gap, source_age_at_publication_s=arrival[1]-arrival[2]*1e-9))
+            elif recv_gap > .03:
+                gap_attribution['receive gap without acquisition gap'] += 1
+        last_arrival = arrival
     qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
     sub = node.create_subscription(String, '/supermimic/x2_online_lio/policy_state', receive, qos)
     history = deque(maxlen=10); previous = np.zeros(31); session = None; last_stamp = None
@@ -68,8 +86,10 @@ def main():
     durations, inference, intervals, ages, steps = [], [], [], [], []
     started = time.monotonic(); processed_received = 0; previous_target = None; last_begin = None; fatal = None
     slowest_frame = None
+    log = DeferredPolicyLog(a.out/'frames.jsonl', names, capacity=int(a.seconds*60)+64,
+                            observation_size=len(fixture['obs']), goal_size=len(fixture['goal']))
     try:
-        with (a.out/'frames.jsonl').open('x') as log:
+        with log:
             while time.monotonic()-started < a.seconds:
                 # The producer already samples at 50 Hz. A second independent
                 # 50 Hz timer aliases its phase/jitter and can skip a real sample,
@@ -120,11 +140,9 @@ def main():
                     last_begin = begin; ages.append(time.time()-stamp)
                     if previous_target is not None: steps.append(float(np.max(np.abs(target-previous_target))))
                     log_begin=time.monotonic()
-                    log.write(json.dumps({'elapsed': begin-started, 'state_stamp': stamp,
-                        'session_id': session, 'joint_position': q.tolist(), 'position': row['position'],
-                        'observation': obs.tolist(), 'goal': goal.tolist(), 'action': action.tolist(),
-                        'raw_pd_target': target.tolist(), 'measured_outside_file_bounds': bad,
-                        'eligible_for_control': False, 'previous_action_scope': 'unexecuted shadow output'})+'\n')
+                    log.append(elapsed=begin-started, state_stamp=stamp, session_id=session,
+                        joint_position=q, position=row['position'], observation=obs, goal=goal,
+                        action=action, raw_pd_target=target, measured_outside_file_bounds=bad)
                     previous = action; previous_target = target; tracker.advance(); frames += 1
                     duration=(time.monotonic()-begin)*1000;durations.append(duration)
                     if slowest_frame is None or duration>slowest_frame['total_ms']:
@@ -136,10 +154,16 @@ def main():
                     rejected[str(exc)] += 1; history.clear(); previous = np.zeros(31); last_stamp = None
     except Exception as exc: fatal = repr(exc)
     finally:
-        result = dict(scope=__doc__, policy_sha256=digest, seconds=time.monotonic()-started,
+        result = dict(scope=__doc__, policy_sha256=digest,
+            seconds=(log.capture_finished or time.monotonic())-started,
+            log_export_seconds=log.export_seconds, log_records=log.count,
+            log_capacity_bytes=log.rows.nbytes+log.outside.nbytes,
             backend='numpy-fp32' if a.numpy_policy else 'torch-frozen-fp32', numpy_archive_sha256=a.numpy_sha256,
             sampling='one evaluation per received state; producer 50 Hz; acquisition-time history',
             received=received, frames=frames, session_id=session, rejected=dict(rejected),
+            received_interval_s=percentiles(arrival_intervals), publication_interval_s=percentiles(publication_intervals),
+            acquisition_interval_s=percentiles(acquisition_intervals), gap_attribution=dict(gap_attribution),
+            gap_examples=gap_examples,
             fixture_error=fixture_error, inference_ms=percentiles(inference), processing_ms=percentiles(durations),
             policy_frame_interval_s=percentiles(intervals), state_age_after_inference_s=percentiles(ages),
             raw_target_step_rad=percentiles(steps), measured_outside_file_bounds_frame_counts=dict(outside),
