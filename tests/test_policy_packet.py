@@ -38,5 +38,15 @@ class PolicyPacketTests(unittest.TestCase):
             packet = copy.deepcopy(self.packet); packet[key] = value
             with self.assertRaises(ValueError): validate_policy_packet(packet, self.names, 10.)
 
+    def test_resampled_time_requires_received_imu_bracket(self):
+        packet=dict(self.packet,schema=3,state_time_kind='resampled_imu_grid',
+                    imu_support_stamps_ns=[9989000000,9991000000])
+        self.assertIs(validate_policy_packet(packet,self.names,10.),packet)
+        for support in ([9980000000,9989000000],[9989000000,10000000000],
+                        [9950000000,9991000000]):
+            bad=dict(packet,imu_support_stamps_ns=support)
+            with self.assertRaisesRegex(ValueError,'interpolation support'):
+                validate_policy_packet(bad,self.names,10.)
+
 
 if __name__ == '__main__': unittest.main()

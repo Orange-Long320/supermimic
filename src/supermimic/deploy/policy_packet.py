@@ -3,7 +3,7 @@ from math import isfinite, sqrt
 
 
 def validate_policy_packet(packet, names, now_wall, *, max_age=.05, max_skew=.03):
-    if packet['schema'] != 2 or tuple(packet['joint_names']) != tuple(names):
+    if packet['schema'] not in (2, 3) or tuple(packet['joint_names']) != tuple(names):
         raise ValueError('policy packet schema or joint order')
     if not isinstance(packet['session_id'], str) or not packet['session_id']:
         raise ValueError('policy packet session missing')
@@ -27,6 +27,14 @@ def validate_policy_packet(packet, names, now_wall, *, max_age=.05, max_skew=.03
     integer_stamps = [packet['state_stamp_ns'], *packet['joint_stamps_ns']]
     if len(integer_stamps) != 5 or any(type(t) is not int or t < 0 for t in integer_stamps):
         raise ValueError('invalid policy packet integer timestamps')
+    if packet['schema'] == 3:
+        support = packet['imu_support_stamps_ns']
+        if (packet['state_time_kind'] != 'resampled_imu_grid' or len(support) != 2
+                or any(type(t) is not int or t < 0 for t in support)
+                or not support[0] <= packet['state_stamp_ns'] <= support[1]
+                or support[1]-support[0] > 30_000_000
+                or support[1]*1e-9 > packet['published_wall']):
+            raise ValueError('invalid policy packet IMU interpolation support')
     if any(t > packet['state_stamp_ns'] for t in packet['joint_stamps_ns']):
         raise ValueError('policy packet future joint acquisition')
     canonical_stamps = [t*1e-9 for t in integer_stamps]

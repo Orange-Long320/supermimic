@@ -66,5 +66,36 @@ class OnlineInertialTest(unittest.TestCase):
         np.testing.assert_allclose(actual.rotation.as_matrix(),expected.rotation.as_matrix(),atol=1e-14)
         with self.assertRaisesRegex(ValueError,'stale'):cache.advance(correction,rows,1.26)
 
+    def test_grid_time_integrates_partial_interval_without_extrapolation(self):
+        state=self.state(); rows=self.samples(state, [1., 0., 0.], [0., 0., 1.])
+        # Separate acceleration and rotation cases retain exact analytic answers.
+        linear=self.samples(state,[1.,0.,0.])
+        out,_=propagate_imu(state,linear,1.12,until=1.073)
+        np.testing.assert_allclose(out.position,[.5*.073**2,0.,0.],atol=1e-12)
+        np.testing.assert_allclose(out.velocity,[.073,0.,0.],atol=1e-12)
+        out,_=propagate_imu(state,rows,1.12,until=1.073)
+        np.testing.assert_allclose(out.rotation.as_rotvec(),[0.,0.,.073],atol=1e-12)
+        self.assertEqual(out.stamp,1.073)
+        for until in (1.101,.99):
+            with self.assertRaisesRegex(ValueError,'bracket'):
+                propagate_imu(state,rows,1.12,until=until)
+        with self.assertRaisesRegex(ValueError,'gap'):
+            propagate_imu(state,[rows[0],rows[-1]],1.12,until=1.073)
+
+    def test_partial_gyro_interpolation_and_grid_cache(self):
+        state=self.state(); rows=np.asarray(self.samples(state))
+        rows[:,3]+=2*(rows[:,0]-1.)
+        out,gyro=propagate_imu(state,rows,1.12,until=1.073)
+        np.testing.assert_allclose(gyro,[0.,0.,.146],atol=1e-12)
+        np.testing.assert_allclose(out.rotation.as_rotvec(),[0.,0.,.073**2],atol=1e-12)
+        cache=CachedImuPropagation()
+        for until in (1.013,1.033,1.053,1.073,1.093):
+            actual,_=cache.advance(state,rows,1.12,until=until)
+            expected,_=propagate_imu(state,rows,1.12,until=until)
+            np.testing.assert_allclose(actual.position,expected.position,atol=1e-12)
+            np.testing.assert_allclose(actual.rotation.as_matrix(),expected.rotation.as_matrix(),atol=1e-12)
+        with self.assertRaisesRegex(ValueError,'stale'):
+            cache.advance(state,rows,1.21,until=1.093)
+
 
 if __name__ == '__main__': unittest.main()

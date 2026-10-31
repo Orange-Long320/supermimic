@@ -4,6 +4,7 @@ Run only inside lxh. Publishes adapted sensors, diagnostic odometry and status;
 there are no actuator publishers, control clients, or policy execution paths.
 """
 import argparse
+from bisect import bisect_left
 from collections import Counter, deque
 import json
 from pathlib import Path
@@ -25,6 +26,8 @@ def main():
     for key in ('binary', 'urdf', 'profile', 'extrinsics', 'out'):
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--seconds', type=float, default=0., help='0 keeps the diagnostic running until stopped')
+    parser.add_argument('--state-clock', choices=('latest-imu', 'imu-grid'), default='latest-imu',
+                        help='imu-grid estimates on a 20 ms grid bracketed by received IMU; no extrapolation')
     args = parser.parse_args(); args.out.mkdir(parents=True, exist_ok=False)
     import rclpy
     from rclpy.node import Node
@@ -69,6 +72,7 @@ def main():
             self.imu_rows = deque(maxlen=256); self.imu_stamps_ns = deque(maxlen=256)
             self.groups = {g: deque(maxlen=128) for g in ('leg', 'waist', 'head', 'arm')}
             self.propagation = CachedImuPropagation()
+            self.last_emitted_ns = None
             self.counts = Counter(); self.rejects = Counter(); self.state = None
             self.level = None; self.shift = None; self.floor = None; self.cloud = None
             self.static_ready = False; self.mount_changed = False; self.last_pose = None
@@ -111,6 +115,10 @@ def main():
             self.imu_rows.append(row)
             self.imu_stamps_ns.append(msg.header.stamp.sec*10**9+msg.header.stamp.nanosec)
             self.imu_pub.publish(msg); self.counts['adapted_imu'] += 1
+            if args.state_clock == 'imu-grid':
+                # Emit as soon as actual IMU data bracket the next grid time.
+                # The timer remains a retry path, not a second sampling clock.
+                self.publish_pose()
 
         def on_cloud(self, msg):
             before = time.monotonic()
@@ -186,10 +194,22 @@ def main():
                 if self.state is None: raise ValueError('waiting for LIO correction')
                 now = time.time(); age = now-self.state.stamp
                 if not 0 <= age <= .2: raise ValueError('LIO correction stale')
-                propagated, gyro = self.propagation.advance(self.state, list(self.imu_rows), now)
+                ns = self.imu_stamps_ns[-1]
+                grid = args.state_clock == 'imu-grid'
+                support = None
+                if grid:
+                    ns = ns//20_000_000*20_000_000
+                    if self.last_emitted_ns is not None and ns <= self.last_emitted_ns: return
+                    raw_ns = list(self.imu_stamps_ns)
+                    right = bisect_left(raw_ns, ns)
+                    if right == len(raw_ns) or (right == 0 and raw_ns[0] != ns):
+                        raise ValueError('IMU does not bracket grid time')
+                    left = right if raw_ns[right] == ns else right-1
+                    support = [raw_ns[left], raw_ns[right]]
+                propagated, gyro = self.propagation.advance(self.state, list(self.imu_rows), now,
+                                                           until=ns*1e-9 if grid else None)
                 imu_age = now-propagated.stamp
                 if not 0 <= imu_age <= .05: raise ValueError('latest IMU stale')
-                ns = self.imu_stamps_ns[-1]
                 q, qd, joint_ages, joint_rows = self.joints(propagated.stamp, with_rows=True, at_ns=ns)
                 ppi, rpi, chain_omega = mount.mount(q, qd)
                 position, rotation = pelvis_from_imu(propagated.position, propagated.rotation.as_matrix(), ppi, rpi)
@@ -231,8 +251,12 @@ def main():
                               joint_domains=[r['domain'] for r in joint_rows],
                               state_stamp_ns=ns, joint_stamps_ns=[r['header_ns'] for r in joint_rows],
                               motor_output_enabled=False, eligible_for_control=False)
+                if grid:
+                    packet.update(schema=3, state_time_kind='resampled_imu_grid',
+                                  imu_support_stamps_ns=support)
                 state_msg = String(); state_msg.data = json.dumps(packet, allow_nan=False)
                 self.policy_state_pub.publish(state_msg); self.counts['policy_state_published'] += 1
+                self.last_emitted_ns = ns
                 self.frames.write(json.dumps(self.last_pose, allow_nan=False)+'\n')
                 self.last_reason = 'publishing diagnostic pelvis state'
             except ValueError as exc:
@@ -245,6 +269,7 @@ def main():
                       'floor': self.floor, 'latest_pose': self.last_pose, 'live_mount_tf_seen': sorted(self.live_tf_seen),
                       'cloud_callback_ms_p50_max': [float(np.median(self.cloud_times)), float(max(self.cloud_times))] if self.cloud_times else None,
                       'header_mode': 'native_host_unchanged', 'hardware_sampling_time_verified': False,
+                      'state_clock': args.state_clock,
                       'dynamic_accuracy_validated': False, 'covariance_validated': False,
                       'control_ready': False, 'motor_output_enabled': False}
             msg = String(); msg.data = json.dumps(result, allow_nan=False); self.status_pub.publish(msg)

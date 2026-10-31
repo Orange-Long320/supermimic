@@ -35,11 +35,13 @@ def parse_filter_state(values):
                          values[17:20].copy(), float(values[20]))
 
 
-def propagate_imu(state, samples, now, *, max_horizon=.2, max_gap=.03):
+def propagate_imu(state, samples, now, *, max_horizon=.2, max_gap=.03, until=None):
     """Samples are received [stamp, gyro_xyz, accel_xyz] in acquisition order.
 
     Midpoint gyro/acceleration integration matches FAST-LIO's acceleration
-    normalization and bias convention. No future sample or clock retimestamping.
+    normalization and bias convention. Optional ``until`` integrates to an
+    estimation time bracketed by received IMU samples, using linear endpoint
+    interpolation. It never extrapolates beyond received acquisition data.
     """
     rows = np.asarray(samples, dtype=float)
     if rows.ndim != 2 or rows.shape[1] != 7 or len(rows) < 2 or not np.isfinite(rows).all():
@@ -47,21 +49,28 @@ def propagate_imu(state, samples, now, *, max_horizon=.2, max_gap=.03):
     times = rows[:, 0]
     if not np.isfinite(now) or np.any(np.diff(times) <= 0) or times[-1] > now or state.stamp > now:
         raise ValueError('Nonmonotonic or future input')
+    end = float(times[-1]) if until is None else until
+    if not np.isfinite(end) or not state.stamp <= end <= times[-1]:
+        raise ValueError('IMU history does not bracket requested estimation time')
     start = int(np.searchsorted(times, state.stamp, side='right'))-1
-    if start < 0 or state.stamp > times[-1] or times[-1]-state.stamp > max_horizon:
+    if start < 0 or end-state.stamp > max_horizon:
         raise ValueError('IMU history does not cover bounded propagation')
     p, r, v, stamp = state.position.copy(), state.rotation, state.velocity.copy(), state.stamp
     for i in range(start+1, len(rows)):
+        if stamp >= end: break
         before, after = rows[i-1], rows[i]
         gap = after[0]-before[0]
         if gap > max_gap:
             raise ValueError('IMU acquisition gap')
-        dt = after[0]-stamp
+        end_stamp = min(float(after[0]), end)
+        dt = end_stamp-stamp
         if dt <= 0:
             continue
         fraction = (stamp-before[0])/gap
         at_start = before[1:]+fraction*(after[1:]-before[1:])
-        average = .5*(at_start+after[1:])
+        end_fraction = (end_stamp-before[0])/gap
+        at_end = before[1:]+end_fraction*(after[1:]-before[1:])
+        average = .5*(at_start+at_end)
         omega = average[:3]-state.gyro_bias
         specific_force = average[3:]*state.accel_scale-state.accel_bias
         mid_rotation = r*Rotation.from_rotvec(omega*dt*.5)
@@ -69,8 +78,15 @@ def propagate_imu(state, samples, now, *, max_horizon=.2, max_gap=.03):
         p += v*dt+.5*acceleration*dt*dt
         v += acceleration*dt
         r = r*Rotation.from_rotvec(omega*dt)
-        stamp = float(after[0])
-    return replace(state, stamp=stamp, position=p, rotation=r, velocity=v), rows[-1, 1:4]-state.gyro_bias
+        stamp = end_stamp
+        if stamp >= end: break
+    # Also handles a requested time exactly equal to the correction timestamp.
+    index = min(int(np.searchsorted(times, end, side='right')), len(rows)-1)
+    previous = max(0, index-1)
+    span = times[index]-times[previous]
+    fraction = 0. if span == 0 else (end-times[previous])/span
+    gyro = rows[previous, 1:4]+fraction*(rows[index, 1:4]-rows[previous, 1:4])-state.gyro_bias
+    return replace(state, stamp=stamp, position=p, rotation=r, velocity=v), gyro
 
 
 class CachedImuPropagation:
@@ -83,11 +99,11 @@ class CachedImuPropagation:
         self.correction_stamp = None
         self.cached = None
 
-    def advance(self, correction, samples, now, *, max_horizon=.2, max_gap=.03):
+    def advance(self, correction, samples, now, *, max_horizon=.2, max_gap=.03, until=None):
         if not np.isfinite(now) or not 0 <= now-correction.stamp <= max_horizon:
             raise ValueError('LIO correction stale')
         seed = self.cached if self.correction_stamp == correction.stamp else correction
-        result, gyro = propagate_imu(seed, samples, now, max_horizon=max_horizon, max_gap=max_gap)
+        result, gyro = propagate_imu(seed, samples, now, max_horizon=max_horizon, max_gap=max_gap, until=until)
         self.correction_stamp, self.cached = correction.stamp, result
         return result, gyro
 
