@@ -135,8 +135,12 @@ def analyze(folder, profile, scene):
     arrays = dict(time=t, mode=mode, position=pos, reference_position=reference, reference_error=reference_error,
                   goal=g, joint_speed_rms=dq_rms, actual_ankle=actual_feet, target_ankle=target_feet,
                   actual_foot_gap=actual_gap, target_foot_gap=target_gap)
+    direct_error = None
+    if all('reference_root_position' in row for row in rows):
+        direct_error = float(np.max(np.abs(reference[:,:2]-np.array([row['reference_root_position'][:2] for row in rows]))))
     return dict(failure=result['failure'], control_seconds=result['control_seconds'], stops=stops,
                 yaw_reconstruction_matrix_max_error=matrix_error,
+                recorded_reference_root_xy_max_error_m=direct_error,
                 reference_integral_step_max_error_m=float(integration_error.max()),
                 reference_integral_step_p99_error_m=float(np.percentile(integration_error,99)),
                 source_frames_sha256=hashlib.sha256((folder/'policy/frames.jsonl').read_bytes()).hexdigest()), arrays
