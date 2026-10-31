@@ -84,7 +84,7 @@ def main():
     rclpy.init();node=Node('supermimic_official_joint_stand_trial',enable_rosout=False,start_parameter_services=False)
     setter=node.create_client(SetMcAction,'/aimdk_5Fmsgs/srv/SetMcAction')
     getter=node.create_client(GetMcAction,'/aimdk_5Fmsgs/srv/GetMcAction')
-    groups={};samples=[];events=[];failure=None;started_mc=False;stand_requested=False;last_mode=None
+    groups={};samples=[];events=[];failure=None;started_mc=False;start_mc_attempted=False;stand_requested=False;last_mode=None
     qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.VOLATILE)
     def receive(msg,group):
         groups[group]={'received':time.monotonic(),'stamp_ns':msg.header.stamp.sec*10**9+msg.header.stamp.nanosec,
@@ -115,12 +115,15 @@ def main():
         info=em_get(a.mc_host,'get_all_apps_info')['mc'];state=info.get('status')
         if state in ('Idle','Idel'):
             # Recheck consent immediately before the operation that may energize motors.
-            authorize(a.plan,a.consent);events.append({'time':time.time(),'start_mc_reply':em_start_mc(a.mc_host)})
+            authorize(a.plan,a.consent);start_mc_attempted=True
+            print(json.dumps({'event':'native_mc_start_requested','wall':time.time()}),flush=True)
+            events.append({'time':time.time(),'start_mc_reply':em_start_mc(a.mc_host)})
             started_mc=True
         elif state not in ('Running','Run'):raise RuntimeError('Unexpected MC runtime state: '+str(state))
         if not setter.wait_for_service(timeout_sec=10.) or not getter.wait_for_service(timeout_sec=5.):
             raise RuntimeError('Native MC action service not ready')
         stand_requested=True;action('JOINT_DEFAULT',100)
+        print(json.dumps({'event':'official_joint_stand_accepted','wall':time.time()}),flush=True)
         started=time.monotonic();last_poll=0.;mode_received=started
         while time.monotonic()-started<plan['observation_seconds']:
             rclpy.spin_once(node,timeout_sec=.002);now=time.monotonic()
@@ -141,11 +144,13 @@ def main():
             raise RuntimeError('Joint-position stand mode not confirmed running')
     except Exception as exc:
         failure=str(exc)
-        if (started_mc or stand_requested) and setter.service_is_ready():
-            try:action('DAMPING_DEFAULT',3)
-            except Exception as fallback:events.append({'fallback_unverified':str(fallback)})
+        if start_mc_attempted or stand_requested:
+            if setter.wait_for_service(timeout_sec=3.):
+                try:action('DAMPING_DEFAULT',3)
+                except Exception as fallback:events.append({'fallback_unverified':str(fallback)})
+            else:events.append({'fallback_unverified':'Native action service unavailable; operator emergency stop required'})
     finally:
-        result={'scope':plan['scope'],'failure':failure,'started_native_mc':started_mc,
+        result={'scope':plan['scope'],'failure':failure,'started_native_mc':started_mc,'start_mc_attempted':start_mc_attempted,
             'stand_requested':stand_requested,'last_mode':last_mode,'events':events,'samples':samples,
             'selected_11500_pose_verified':False,'policy_process_started':False,'user_motor_power_confirmation':True}
         tail=[s for s in samples if s['elapsed']>=10.]
