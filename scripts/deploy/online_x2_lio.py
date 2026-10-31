@@ -32,7 +32,7 @@ def main():
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-    from rclpy.executors import ExternalShutdownException
+    from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
     from sensor_msgs.msg import PointCloud2, Imu
     from nav_msgs.msg import Odometry
     from std_msgs.msg import Float64MultiArray, String
@@ -277,6 +277,7 @@ def main():
             temporary = args.out/'status-latest.tmp'; temporary.write_text(msg.data+'\n'); temporary.replace(args.out/'status-latest.json')
 
     rclpy.init(); node = Bridge()
+    executor = SingleThreadedExecutor(); executor.add_node(node)
     command = ['nice', '-n', '10', str(args.binary.resolve()), '--ros-args', '--params-file', str(config.resolve()),
                '-r', '__node:=supermimic_fastlio_online', '-r', '__ns:='+prefix,
                '-r', '/Odometry:='+prefix+'/imu_odometry', '-r', '/tf:='+prefix+'/tf',
@@ -290,7 +291,7 @@ def main():
     (args.out/'bridge.pid').write_text(str(os.getpid())+'\n')
     try:
         while rclpy.ok() and (args.seconds == 0 or time.monotonic()-node.started < args.seconds):
-            rclpy.spin_once(node, timeout_sec=.02)
+            executor.spin_once(timeout_sec=.02)
     except (KeyboardInterrupt, ExternalShutdownException): pass
     finally:
         node.running = False
@@ -300,7 +301,7 @@ def main():
         node.process.terminate()
         try: node.process.wait(timeout=10)
         except subprocess.TimeoutExpired: node.process.kill(); node.process.wait()
-        log.close(); node.destroy_node(); rclpy.try_shutdown()
+        log.close(); executor.shutdown(timeout_sec=1.); node.destroy_node(); rclpy.try_shutdown()
 
 
 if __name__ == '__main__': main()

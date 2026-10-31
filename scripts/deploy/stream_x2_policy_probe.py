@@ -34,6 +34,7 @@ def main():
     import torch
     import rclpy
     from rclpy.node import Node
+    from rclpy.executors import SingleThreadedExecutor
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
     from std_msgs.msg import String
     from supermimic.deploy.torch_policy import BufferedTorchPolicy
@@ -81,6 +82,7 @@ def main():
         last_arrival = arrival
     qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
     sub = node.create_subscription(String, '/supermimic/x2_online_lio/policy_state', receive, qos)
+    executor = SingleThreadedExecutor(); executor.add_node(node)
     history = deque(maxlen=10); previous = np.zeros(31); session = None; last_stamp = None
     initialized = False; rejected = Counter(); outside = Counter(); frames = 0
     durations, inference, intervals, ages, steps = [], [], [], [], []
@@ -96,7 +98,7 @@ def main():
                 # breaking the ten-frame history even when both loops keep up.
                 # Consume each received state once, using its acquisition clock
                 # for history validation; never pad a missing observation.
-                rclpy.spin_once(node, timeout_sec=.02)
+                executor.spin_once(timeout_sec=.02)
                 if received == processed_received:
                     if latest and time.time()-latest['state_stamp'] > .05 and history:
                         history.clear(); previous = np.zeros(31); last_stamp = None
@@ -171,7 +173,8 @@ def main():
             slowest_frame=slowest_frame,
             motor_output_enabled=False, control_transferred=False, ready_for_hardware_trial=False)
         (a.out/'report.json').write_text(json.dumps(result, indent=2, allow_nan=False)+'\n')
-        print(json.dumps(result, indent=2, allow_nan=False)); node.destroy_node(); rclpy.try_shutdown()
+        print(json.dumps(result, indent=2, allow_nan=False))
+        executor.shutdown(timeout_sec=1.); node.destroy_node(); rclpy.try_shutdown()
     if fatal or not frames: raise SystemExit(1)
 
 
