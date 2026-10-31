@@ -1,0 +1,28 @@
+{
+  "fast_lio_ros2": {
+    "url": "https://github.com/Ericsii/FAST_LIO_ROS2",
+    "commit": "2fffc570a25d0df172720bac034fbdb6a13d2162",
+    "patch": "replace unused pcl_ros dependency with directly used tf2_ros"
+  },
+  "ikd_tree": {
+    "url": "https://github.com/hku-mars/ikd-Tree",
+    "commit": "e2e3f4e9d3b95a9e66b1ba83dc98d4a05ed8a3c4"
+  },
+  "livox_interfaces": {
+    "url": "https://github.com/Livox-SDK/livox_ros_driver2",
+    "commit": "21445540f0d100dc86a7e6df312dd70bbdb4afdf",
+    "scope": "CustomMsg and CustomPoint interfaces only, no device driver",
+    "msg/CustomMsg.msg": {
+      "url": "https://raw.githubusercontent.com/Livox-SDK/livox_ros_driver2/21445540f0d100dc86a7e6df312dd70bbdb4afdf/msg/CustomMsg.msg",
+      "sha256": "f42d6709db951b1fa307e929e742c0593cbf0d1b0ff977d2ed63ad8d7cee0a96"
+    },
+    "msg/CustomPoint.msg": {
+      "url": "https://raw.githubusercontent.com/Livox-SDK/livox_ros_driver2/21445540f0d100dc86a7e6df312dd70bbdb4afdf/msg/CustomPoint.msg",
+      "sha256": "b64b31a8edc8c8b3765d82b5d3ccd2d2e1f217b9525ef7007ab918674c619c59"
+    },
+    "LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/Livox-SDK/livox_ros_driver2/21445540f0d100dc86a7e6df312dd70bbdb4afdf/LICENSE.txt",
+      "sha256": "5d965fd1439196751d5ccad8064a51dafdb2d88548174bb5516d393c7a4c0717"
+    }
+  }
+}
