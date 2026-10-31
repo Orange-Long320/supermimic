@@ -9,7 +9,7 @@ from supermimic.robots.dimensions import GOAL_FEAT_DIM, OBS_DIM
 def test_transfer_preserves_zero_anchor_actions_and_values():
     torch.manual_seed(5)
     future = 2*GOAL_FEAT_DIM
-    common = dict(encoder_hidden=(16,), decoder_hidden=(16,), history=1)
+    common = dict(encoder_hidden=(16,), decoder_hidden=(16,), history=10)
     old_cfg = PolicyCfg(**common, goal_dim=future+9)
     new_cfg = PolicyCfg(**common, goal_dim=future)
     old, new = Policy(old_cfg), Policy(new_cfg)
@@ -17,7 +17,7 @@ def test_transfer_preserves_zero_anchor_actions_and_values():
     old_v = Critic(CriticCfg(hidden=(16,)), feat_dim=7, xi_dim=3, pcfg=old_cfg)
     new_v = Critic(CriticCfg(hidden=(16,)), feat_dim=7, xi_dim=3, pcfg=new_cfg)
     new_v.load_state_dict(remove_anchor_weights(old_v.state_dict(), future_dim=future, feature_dim=7), strict=True)
-    goal, obs = torch.randn(4, future), torch.randn(4, OBS_DIM)
+    goal, obs = torch.randn(4, future), torch.randn(4, 10*OBS_DIM)
     padded = torch.cat((goal, torch.zeros(4, 9)), -1)
     feat, xi, root = torch.randn(4, 7), torch.randn(4, 3), torch.randn(4, 4)
     torch.testing.assert_close(new(obs, goal), old(obs, padded))

@@ -11,6 +11,9 @@ quiet=${7:-0.0}
 trial="$run/$name"
 mkdir "$trial"
 source "$run/ros-env.sh"
+ros_domain=${ROS_DOMAIN_ID:-179}
+state_port=${SM_SIM_STATE_PORT:-19179}
+command_port=${SM_SIM_COMMAND_PORT:-19180}
 source_root="$run/source"
 profile="$source_root/assets/robots/x2_ultra/profile.json"
 dataset=${8:-/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r2/dataset}
@@ -30,9 +33,10 @@ cleanup() {
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
-/usr/bin/python3 "$source_root/scripts/deploy/official_sim_command.py" --profile "$profile" --port 19180 --sim-only >"$trial/command.log" 2>&1 & cmd_pid=$!
-/usr/bin/python3 "$source_root/scripts/deploy/official_sim_state.py" --port 19179 --sim-only >"$trial/state.log" 2>&1 & state_pid=$!
+/usr/bin/python3 "$source_root/scripts/deploy/official_sim_command.py" --profile "$profile" --port "$command_port" --ros-domain "$ros_domain" --sim-only >"$trial/command.log" 2>&1 & cmd_pid=$!
+/usr/bin/python3 "$source_root/scripts/deploy/official_sim_state.py" --port "$state_port" --ros-domain "$ros_domain" --sim-only >"$trial/state.log" 2>&1 & state_pid=$!
 args=()
+if [[ ${SM_ANCHOR_OBS:-1} == 0 ]]; then args+=(--no-anchor-obs); fi
 if [[ "$schedule" == keyboard:* ]]; then
   keyboard_port=${schedule#keyboard:}
   [[ "$keyboard_port" =~ ^[0-9]+$ ]] && (( keyboard_port > 0 && keyboard_port < 65536 )) || { echo 'Invalid keyboard port' >&2; exit 1; }
@@ -46,10 +50,11 @@ if [[ "$fade" != baseline ]]; then args+=(--jog-brake-fade "$fade"); fi
   export SM_ROBOT=x2_ultra PYTHONPATH="$source_root/src" OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
   exec /home/2025-Long.xh/HHD/venvs/supermimic/bin/python scripts/deploy/official_sim_policy.py \
     --profile "$profile" --dataset "$dataset" --policy "$model" --out "$trial/policy" \
-    --state-port 19179 --command-port 19180 --seconds "$seconds" --stand-anchor-gain "$gain" --stand-gain-quiet-time "$quiet" \
+    --state-port "$state_port" --command-port "$command_port" --ros-domain "$ros_domain" --seconds "$seconds" --stand-anchor-gain "$gain" --stand-gain-quiet-time "$quiet" \
     --compact-log --sim-only "${args[@]}"
 ) >"$trial/policy.log" 2>&1 & policy_pid=$!
 for i in $(seq 1 45); do
+  kill -0 "$state_pid" && kill -0 "$cmd_pid" || { cat "$trial/state.log" "$trial/command.log"; exit 1; }
   if grep -q 'policy ready for simulator' "$trial/policy.log"; then break; fi
   kill -0 "$policy_pid" 2>/dev/null || { cat "$trial/policy.log"; exit 1; }
   sleep 1
