@@ -48,6 +48,34 @@ class ContextIdlePlanner(SkillPhase):
             raise ValueError('Invalid measured planner context')
         self.context.append((q.copy(), v.copy()))
 
+    def _next(self):
+        if self.plan or self.source == 'stand':
+            return super()._next()
+        clip = self.gaits[self.source]
+        end = self.loops[self.source][1] if self.source in self.loops else len(clip)-1
+        if self.index <= end:
+            return super()._next()
+        if self.source not in self.loops:
+            raise ValueError('Context planner requires explicit sustained cycle bounds')
+        start = self.loops[self.source][0]
+        source = self.queue[-1]
+        candidates = []
+        for join in (10, 15, 20):
+            if start+join > end:
+                continue
+            rows, info = self._candidate(source, clip[start:start+join+1], join)
+            if info['valid']:
+                candidates.append((info['acceleration_rms_rad_s2'], join, rows, info))
+        if not candidates:
+            raise ValueError('No mechanically admissible cycle seam')
+        _, join, rows, info = min(candidates, key=lambda item: item[0])
+        self.events.append(dict(kind='loop_seam', scheduler_step=self.steps, skill=self.source,
+                                from_frame=end, to_frame=start, bridge_end_frame=start+join,
+                                **info))
+        self.plan.extend(rows)
+        self.index = start+join+1
+        return self.plan.popleft()
+
     def _candidate(self, source, template, join):
         rows = np.concatenate((self._blend(source, template[:join+1]), template[join+1:]))
         q = np.concatenate((source[None, :self.nj], rows[:, :self.nj]))
@@ -107,6 +135,7 @@ class ContextIdlePlanner(SkillPhase):
             raise ValueError('No mechanically admissible context transition')
         _, rows, selected = min(choices, key=lambda x: x[0])
         previous = self.requested
+        old_source, old_index = self.source, self.index
         self.plan.clear()
         self.plan.extend(rows)
         self.source = mode
@@ -114,6 +143,7 @@ class ContextIdlePlanner(SkillPhase):
         self.requested = mode
         self.events.append(dict(kind='context_transition', scheduler_step=self.steps,
                                 **{'from': previous, 'to': mode}, target_mode='Idle' if mode == 'stand' else 'Walk',
+                                source_at_selection=old_source, next_frame_at_selection=old_index,
                                 committed_frames=self.horizon, planned_frames=len(rows),
                                 measured_history_frames=len(self.context),
                                 tracking_position_rms_rad=float(np.sqrt(np.mean((q-current[:self.nj])**2))),

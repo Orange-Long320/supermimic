@@ -61,3 +61,14 @@ def test_context_and_scope_validation():
         p.set_context([np.nan, 0], [0, 0])
     with pytest.raises(ValueError, match='Walk and Idle only'):
         p.select('jog')
+
+
+def test_repeated_cycle_seams_are_mechanically_screened():
+    p = planner()
+    p.set_context([0, 0], [0, 0])
+    p.select('walk')
+    for _ in range(300):
+        p.advance()
+    seams = [e for e in p.events if e['kind'] == 'loop_seam']
+    assert len(seams) >= 3
+    assert all(e['valid'] and e['joint_speed_ratio'] <= 1 and e['hard_excess_rad'] <= 1e-4 for e in seams)
