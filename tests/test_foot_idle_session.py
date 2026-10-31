@@ -74,3 +74,25 @@ def test_registration_diagnostic_preserves_original_joint_and_velocity_goals():
         session.advance(tracker)
         np.testing.assert_array_equal(tracker.scheduler.window(),original)
     np.testing.assert_allclose(tracker.position,plan.root_positions[0])
+
+
+def test_registration_control_matches_measured_foot_by_rigid_transform():
+    import mujoco
+    from scipy.spatial.transform import Rotation
+    from supermimic.control.foot_aligned_idle import FootAlignedIdle
+    planner = FootAlignedIdle.__new__(FootAlignedIdle)
+    planner.model = mujoco.MjModel.from_xml_string('''<mujoco><worldbody><body name="pelvis"><freejoint/>
+        <geom type="sphere" size=".05"/><body name="left" pos=".1 .1 -.6"><joint name="hinge"/>
+        <geom type="sphere" size=".03"/></body><body name="right" pos="0 -.1 -.6">
+        <geom type="sphere" size=".03"/></body></body></worldbody></mujoco>''')
+    planner.n = 1; planner.default = np.zeros(1); planner.qadr = np.array([7])
+    planner.feet = [planner.model.body(s).id for s in ('left','right')]
+    data = mujoco.MjData(planner.model)
+    rotation = Rotation.from_euler('z',.4)
+    planner._fk(data,[2.,-1.,.65],rotation.as_quat()[[3,0,1,2]],[0.])
+    context = dict(feet=data.xpos[planner.feet].copy(),foot_rotation=data.xmat[planner.feet].reshape(2,3,3).copy())
+    source = np.zeros(12); source[4] = -1.; source[-1] = .65
+    plan = planner.register_only(source,context)
+    np.testing.assert_allclose(plan.root_positions,[[2,-1,.65],[2,-1,.65]],atol=1e-12)
+    np.testing.assert_allclose(plan.yaw,.4,atol=1e-12)
+    np.testing.assert_array_equal(plan.features,np.repeat(source[None],2,axis=0))

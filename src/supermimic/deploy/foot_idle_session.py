@@ -27,12 +27,15 @@ class FootIdleSession:
         self.applied_step = None
         self.duration_steps = None
         self.registration_only = registration_only
+        self.stop_number = 0
 
     def prepare(self, tracker, position, quat, joints, qvel, angular, stamp, mode):
         if stamp is None or angular is None:
             raise ValueError('Foot Idle requires timestamped odometry and angular velocity')
         v = self.velocity.update(stamp,position)
         if mode != self.previous:
+            if mode == 'stand':
+                self.stop_number += 1
             self.scheduler.stand = self.original_stand.copy()
             self.pending.clear()
             self.quiet = 0
@@ -46,6 +49,10 @@ class FootIdleSession:
             self.previous = mode
         self.scheduler.select(mode)
         if mode != 'stand' or not tracker.has_motion_request:
+            return
+        # This causal control matches the failed trial: its first two short
+        # Idle intervals never installed a plan. Change only the final stop.
+        if self.registration_only and self.stop_number < 3:
             return
         context = self.planner.observe(position,quat,joints,qvel,v,angular)
         if self.future is not None and self.future.done():
@@ -62,7 +69,8 @@ class FootIdleSession:
         stable = np.allclose(self.scheduler.window(),self.original_stand,atol=1e-7) and not self.scheduler.plan
         self.quiet = self.quiet+1 if stable and self.planner.ready(context) else 0
         if not self.attempted and self.quiet >= 10:
-            self.future = self.worker.submit(self.planner.build,self.scheduler.queue[-1].copy(),context)
+            builder = self.planner.register_only if self.registration_only else self.planner.build
+            self.future = self.worker.submit(builder,self.scheduler.queue[-1].copy(),context)
             self.attempted = True
             self.status = 'planning'
             self.events.append(dict(kind='submit',step=self.scheduler.steps))

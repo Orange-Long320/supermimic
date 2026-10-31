@@ -182,6 +182,27 @@ class FootAlignedIdle:
                     failures.append(dict(support=support,lowering_m=lowering,error=str(exc)))
         raise ValueError('No reachable alignment candidate: '+str(failures))
 
+    def register_only(self, source, context):
+        """Cheap causal control; no IK or foot-reachability claim is made."""
+        started = time.monotonic()
+        source = np.asarray(source,dtype=float)
+        gravity = source[2*self.n:2*self.n+3]
+        tilt = Rotation.from_euler('xyz',[np.arctan2(-gravity[1],-gravity[2]),
+                                          np.arcsin(np.clip(gravity[0],-1,1)),0.])
+        data = mujoco.MjData(self.model)
+        self._fk(data,[0,0,source[-1]],tilt.as_quat()[[3,0,1,2]],source[:self.n]+self.default)
+        support = 0  # Match the left-foot registration of the compared rollout.
+        old_yaw = Rotation.from_matrix(data.xmat[self.feet[support]].reshape(3,3)).as_euler('xyz')[2]
+        new_yaw = Rotation.from_matrix(context['foot_rotation'][support]).as_euler('xyz')[2]
+        yaw = float(new_yaw-old_yaw)
+        xy = context['feet'][support,:2]-Rotation.from_euler('z',yaw).apply(data.xpos[self.feet[support]])[:2]
+        position = np.r_[xy,source[-1]]
+        report = dict(diagnostic='registration-only; original stand; no endpoint alignment claim',
+                      support_side='left',measured_foot_targets=context['feet'].tolist(),
+                      total_planning_seconds=time.monotonic()-started)
+        return FootPlan(np.repeat(source[None],2,axis=0),np.repeat(position[None],2,axis=0),
+                        np.repeat(yaw,2),context,report)
+
     def _build(self, source, context, support, height):
         begin = time.monotonic()
         n = self.n
