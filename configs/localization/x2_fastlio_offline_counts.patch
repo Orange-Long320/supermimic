@@ -1,0 +1,42 @@
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -93,6 +93,7 @@
+ double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
+ double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
+ int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
++int sm_sync_count = 0, sm_odom_count = 0;
+ int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
+ bool   point_selected_surf[100000] = {0};
+ bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
+@@ -632,6 +633,7 @@
+     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
+     set_posestamp(odomAftMapped.pose);
+     pubOdomAftMapped->publish(odomAftMapped);
++    ++sm_odom_count;
+     auto P = kf.get_P();
+     for (int i = 0; i < 6; i ++)
+     {
+@@ -959,6 +961,7 @@
+     {
+         if(sync_packages(Measures))
+         {
++            ++sm_sync_count;
+             if (flg_first_scan)
+             {
+                 first_lidar_time = Measures.lidar_beg_time;
+@@ -1162,6 +1165,15 @@
+ 
+     rclcpp::spin(std::make_shared<LaserMappingNode>());
+ 
++    std::cout << "SM_LIO_COUNTS "
++              << "{\"cloud_callbacks\":" << scan_count
++              << ",\"imu_callbacks\":" << publish_count
++              << ",\"synced_groups\":" << sm_sync_count
++              << ",\"odom_publications\":" << sm_odom_count
++              << ",\"pending_clouds\":" << lidar_buffer.size()
++              << ",\"pending_imus\":" << imu_buffer.size() << "}" << std::endl;
++
++
+     if (rclcpp::ok())
+         rclcpp::shutdown();
+     /**************** save map ****************/
