@@ -30,7 +30,9 @@ def main():
                         help='imu-grid estimates on a 20 ms grid bracketed by received IMU; no extrapolation')
     parser.add_argument('--joint-retain-hz',type=int,choices=(0,100,200),default=0,
                         help='0 keeps native callbacks; otherwise retain original joint messages at this rate before Python deserialization')
+    parser.add_argument('--joint-relay-session', help='Use this private diagnostic relay session instead of direct joint subscriptions')
     args = parser.parse_args(); args.out.mkdir(parents=True, exist_ok=False)
+    if args.joint_relay_session and args.joint_retain_hz: raise ValueError('joint modes are mutually exclusive')
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -41,6 +43,7 @@ def main():
     from tf2_msgs.msg import TFMessage
     from aimdk_msgs.msg import JointStateArray
     from rclpy.serialization import deserialize_message
+    from supermimic.deploy.joint_relay import JointRelayDecoder
 
     spec = json.loads(args.profile.read_text()); names = spec['joint_names']
     if len(names) != 31 or spec['robot'] != 'x2_ultra': raise ValueError('Wrong robot profile')
@@ -75,6 +78,7 @@ def main():
             self.imu_rows = deque(maxlen=256); self.imu_stamps_ns = deque(maxlen=256)
             self.groups = {g: deque(maxlen=128) for g in ('leg', 'waist', 'head', 'arm')}
             self.joint_retained_at = {}
+            self.relay = JointRelayDecoder(args.joint_relay_session, names) if args.joint_relay_session else None
             self.propagation = CachedImuPropagation()
             self.last_emitted_ns = None
             self.counts = Counter(); self.rejects = Counter(); self.state = None
@@ -94,10 +98,13 @@ def main():
             self.subs = [self.create_subscription(Imu, '/aima/hal/sensor/lidar_chest_front/imu', self.on_imu, imu_qos),
                          self.create_subscription(PointCloud2, '/aima/hal/sensor/lidar_chest_front/lidar_pointcloud', self.on_cloud, best),
                          self.create_subscription(Float64MultiArray, prefix+'/filter_state', self.on_state, 20)]
-            for group in self.groups:
-                self.subs.append(self.create_subscription(JointStateArray, '/aima/hal/joint/'+group+'/state',
-                    (lambda raw, g=group: self.on_raw_joints(raw,g)) if args.joint_retain_hz else
-                    (lambda msg, g=group: self.on_joints(msg,g)), best, raw=bool(args.joint_retain_hz)))
+            if self.relay:
+                self.subs.append(self.create_subscription(String, '/supermimic/x2_joint_relay/state', self.on_relay, best))
+            else:
+                for group in self.groups:
+                    self.subs.append(self.create_subscription(JointStateArray, '/aima/hal/joint/'+group+'/state',
+                        (lambda raw, g=group: self.on_raw_joints(raw,g)) if args.joint_retain_hz else
+                        (lambda msg, g=group: self.on_joints(msg,g)), best, raw=bool(args.joint_retain_hz)))
             tf_qos = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
             self.subs.append(self.create_subscription(TFMessage, '/tf_static', self.on_tf, tf_qos))
             self.timer = self.create_timer(.02, self.publish_pose)
@@ -149,6 +156,16 @@ def main():
                     self.cloud = xyz
             except ValueError as exc: self.rejects[str(exc)] += 1
             finally: self.cloud_times.append((time.monotonic()-before)*1000)
+
+        def on_relay(self, msg):
+            self.counts['relay_callbacks'] += 1
+            try:
+                rows = self.relay.decode(msg.data, time.time_ns())
+                for group, row in rows:
+                    self.groups[group].append(row); self.counts['joints_'+group] += 1
+            except (ValueError, TypeError, KeyError) as exc:
+                for rows in self.groups.values(): rows.clear()
+                self.rejects['relay: '+str(exc)] += 1
 
         def on_raw_joints(self, raw, group):
             self.counts['raw_joint_callbacks_'+group] += 1
@@ -285,6 +302,7 @@ def main():
                       'header_mode': 'native_host_unchanged', 'hardware_sampling_time_verified': False,
                       'state_clock': args.state_clock,
                       'joint_retention_hz':args.joint_retain_hz,
+                      'joint_relay_session':args.joint_relay_session,
                       'dynamic_accuracy_validated': False, 'covariance_validated': False,
                       'control_ready': False, 'motor_output_enabled': False}
             msg = String(); msg.data = json.dumps(result, allow_nan=False); self.status_pub.publish(msg)

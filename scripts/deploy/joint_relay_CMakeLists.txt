@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.16)
+project(supermimic_joint_relay)
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(aimdk_msgs REQUIRED)
+# This robot's ROS exports refer to a removed NumPy build path. Override the
+# imported target metadata in this private build only, never the ROS install.
+get_property(imported DIRECTORY PROPERTY IMPORTED_TARGETS)
+foreach(target IN LISTS imported)
+  get_target_property(incs ${target} INTERFACE_INCLUDE_DIRECTORIES)
+  if(incs)
+    string(REPLACE "/usr/local/lib/python3.10/dist-packages/numpy/core/include" "/usr/lib/python3/dist-packages/numpy/core/include" incs "${incs}")
+    set_target_properties(${target} PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${incs}")
+  endif()
+endforeach()
+add_executable(joint_state_relay joint_state_relay.cpp)
+ament_target_dependencies(joint_state_relay rclcpp std_msgs aimdk_msgs)
