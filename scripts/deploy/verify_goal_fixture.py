@@ -41,7 +41,7 @@ def main():
               'scope':'synthetic fixed inputs, no policy loop or robot actuation'}
     if a.expected:
         expected = json.loads(a.expected.read_text())
-        if expected['modes'] != result['modes']:
+        if expected['modes'] != [list(item) for item in result['modes']]:
             raise ValueError('Fixture sequence differs')
         error = float(np.max(np.abs(np.asarray(expected['outputs'])-np.asarray(outputs))))
         order = sorted(elapsed)
