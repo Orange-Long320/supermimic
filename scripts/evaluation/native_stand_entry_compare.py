@@ -30,6 +30,7 @@ def main():
     p.add_argument('--hold-seconds', type=float, default=30.)
     p.add_argument('--seed-frames', type=Path, help='Official trace; approximate snapshot initialization only')
     p.add_argument('--seed-time', type=float, default=0.)
+    p.add_argument('--imu-body', choices=('torso_link', 'pelvis'), default='torso_link', help='Diagnostic IMU body hypothesis')
     a = p.parse_args()
     if a.out.exists() or a.hold_seconds < 5:
         raise ValueError('New output and at least 5 seconds of hold required')
@@ -54,7 +55,7 @@ def main():
     scale = np.array([spec['action_scale'][x] for x in names])
     kp = np.array([spec['stiffness'][x] for x in names]); kd = np.array([spec['damping'][x] for x in names])
     motor_limits = m.actuator_ctrlrange[motors]
-    torso = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, 'torso_link')
+    torso = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, a.imu_body)
     floor = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, 'floor')
     feet = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, side+'_ankle_roll_link') for side in ('left','right')]
     if min(torso, floor, *feet) < 0:
@@ -156,7 +157,7 @@ def main():
             'dataset_manifest_sha256':sha(a.dataset/'manifest.json'),
             'scope':'native MuJoCo CPU, same XML and independent PD implementation; actual solver contact forces, not official ROS simulator or hardware',
             'force_time_alignment':'last pre-integration solve, with post-integration joint and root states',
-            'hold_load_threshold_n':10.,
+            'hold_load_threshold_n':10., 'imu_body_hypothesis':a.imu_body,
             'seed': None if seed is None else {'trace':str(a.seed_frames), 'elapsed':seed['elapsed'],
                  'limitations':'Approximate snapshot only: root velocity and prior policy history are unavailable; first 10 samples use held target.'}}
     (a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n'); print(json.dumps(result,indent=2))
