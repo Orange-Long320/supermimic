@@ -44,7 +44,11 @@ def test_measured_tracking_error_changes_selected_entry():
 
 
 def test_no_admissible_transition_fails_without_rewriting_published_goals():
-    p = planner(np.array([[-.0001, .0001], [-.0001, .0001]]))
+    narrow = np.array([[-.0001, .0001], [-.0001, .0001]])
+    with pytest.raises(ValueError, match='No mechanically admissible sustained cycle'):
+        planner(narrow)
+    p = planner()
+    p.joint_limits = narrow
     p.set_context([0, 0], [0, 0])
     before = p.window().copy()
     with pytest.raises(ValueError, match='No mechanically admissible'):

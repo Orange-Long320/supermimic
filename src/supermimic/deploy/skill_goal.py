@@ -48,7 +48,8 @@ class SkillGoal:
             for name in ('walk', 'jog'):
                 clips[name][:, 2*self.nj+5] = 0.
                 clips[name+'_stop'][:, 2*self.nj+5] = 0.
-        loops = {n: choose_cycle(dataset/(n+'.npz'), speed) for n, speed in [('walk', .22), ('jog', .5)]} if sustained else {}
+        cycle_specs = [('walk', .22)] if planner == 'context-idle' else [('walk', .22), ('jog', .5)]
+        loops = {n: choose_cycle(dataset/(n+'.npz'), speed) for n, speed in cycle_specs} if sustained else {}
         self.scheduler = SkillPhase({n: clips[n] for n in names}, {n: clips[n+'_stop'] for n in names}, brake, self.nj, horizon=horizon, loops=loops, jog_brake_fade=jog_brake_fade)
         if planner not in ('baseline', 'context-idle'):
             raise ValueError('Unknown reference planner')

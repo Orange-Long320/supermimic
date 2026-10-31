@@ -25,6 +25,26 @@ class ContextIdlePlanner(SkillPhase):
             raise ValueError('Invalid planner mechanical limits')
         self.foot_features = foot_features
         self.context = deque(maxlen=4)
+        self.loops = dict(self.loops)
+        for name, (start, end) in tuple(self.loops.items()):
+            clip = self.gaits[name]
+            seams = []
+            # Existing cycle ranking ignores hard limits of its Hermite join.
+            # Check nearby recorded end frames before publishing any control.
+            for delta in (0, -1, 1, -2, 2):
+                candidate_end = end+delta
+                if not start+20 <= candidate_end < len(clip):
+                    continue
+                for join in (10, 15, 20):
+                    _, info = self._candidate(clip[candidate_end], clip[start:start+join+1], join)
+                    if info['valid']:
+                        seams.append((abs(delta)+.001*info['acceleration_rms_rad_s2'], candidate_end, join, info))
+            if not seams:
+                raise ValueError('No mechanically admissible sustained cycle: '+name)
+            _, selected_end, join, info = min(seams, key=lambda item: item[0])
+            self.loops[name] = (start, selected_end)
+            self.events.append(dict(kind='cycle_configuration', skill=name, original_bounds=[start, end],
+                                    selected_bounds=[start, selected_end], join_frames=join, **info))
         # Cache geometry of template entries before starting the control loop.
         self.entries = {}
         for mode in ('walk', 'stand'):
