@@ -1,0 +1,68 @@
+"""Actuator-free consent and target-lease supervision for deployment adapters.
+
+No ROS publisher or motor-power API lives here. A deployment approval never
+substitutes for a fresh, explicit motor-power confirmation bound to a plan.
+"""
+from dataclasses import dataclass
+import math
+import re
+
+
+@dataclass(frozen=True)
+class MotorPowerConsent:
+    user_confirmed: bool
+    plan_sha256: str
+    confirmed_wall: float
+
+    def require(self, plan_sha256, now_wall, *, maximum_age=300.):
+        if (self.user_confirmed is not True or not re.fullmatch('[0-9a-f]{64}', self.plan_sha256)
+                or self.plan_sha256 != plan_sha256 or not math.isfinite(now_wall)
+                or not math.isfinite(self.confirmed_wall) or not 0 <= now_wall-self.confirmed_wall <= maximum_age):
+            raise ValueError('Fresh user motor-power confirmation for this exact plan is required')
+
+
+class TargetLeaseSupervisor:
+    """Separate-process adapter may tick this independently of its policy worker.
+
+    The fallback is explicit zero-stiffness damping for a supported robot, not a
+    freestanding balance controller. Its gains/support conditions need separate
+    hardware validation. Faults latch even if fresh policy targets later arrive.
+    """
+    def __init__(self, names, fallback_damping, *, max_state_age, max_target_age):
+        self.names = tuple(names); self.damping = tuple(fallback_damping)
+        if (not self.names or len(set(self.names)) != len(self.names) or len(self.damping) != len(self.names)
+                or not all(math.isfinite(v) and v>=0 for v in self.damping)
+                or not all(math.isfinite(v) and v>0 for v in (max_state_age,max_target_age))):
+            raise ValueError('Invalid lease supervisor contract')
+        self.max_state_age, self.max_target_age = max_state_age, max_target_age
+        self.last_sequence = -1; self.latest = None; self.fault_reason = None
+
+    def accept(self, packet):
+        if self.fault_reason is not None: return False
+        try:
+            if tuple(packet['names']) != self.names: raise ValueError('Target joint order')
+            for key in ('position','velocity','effort','stiffness','damping'):
+                values=packet[key]
+                if len(values)!=len(self.names) or not all(math.isfinite(x) for x in values):raise ValueError('Invalid '+key)
+                if key in ('stiffness','damping') and any(x<0 for x in values):raise ValueError('Negative '+key)
+            if type(packet['sequence']) is not int or packet['sequence']<=self.last_sequence:raise ValueError('Target sequence rollback/replay')
+            if not all(math.isfinite(packet[k]) for k in ('generated','state_sampled')):raise ValueError('Invalid target clocks')
+            self.latest = {key:(list(value) if isinstance(value,(tuple,list)) else value) for key,value in packet.items()}
+            self.last_sequence = packet['sequence']
+            return True
+        except (KeyError, TypeError, ValueError) as exc:
+            self.fault_reason=str(exc)
+            return False
+
+    def tick(self, now):
+        if not math.isfinite(now): self.fault_reason='Invalid supervisor clock'
+        if self.latest is not None and self.fault_reason is None:
+            if not 0<=now-self.latest['generated']<=self.max_target_age:self.fault_reason='Policy target lease expired'
+            elif not 0<=now-self.latest['state_sampled']<=self.max_state_age:self.fault_reason='Source state lease expired'
+        if self.latest is None and self.fault_reason is None:
+            return None  # Never emits an invented startup pose before any target.
+        if self.fault_reason is not None:
+            n=len(self.names)
+            return {'names':self.names,'position':[0.]*n,'velocity':[0.]*n,'effort':[0.]*n,
+                    'stiffness':[0.]*n,'damping':self.damping,'fallback':True,'reason':self.fault_reason}
+        return dict(self.latest, fallback=False)
