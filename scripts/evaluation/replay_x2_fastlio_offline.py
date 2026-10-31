@@ -131,6 +131,13 @@ def main():
                   'time_semantics_verified': False, 'motion_accuracy_validated': False,
                   'scope': 'server localhost-only offline sensor replay; no prior map, '
                            'no leg odometry input, no live robot connection or motor outputs'}
+        for line in (args.out / 'fastlio.log').read_text().splitlines():
+            if line.startswith('SM_LIO_COUNTS '):
+                counts = json.loads(line[len('SM_LIO_COUNTS '):])
+                report['native_counts'] = counts
+                report['native_cloud_callbacks_match_sent'] = counts['cloud_callbacks'] == sent[cloud_topic]
+                report['native_imu_callbacks_match_sent'] = counts['imu_callbacks'] == sent[imu_topic]
+                report['odom_received_matches_native_publications'] = counts['odom_publications'] == len(trajectory)
         if trajectory:
             a = np.asarray(trajectory)
             report.update({'finite': bool(np.isfinite(a).all()),
