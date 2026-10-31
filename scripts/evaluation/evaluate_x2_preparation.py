@@ -42,6 +42,8 @@ def main():
                    help='Diagnostic simultaneous policy blend and cable unloading')
     p.add_argument('--handover-seconds',type=float,default=1.)
     p.add_argument('--unload-seconds',type=float,default=5.)
+    p.add_argument('--prep-gain-source',choices=('sdk','policy'),default='sdk',
+                   help='Diagnostic comparison of preparation and trained actuator gains')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
@@ -74,6 +76,7 @@ def main():
     gains=yaml.safe_load(a.prep_gains.read_text());special={j['name']:j for j in gains['default_joints']['joints']}
     prep_kp=np.asarray([special.get(name,{}).get('kp',gains['default_kp']) for name in names])
     prep_kd=np.asarray([special.get(name,{}).get('kd',gains['default_kd']) for name in names])
+    if a.prep_gain_source=='policy':prep_kp,prep_kd=kp.copy(),kd.copy()
     path=QuinticPose(raw,ref,np.full(n,.35),np.full(n,.4),minimum_duration=8.)
     thresholds=EntryThresholds(.08,.12,.20,a.diagnostic_handover_tilt or .15,.5,12.,.031,10,a.handover_seconds)
     entry=EntryController(path,thresholds,prep_kp,prep_kd,kp,kd)
@@ -195,7 +198,8 @@ def main():
                                f', lengthen cable .5m over {a.unload_seconds}s; fixed ceiling anchor, unilateral tension only',
                 'hardware_geometry_or_stiffness_validated':False},
             'initial_outside_file_envelope':initial_outside,'prep_duration_s':path.duration,'thresholds_sim_only':vars(thresholds),
-            'prep_gain_source':'device SDK example, used only as a simulation candidate',
+            'prep_gain_source':('device SDK example' if a.prep_gain_source=='sdk' else 'selected policy profile')+
+                               ', used only as a simulation candidate',
             'load_compensation_sim_only':a.load_compensation,
             'orientation_assist_sim_only':a.orientation_assist,
             'orientation_assist_axes':'body-frame foot rotational Jacobian; no hardcoded ankle sign',
@@ -208,6 +212,16 @@ def main():
             'active_seconds':0. if active_start is None or not rows else rows[-1]['time_s']-active_start,
             'mass_kg':mass,'root_fixed':False,'motor_output_enabled':False,'ready_for_hardware_trial':False}
     if rows:result['maximum_command_step_rad']=max(row['max_target_step_rad'] for row in rows)
+    result['whole_run_phase_metrics']={}
+    for phase in sorted(set(row['phase'] for row in rows)):
+        phase_rows=[row for row in rows if row['phase']==phase]
+        result['whole_run_phase_metrics'][phase]={
+            'frames':len(phase_rows),
+            'maximum_tilt_rad':float(max(np.arccos(np.clip(-row['gravity_body'][2],-1.,1.)) for row in phase_rows)),
+            'maximum_angular_speed_rad_s':max(row['angular_speed_rad_s'] for row in phase_rows),
+            'maximum_effort_ratio':max(row['actuator_effort_ratio'] for row in phase_rows),
+            'maximum_raw_pd_target_step_rad':max(row['max_target_step_rad'] for row in phase_rows),
+            'maximum_non_floor_contact_n':max([0.]+[f for row in phase_rows for f in row['non_floor_contact_forces_n']])}
     if tail:
         pos=np.asarray([row['root'] for row in tail]);normal=np.asarray([row['normal_n'] for row in tail]);slip=np.asarray([row['loaded_slip_m_s'] for row in tail])
         result['final_window']={'seconds':len(tail)*.02,'max_xy_change_m':float(np.linalg.norm(pos[:,:2]-pos[0,:2],axis=1).max()),
