@@ -113,7 +113,8 @@ def main():
                     recent = np.asarray(self.imu_rows)[-200:]
                     if np.linalg.norm(recent[:, 1:4], axis=1).max() > .05 or np.std(recent[:, 4:7], axis=0).max()>.2:
                         raise ValueError('waiting for static IMU initialization')
-                    self.joints(recent[-1, 0])
+                    _, joint_speed, _ = self.joints(recent[-1, 0])
+                    if np.max(np.abs(joint_speed)) > .05: raise ValueError('waiting for static joints')
                     self.static_ready = True
                 converted, _ = convert_cloud(msg, 1e-9)
                 # Native host header is retained. The known hardware timing
