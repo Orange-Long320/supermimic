@@ -77,7 +77,7 @@ class EntryController:
         self.phase = EntryPhase.FAULT; self.reason = str(reason)
         raise ValueError(self.reason)
 
-    def step(self, now, q, velocity, omega, gravity, *, policy_target=None, preparation_bias=None):
+    def step(self, now, q, velocity, omega, gravity, *, policy_target=None, preparation_bias=None, support_ready=True):
         if self.phase == EntryPhase.FAULT: raise ValueError('Entry fault is latched: '+self.reason)
         q, velocity, omega, gravity = (np.asarray(x, dtype=float) for x in (q, velocity, omega, gravity))
         if (q.shape != self.path.start.shape or velocity.shape != q.shape or omega.shape != (3,)
@@ -101,7 +101,7 @@ class EntryController:
             command = (target+self.preparation_bias, target_velocity, prep_kp.copy(), prep_kd.copy())
         else:
             norm = np.linalg.norm(gravity)
-            quiet = (norm > 1e-8 and np.max(np.abs(q-self.path.target)) <= self.thresholds.position_error
+            quiet = (support_ready is True and norm > 1e-8 and np.max(np.abs(q-self.path.target)) <= self.thresholds.position_error
                      and np.max(np.abs(velocity)) <= self.thresholds.joint_speed
                      and np.linalg.norm(omega) <= self.thresholds.angular_speed
                      and math.acos(float(np.clip(-gravity[2]/norm, -1., 1.))) <= self.thresholds.gravity_angle)

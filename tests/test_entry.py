@@ -64,5 +64,14 @@ class EntryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'cannot change'):
             c.step(t+.02,[0.],[0.],[0.]*3,[0.,0.,-1.],policy_target=[1.],preparation_bias=[.3])
 
+    def test_support_transfer_must_finish_before_history(self):
+        c=self.controller();t=0.
+        for t in np.arange(0., .7, .02):
+            c.step(float(t),[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=False)
+        self.assertEqual(c.phase,EntryPhase.SETTLE)
+        while c.phase!=EntryPhase.HISTORY:
+            t+=.02;c.step(float(t),[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=True)
+        self.assertEqual(c.history_samples,0)
+
 
 if __name__ == '__main__': unittest.main()

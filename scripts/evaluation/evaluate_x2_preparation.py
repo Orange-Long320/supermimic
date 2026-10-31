@@ -32,6 +32,7 @@ def main():
     p.add_argument('--attachment-x',type=float,default=0.)
     p.add_argument('--spring',type=float,default=2000.)
     p.add_argument('--unload',action='store_true')
+    p.add_argument('--unload-before-handover',action='store_true',help='Transfer single-point support before requiring level settled stance')
     p.add_argument('--active-seconds',type=float,default=15.)
     p.add_argument('--load-compensation', action='store_true')
     p.add_argument('--orientation-assist', action='store_true', help='Simulation candidate ankle tilt feedback')
@@ -73,7 +74,8 @@ def main():
     local_attach=np.array([a.attachment_x,0.,.15]);point=d.xpos[torso]+d.xmat[torso].reshape(3,3)@local_attach
     anchor=point+np.array([0.,0.,2.]);mass=float(m.body_mass.sum());weight=mass*abs(m.opt.gravity[2])
     rest=2.-a.support_fraction*weight/a.spring;damping=100.
-    active_start=None;failure=None;events=[];rows=[];last_phase=entry.phase
+    active_start=None;failure=None;events=[];rows=[];last_phase=entry.phase;unload_start=None
+    support_force=np.zeros(3)
     balance_bias=np.zeros(n)
     initial_outside=[name for name,q,lo,hi in zip(names,raw,candidate['measured_lower_candidate'],candidate['measured_upper_candidate']) if not lo<=q<=hi]
     substeps=round(.02/m.opt.timestep)
@@ -83,6 +85,11 @@ def main():
         body_velocity=np.zeros(6);mujoco.mj_objectVelocity(m,d,mujoco.mjtObj.mjOBJ_XBODY,pelvis,body_velocity,1)
         omega=body_velocity[:3].copy();proposed=None
         try:
+            if (a.unload_before_handover and unload_start is None and now>=path.duration
+                    and np.max(np.abs(q-ref))<thresholds.position_error
+                    and np.max(np.abs(qd))<thresholds.joint_speed and np.linalg.norm(omega)<thresholds.angular_speed
+                    and rows and min(rows[-1]['normal_n'])>10.):
+                unload_start=now;events.append({'time_s':now,'phase':'support_transfer_started'})
             if entry.phase in (EntryPhase.HISTORY,EntryPhase.HANDOVER,EntryPhase.ACTIVE):
                 history.append((q-default,qd,omega,gravity,previous.copy()))
                 if tracker is None:tracker=SkillGoal(a.dataset,a.profile,d.qpos[:3].copy(),d.qpos[3:7].copy())
@@ -95,7 +102,7 @@ def main():
             bias=None
             if entry.phase in (EntryPhase.PREPARE,EntryPhase.SETTLE,EntryPhase.HISTORY):
                 desired=path.sample(now)[0]
-                if a.orientation_assist:
+                if a.orientation_assist and (not a.unload_before_handover or unload_start is not None):
                     roll=float(np.arctan2(-gravity[1],-gravity[2]));pitch=float(np.arcsin(np.clip(gravity[0],-1.,1.)))
                     requested=np.zeros(n);ramp=float(np.clip(now/2.,0.,1.));ramp=10*ramp**3-15*ramp**4+6*ramp**5
                     for side,foot in zip(('left','right'),feet):
@@ -112,7 +119,10 @@ def main():
                     desired=desired+balance_bias
                 if compensator is not None: bias=compensator.update(desired,q,qd,.02)+balance_bias
                 elif a.orientation_assist: bias=balance_bias.copy()
-            current_target,target_v,kp_now,kd_now=entry.step(now,q,qd,omega,gravity,policy_target=proposed,preparation_bias=bias)
+            support_ready=(not a.unload_before_handover or (unload_start is not None and now-unload_start>=5.
+                           and np.linalg.norm(support_force)<.05*weight and rows and min(rows[-1]['normal_n'])>10.))
+            current_target,target_v,kp_now,kd_now=entry.step(now,q,qd,omega,gravity,policy_target=proposed,
+                                                         preparation_bias=bias,support_ready=bool(support_ready))
             if entry.phase!=last_phase:
                 events.append({'time_s':now,'phase':entry.phase.value})
                 if entry.phase in (EntryPhase.HISTORY,EntryPhase.SETTLE):history.clear()
@@ -127,7 +137,8 @@ def main():
                     point=d.xpos[torso]+d.xmat[torso].reshape(3,3)@local_attach
                     cable=anchor-point;length=float(np.linalg.norm(cable));direction=cable/length
                     jac=np.zeros((3,m.nv));mujoco.mj_jac(m,d,jac,None,point,torso)
-                    unload=0. if not a.unload or active_start is None else float(np.clip((now-active_start-3.)/5.,0.,1.))
+                    beginning=unload_start if a.unload_before_handover else (None if active_start is None else active_start+3.)
+                    unload=0. if not a.unload or beginning is None else float(np.clip((now-beginning)/5.,0.,1.))
                     blend=10*unload**3-15*unload**4+6*unload**5
                     tension=max(0.,a.spring*(length-rest-.5*blend)-damping*float((jac@d.qvel)@direction))
                     support_force=tension*direction;maximum_tension=max(maximum_tension,tension)
@@ -150,6 +161,7 @@ def main():
                 'max_target_step_rad':float(np.max(np.abs(current_target-previous_target))),
                 'max_joint_error_rad':float(np.max(np.abs(q-ref))), 'max_joint_speed_rad_s':float(np.max(np.abs(qd))),
                 'preparation_bias':entry.preparation_bias.tolist(),'balance_bias':balance_bias.tolist(),
+                'support_ready':bool(support_ready),
                 'angular_speed_rad_s':float(np.linalg.norm(omega)), 'gravity_body':gravity.tolist(), 'normal_n':normal.tolist(),
                 'loaded_slip_m_s':np.divide(slip_force,normal,out=np.zeros(2),where=normal>1e-6).tolist(),
                 'max_tension_n':maximum_tension,'last_support_force':support_force.tolist(),
@@ -170,6 +182,7 @@ def main():
             'load_compensation_sim_only':a.load_compensation,
             'orientation_assist_sim_only':a.orientation_assist,
             'orientation_assist_axes':'body-frame foot rotational Jacobian; no hardcoded ankle sign',
+            'support_transfer_before_handover':a.unload_before_handover,'support_transfer_start_s':unload_start,
             'previous_action_history':'actual commanded PD target, normalized by selected action default/scale; no invented history',
             'events':events,'failure':failure,'frames':len(rows),'active_start_s':active_start,
             'active_seconds':0. if active_start is None or not rows else rows[-1]['time_s']-active_start,
