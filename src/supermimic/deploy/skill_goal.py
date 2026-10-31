@@ -18,7 +18,8 @@ from supermimic.envs.mdp.motion_library import MotionLibrary
 class SkillGoal:
     def __init__(self, dataset, profile, root_position, root_quat_wxyz,
                  *, sustained=True, straight=True, horizon=10, jog_brake_fade=None, stand_anchor_gain=1.,
-                 stand_gain_quiet_time=0., stand_gain_speed_limit=.08, planner='baseline'):
+                 stand_gain_quiet_time=0., stand_gain_speed_limit=.08, planner='baseline',
+                 planner_ablation='none', idle_join_frames=None, idle_entry_offset=None):
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -53,6 +54,10 @@ class SkillGoal:
         self.scheduler = SkillPhase({n: clips[n] for n in names}, {n: clips[n+'_stop'] for n in names}, brake, self.nj, horizon=horizon, loops=loops, jog_brake_fade=jog_brake_fade)
         if planner not in ('baseline', 'context-idle'):
             raise ValueError('Unknown reference planner')
+        if planner_ablation not in ('none', 'baseline-idle', 'baseline-motion'):
+            raise ValueError('Unknown planner diagnostic ablation')
+        if planner == 'baseline' and (planner_ablation != 'none' or idle_join_frames is not None or idle_entry_offset is not None):
+            raise ValueError('Planner diagnostics require the experimental context planner')
         self.planner = planner
         if planner == 'context-idle':
             from supermimic.control.idle_planner import ContextIdlePlanner
@@ -65,7 +70,9 @@ class SkillGoal:
             velocity = np.asarray([spec['velocity_limit'][n] for n in self.names])
             self.scheduler = ContextIdlePlanner({n: clips[n] for n in names}, {n: clips[n+'_stop'] for n in names},
                 brake, self.nj, horizon=horizon, loops=loops, joint_limits=limits, velocity_limits=velocity,
-                foot_features=self.planner_feet)
+                foot_features=self.planner_feet, baseline_motion=planner_ablation == 'baseline-motion',
+                baseline_idle=planner_ablation == 'baseline-idle', idle_join_frames=idle_join_frames,
+                idle_entry_offset=idle_entry_offset)
         self.position = np.asarray(root_position, dtype=float).copy()
         self.yaw = self.rotation(root_quat_wxyz).as_euler('xyz')[2]
         if not 1. <= stand_anchor_gain <= 2.:

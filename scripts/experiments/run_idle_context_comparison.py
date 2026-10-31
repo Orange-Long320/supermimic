@@ -32,9 +32,12 @@ def main():
     p.add_argument('--state-port', type=int, default=19279)
     p.add_argument('--command-port', type=int, default=19280)
     p.add_argument('--seconds', type=float, default=55.)
+    p.add_argument('--trials', nargs='+', default=['baseline', 'context-idle'],
+                   choices=('baseline', 'context-idle', 'context-baseline-idle', 'context-baseline-motion',
+                            'context-long-join', 'context-no-entry-skip'))
     a = p.parse_args()
     root = a.run/'source'
-    if not 128 <= a.domain <= 232 or not 40 <= a.seconds <= 90:
+    if not 128 <= a.domain <= 232 or not 40 <= a.seconds <= 90 or len(set(a.trials)) != len(a.trials):
         raise ValueError('Invalid bounded simulation configuration')
     schedule = [[0., 'stand'], [3., 'walk'], [6.6, 'stand'], [13., 'walk'],
                 [17., 'stand'], [23.4, 'walk'], [27.8, 'stand']]
@@ -65,17 +68,24 @@ def main():
         tmp.write_text(json.dumps(record, indent=2)+'\n')
         tmp.replace(result_path)
     save()
-    for planner in ('baseline', 'context-idle'):
+    for trial_name in a.trials:
+        planner = 'baseline' if trial_name == 'baseline' else 'context-idle'
+        ablation = {'context-baseline-idle': 'baseline-idle', 'context-baseline-motion': 'baseline-motion'}.get(trial_name, 'none')
+        diagnostic = ['--planner-ablation', ablation]
+        if trial_name == 'context-long-join':
+            diagnostic += ['--idle-join-frames', '30']
+        if trial_name == 'context-no-entry-skip':
+            diagnostic += ['--idle-entry-offset', '0']
         # Bind both unused UDP endpoints before launching this trial.
         for port in (a.state_port, a.command_port):
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.bind(('127.0.0.1', port))
-        trial = a.run/planner
+        trial = a.run/trial_name
         trial.mkdir()
         children, handles = [], []
-        entry = dict(planner=planner, started_epoch=time.time(), processes=[])
+        entry = dict(planner=trial_name, controller=planner, ablation=ablation, started_epoch=time.time(), processes=[])
         record['trials'].append(entry)
-        record['status'] = planner
+        record['status'] = trial_name
         def launch(name, argv, child_env, cwd=None):
             log = (trial/(name+'.log')).open('x')
             handles.append(log)
@@ -96,7 +106,7 @@ def main():
                 '--profile', str(profile), '--dataset', str(a.dataset), '--policy', str(a.policy),
                 '--out', str(trial/'policy'), '--state-port', str(a.state_port),
                 '--command-port', str(a.command_port), '--seconds', str(a.seconds),
-                '--schedule', str(schedule_path), '--planner', planner, '--compact-log', *common], pyenv, str(root))
+                '--schedule', str(schedule_path), '--planner', planner, '--compact-log', *diagnostic, *common], pyenv, str(root))
             deadline = time.monotonic()+40
             while 'policy ready for simulator' not in (trial/'policy.log').read_text():
                 if policy.poll() is not None or time.monotonic() > deadline:

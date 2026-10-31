@@ -4,7 +4,7 @@ import pytest
 from supermimic.control.idle_planner import ContextIdlePlanner
 
 
-def planner(limits=None):
+def planner(limits=None, **kwargs):
     n = 2
     gait = np.zeros((100, 2*n+10), dtype=np.float32)
     gait[:, 0] = np.linspace(0, .6, 100)
@@ -17,7 +17,7 @@ def planner(limits=None):
     return ContextIdlePlanner({'walk': gait}, {'walk': stop}, {'walk': 10}, n,
         loops={'walk': (25, 70)}, joint_limits=np.array([[-2, 2], [-2, 2]]) if limits is None else limits,
         velocity_limits=np.array([30, 30]),
-        foot_features=lambda row: np.array([[row[0], .1, 0], [0, -.1, 0]]))
+        foot_features=lambda row: np.array([[row[0], .1, 0], [0, -.1, 0]]), **kwargs)
 
 
 def test_interrupts_preserve_committed_window_and_reach_idle():
@@ -76,3 +76,17 @@ def test_repeated_cycle_seams_are_mechanically_screened():
     seams = [e for e in p.events if e['kind'] == 'loop_seam']
     assert len(seams) >= 3
     assert all(e['valid'] and e['joint_speed_ratio'] <= 1 and e['hard_excess_rad'] <= 1e-4 for e in seams)
+
+
+def test_both_original_paths_exactly_reproduce_original_scheduler():
+    from supermimic.control.skill_phase import SkillPhase
+    p = planner(baseline_motion=True, baseline_idle=True)
+    original = SkillPhase(p.gaits, p.stops, p.brake_start, p.nj, loops=dict(p.loops))
+    for step in range(500):
+        if step in (0, 180, 300, 350):
+            mode = 'walk' if step in (0, 300) else 'stand'
+            p.select(mode)
+            original.select(mode)
+        np.testing.assert_array_equal(p.window(), original.window())
+        p.advance()
+        original.advance()

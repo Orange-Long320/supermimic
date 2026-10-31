@@ -12,7 +12,9 @@ from supermimic.control.skill_phase import SkillPhase
 
 
 class ContextIdlePlanner(SkillPhase):
-    def __init__(self, *args, joint_limits, velocity_limits, foot_features, **kwargs):
+    def __init__(self, *args, joint_limits, velocity_limits, foot_features,
+                 baseline_motion=False, baseline_idle=False, idle_join_frames=None,
+                 idle_entry_offset=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.joint_limits = np.asarray(joint_limits, dtype=float)
         self.velocity_limits = np.asarray(velocity_limits, dtype=float)
@@ -24,9 +26,17 @@ class ContextIdlePlanner(SkillPhase):
                 or np.any(self.velocity_limits <= 0)):
             raise ValueError('Invalid planner mechanical limits')
         self.foot_features = foot_features
+        self.baseline_motion, self.baseline_idle = baseline_motion, baseline_idle
+        if idle_join_frames not in (None, 10, 20, 30) or idle_entry_offset not in (None, 0, 5, 10):
+            raise ValueError('Invalid diagnostic Idle entry or join')
+        self.idle_join_frames, self.idle_entry_offset = idle_join_frames, idle_entry_offset
         self.context = deque(maxlen=4)
         self.loops = dict(self.loops)
         for name, (start, end) in tuple(self.loops.items()):
+            if baseline_motion:
+                # Read-only causal control: replay the original motion path,
+                # including its original unscreened seam. Never a fix/adoption.
+                continue
             clip = self.gaits[name]
             seams = []
             # Existing cycle ranking ignores hard limits of its Hermite join.
@@ -50,7 +60,7 @@ class ContextIdlePlanner(SkillPhase):
         for mode in ('walk', 'stand'):
             clip = self.gaits['walk'] if mode == 'walk' else self.stops['walk']
             first = 0 if mode == 'walk' else self.brake_start['walk']
-            offsets = (0, 5, 10)
+            offsets = (idle_entry_offset,) if mode == 'stand' and idle_entry_offset is not None else (0, 5, 10)
             self.entries[mode] = [(first+i, self._feet(clip[first+i]))
                                   for i in offsets if first+i+21 < len(clip)]
         if any(not v for v in self.entries.values()):
@@ -69,6 +79,8 @@ class ContextIdlePlanner(SkillPhase):
         self.context.append((q.copy(), v.copy()))
 
     def _next(self):
+        if self.baseline_motion:
+            return super()._next()
         if self.plan or self.source == 'stand':
             return super()._next()
         clip = self.gaits[self.source]
@@ -117,6 +129,8 @@ class ContextIdlePlanner(SkillPhase):
             raise ValueError('Context planner prototype supports Walk and Idle only')
         if mode == self.requested:
             return
+        if (mode == 'stand' and self.baseline_idle) or (mode == 'walk' and self.baseline_motion):
+            return super().select(mode)
         if not self.context:
             raise ValueError('Measured joint context required before replanning')
         source = self.queue[-1].copy()
@@ -131,7 +145,8 @@ class ContextIdlePlanner(SkillPhase):
         clip = self.gaits['walk'] if mode == 'walk' else self.stops['walk']
         candidates, choices = [], []
         for entry, entry_feet in self.entries[mode]:
-            for join in (10, 20):
+            joins = (self.idle_join_frames,) if mode == 'stand' and self.idle_join_frames is not None else (10, 20)
+            for join in joins:
                 # Idle retains the complete recorded settling tail. Walking
                 # hands back to the gait at the end of its entry bridge.
                 template = clip[entry:entry+join+1] if mode == 'walk' else clip[entry:]
