@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 import time
 import urllib.request
@@ -136,7 +137,8 @@ def main():
             print(json.dumps({'event':'native_mc_start_requested','wall':time.time()}),flush=True)
             events.append({'time':time.time(),'start_mc_reply':em_start_mc(a.mc_host)})
             started_mc=True
-        elif state not in ('Running','Run'):raise RuntimeError('Unexpected MC runtime state: '+str(state))
+        elif state not in ('Running','Run') and not re.fullmatch(r'Running\([0-9]+\)',str(state)):
+            raise RuntimeError('Unexpected MC runtime state: '+str(state))
         if not setter.wait_for_service(timeout_sec=10.) or not getter.wait_for_service(timeout_sec=5.):
             raise RuntimeError('Native MC action service not ready')
         stand_requested=True;action('JOINT_DEFAULT',100)
