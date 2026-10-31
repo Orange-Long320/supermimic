@@ -47,11 +47,17 @@ def main():
             imu_topic: node.create_publisher(Imu, imu_topic, pub_qos)}
     types = {cloud_topic: PointCloud2, imu_topic: Imu}
     trajectory = []
+    availability = []
+    replay_clock = {'origin_ns': None, 'start': None}
 
     def observe(msg):
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
         trajectory.append([msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
                            p.x, p.y, p.z, q.x, q.y, q.z, q.w])
+        if replay_clock['origin_ns'] is None:
+            raise RuntimeError('Odometry arrived before replay input')
+        availability.append(int(replay_clock['origin_ns'] +
+            (time.monotonic()-replay_clock['start']) * args.rate * 1e9))
 
     odom_sub = node.create_subscription(Odometry, odom_topic, observe, qos)
     del odom_sub
@@ -87,6 +93,7 @@ def main():
                 raise ValueError('Prepared bag contains a topic outside the sensor whitelist')
             if first_received is None:
                 first_received = received
+                replay_clock.update(origin_ns=received, start=start)
             due = start + (received - first_received) * 1e-9 / args.rate
             while time.monotonic() < due:
                 if proc.poll() is not None:
@@ -131,6 +138,11 @@ def main():
         rclpy.try_shutdown()
         np.savetxt(args.out / 'trajectory.csv', np.asarray(trajectory).reshape(-1, 8),
                    delimiter=',', header='stamp,x,y,z,qx,qy,qz,qw', comments='')
+        (args.out / 'availability.json').write_text(json.dumps({
+            'capture_clock_available_ns': availability,
+            'meaning': 'offline replay callback time projected onto original bag receive clock; '
+                       'includes this server replay computation, not measured PC2 online latency',
+            'replay_rate': args.rate}, indent=2)+'\n')
         report = {'samples': len(trajectory), 'sent': sent, 'error': error,
                   'child_return_code': proc.returncode, 'replay_rate': args.rate,
                   'reliable_offline_inputs': args.reliable_inputs,
