@@ -12,6 +12,20 @@ def sha(p):
     return h.hexdigest()
 
 
+def validate_memory_options(a):
+    training=a.phase in ('train','train-steps')
+    if a.torch_memory_gib is not None and (not training or not 0 < a.torch_memory_gib <= 8):
+        raise ValueError('A PyTorch cap up to 8 GiB requires a training phase')
+    if a.share_gpu:
+        if not training or not a.compiled or a.torch_memory_gib is None:
+            raise ValueError('Shared training requires compiled train/train-steps and a PyTorch allocator cap')
+        # Budget explicit non-PyTorch (Warp/driver) headroom separately from
+        # the allocator cap and the minimum whole-device free reserve.
+        required=a.stop_free_mib+a.torch_memory_gib*1024+2048
+        if a.stop_free_mib < 0 or a.min_free_mib < required:
+            raise ValueError('Shared launch requires nonnegative free reserve and 2 GiB non-PyTorch headroom')
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--phase',choices=('prepare','capacity','train','train-steps'),required=True)
@@ -22,20 +36,17 @@ def main():
                    help='Use --no-anchor-obs for the native future-only candidate; capacity transfer required')
     p.add_argument('--additional-steps',type=int,help='Additional vectorized environment iterations for train-steps')
     p.add_argument('--checkpoint-interval',type=int,help='Checkpoint interval in environment iterations for train-steps')
-    p.add_argument('--share-gpu',action='store_true',help='Explicitly permit an occupied GPU for train-steps')
+    p.add_argument('--share-gpu',action='store_true',help='Explicitly permit an occupied GPU for compiled train/train-steps')
     p.add_argument('--torch-memory-gib',type=float,help='PyTorch allocator cap in GiB; excludes non-PyTorch allocations')
     p.add_argument('--min-free-mib',type=int,default=12288,help='Minimum GPU free MiB before shared launch')
-    p.add_argument('--stop-free-mib',type=int,default=3072,help='Interrupt this process if shared GPU free MiB drops below threshold')
+    p.add_argument('--stop-free-mib',type=int,default=3072,help='Interrupt this process below this GPU-free threshold; 0 disables automatic interruption')
     a=p.parse_args()
     if a.phase=='train-steps':
         if not a.compiled or a.additional_steps is None or a.additional_steps <= 0:
             raise ValueError('train-steps requires --compiled and positive --additional-steps')
     elif a.additional_steps is not None:
         raise ValueError('--additional-steps is only valid with train-steps')
-    if a.share_gpu and (a.phase!='train-steps' or a.torch_memory_gib is None or not 0 < a.torch_memory_gib <= 8 or a.stop_free_mib < 3072 or a.min_free_mib < a.stop_free_mib+8192):
-        raise ValueError('Shared training requires train-steps, a PyTorch cap <= 8 GiB, and adequate free-memory thresholds')
-    if a.torch_memory_gib is not None and (a.phase!='train-steps' or not 0 < a.torch_memory_gib <= 8):
-        raise ValueError('A PyTorch cap up to 8 GiB requires train-steps')
+    validate_memory_options(a)
     if a.checkpoint_interval is not None and (a.phase!='train-steps' or a.checkpoint_interval < 1):
         raise ValueError('--checkpoint-interval requires train-steps and a positive value')
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():raise ValueError('Dedicated server environment required')
@@ -133,6 +144,7 @@ def main():
     if a.torch_memory_gib is not None:
         record.update(shared_gpu=a.share_gpu,initial_other_compute_pids=busy.splitlines(),initial_gpu_free_mib=free_mib,
                       torch_allocator_cap_gib=a.torch_memory_gib,minimum_free_interrupt_mib=a.stop_free_mib,
+                      free_memory_interrupt_enabled=a.stop_free_mib>0,
                       memory_cap_scope='PyTorch allocator only; excludes Warp, driver and other CUDA allocations')
     def save():(a.out/'result.json').write_text(json.dumps(record,indent=2,default=str)+'\n')
     save();trainer=None;stop=threading.Event();samples=[];start=time.monotonic()
@@ -141,7 +153,7 @@ def main():
             try:
                 mem=subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-gpu=memory.used,memory.free','--format=csv,noheader,nounits'],text=True,timeout=5).strip()
                 used,free=(int(x.strip()) for x in mem.split(','));samples.append(used)
-                if a.torch_memory_gib is not None and free<a.stop_free_mib:
+                if a.torch_memory_gib is not None and a.stop_free_mib>0 and free<a.stop_free_mib:
                     record.update(memory_guard_triggered=True,memory_guard_free_mib=free);save()
                     os.kill(os.getpid(),signal.SIGINT)
                     return

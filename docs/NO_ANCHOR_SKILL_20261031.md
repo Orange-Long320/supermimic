@@ -93,3 +93,5 @@
 启动前快照：GPU0空闲11019MiB、利用率68%，GPU1空闲10249MiB、利用率100%，均有Chen.g的PPGuide进程，确认进程归属后选择GPU0。既有入口的共享开关只允许train-steps，用户要求的是3小时，因此准备让train阶段复用同一显存监视机制。根据本候选上一轮5094MiB的PyTorch reserved峰值和6877MiB设备采样峰值，计划PyTorch分配上限5.5GiB、启动空闲至少10752MiB（分配上限+2GiB非Torch余量+3GiB保留），每秒监视整卡空闲、低于3072MiB时仅中断本训练。共享可能降低吞吐；PyTorch上限不覆盖Warp、驱动和其他用户分配。
 
 规划运行目录 `/home/2025-Long.xh/HHD/data/supermimic/logs/no_anchor_skill_continue3h_shared0_20261031_r1`；目前尚未启动，后续记录实际PID/会话、显存与速度。不会停止其他用户进程或修改共享系统设置。
+
+用户随后明确取消“整卡空闲低于3GiB时中断本训练”。本次以 `--stop-free-mib 0` 关闭空闲显存触发的自动中断；仍采样显存并保留5.5GiB的PyTorch分配上限，启动最小空闲设8192MiB。上述原3GiB中断方案不再执行。源码为定时train阶段增加共享支持，并显式记录中断是否启用。
