@@ -213,6 +213,7 @@ def main():
                        'packet_age_s': sample_now-data['time'],
                        'loop_processing_s': time.monotonic()-now,
                        'body_angular_velocity': state.angular_velocity,
+                       'imu_orientation_wxyz': state.orientation_wxyz,
                        'joint_effort': [effort_by_name[n] for n in names] if set(effort_by_name)==set(names) else None,
                        'joint_pos': q, 'joint_vel': qvel, 'target': target,
                        'goal_current': window[0].tolist(), 'anchor': goal[-9:].tolist(),

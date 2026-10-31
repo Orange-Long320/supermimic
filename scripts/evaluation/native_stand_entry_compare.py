@@ -117,7 +117,9 @@ def main():
             forces = d.actuator_force[motors].copy()
             limits = np.max(np.abs(motor_limits),axis=1)
             records.append({'time_s':now,'mode':mode,'root':d.qpos[:3].tolist(),
-                            'body_angular_velocity':vel[:3].tolist(), 'joint_effort':forces.tolist(),
+                            'body_angular_velocity':vel[:3].tolist(),'imu_orientation_wxyz':imu.tolist(),
+                            'joint_pos_before_step':q.tolist(),'joint_vel_before_step':v.tolist(),
+                            'target':target.tolist(),'action':previous.tolist(),'joint_effort':forces.tolist(),
                             'peak_effort_ratio':float(np.max(np.abs(forces)/limits)),
                             'left_right_normal_n':loads.tolist(),'loaded_slip_m_s':slip.tolist(),
                             'max_contact_speed_m_s':max_slip.tolist()})
