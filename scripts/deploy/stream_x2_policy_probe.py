@@ -18,6 +18,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('release', 'out', 'fixture'): p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--seconds', type=float, default=60.)
+    p.add_argument('--numpy-policy', type=Path)
+    p.add_argument('--numpy-sha256')
     p.add_argument('--diagnostic-only', action='store_true', required=True)
     a = p.parse_args()
     if not 10 <= a.seconds <= 180: raise ValueError('Expected bounded diagnostic duration')
@@ -38,7 +40,12 @@ def main():
     from supermimic.deploy.policy_packet import validate_policy_packet
     from supermimic.deploy.skill_goal import SkillGoal
     torch.set_num_threads(1)
-    policy = BufferedTorchPolicy(r/'policy.pt')
+    if bool(a.numpy_policy) != bool(a.numpy_sha256): raise ValueError('Both NumPy archive and expected SHA required')
+    if a.numpy_policy:
+        from supermimic.deploy.numpy_policy import NumpyPolicy
+        policy = NumpyPolicy(a.numpy_policy, expected_sha256=a.numpy_sha256)
+    else:
+        policy = BufferedTorchPolicy(r/'policy.pt')
     fixture = json.loads(a.fixture.read_text())
     for _ in range(20): output = policy.infer(fixture['obs'], fixture['goal'])
     fixture_error = float(np.max(np.abs(output-fixture['expected'])))
@@ -109,6 +116,7 @@ def main():
     except Exception as exc: fatal = repr(exc)
     finally:
         result = dict(scope=__doc__, policy_sha256=digest, seconds=time.monotonic()-started,
+            backend='numpy-fp32' if a.numpy_policy else 'torch-frozen-fp32', numpy_archive_sha256=a.numpy_sha256,
             received=received, frames=frames, session_id=session, rejected=dict(rejected),
             fixture_error=fixture_error, inference_ms=percentiles(inference), processing_ms=percentiles(durations),
             policy_frame_interval_s=percentiles(intervals), state_age_after_inference_s=percentiles(ages),

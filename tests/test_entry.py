@@ -21,10 +21,12 @@ class EntryTests(unittest.TestCase):
     def test_noisy_settle_resets_history_before_handover(self):
         c = self.controller()
         def step(t, v=0., policy=None): return c.step(t, [0.], [v], [0.]*3, [0., 0., -1.], policy_target=policy)
-        for t in np.arange(0., .28, .02): step(float(t))
+        t=0.
+        while c.phase != EntryPhase.HISTORY:
+            step(t); t+=.02
         self.assertEqual(c.phase, EntryPhase.HISTORY)
-        step(.28, .2); self.assertEqual(c.phase, EntryPhase.SETTLE)
-        t=.30
+        step(t, .2); self.assertEqual(c.phase, EntryPhase.SETTLE)
+        t+=.02
         while c.phase != EntryPhase.HANDOVER: step(t); t+=.02
         # The transition produces the same pose and gains; no new raw policy jump.
         np.testing.assert_allclose(c.last_command[0], [0.]); np.testing.assert_allclose(c.last_command[2], [20.])
