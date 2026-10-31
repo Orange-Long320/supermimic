@@ -71,6 +71,7 @@ def main():
             self.level = None; self.shift = None; self.floor = None; self.cloud = None
             self.static_ready = False; self.mount_changed = False; self.last_pose = None
             self.live_tf_seen = set(); self.last_reason = 'initializing'; self.state_received = None
+            self.cloud_times = deque(maxlen=128)
             self.frames = (args.out/'pelvis-frames.jsonl').open('x')
             self.status_log = (args.out/'status.jsonl').open('x')
             best = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
@@ -97,13 +98,17 @@ def main():
             self.counts['raw_imu'] += 1
             stamp = self.stamp(msg); w, a = msg.angular_velocity, msg.linear_acceleration
             row = [stamp, w.x, w.y, w.z, a.x, a.y, a.z]
-            if (msg.header.frame_id != 'lidar_imu_chest_front' or not np.isfinite(row).all()
-                    or stamp > time.time() or time.time()-stamp > .1
-                    or (self.imu_rows and stamp <= self.imu_rows[-1][0])):
-                self.rejects['imu_header_or_values'] += 1; return
+            reason = ('imu frame' if msg.header.frame_id != 'lidar_imu_chest_front' else
+                      'imu nonfinite' if not np.isfinite(row).all() else
+                      'imu future' if stamp > time.time() else
+                      'imu stale at receive' if time.time()-stamp > .1 else
+                      'imu nonmonotonic' if self.imu_rows and stamp <= self.imu_rows[-1][0] else None)
+            if reason:
+                self.rejects[reason] += 1; return
             self.imu_rows.append(row); self.imu_pub.publish(msg); self.counts['adapted_imu'] += 1
 
         def on_cloud(self, msg):
+            before = time.monotonic()
             self.counts['raw_cloud'] += 1
             try:
                 if msg.header.frame_id != 'lidar_chest_front' or not 0 <= time.time()-self.stamp(msg) <= .3:
@@ -125,6 +130,7 @@ def main():
                                              offset=o, strides=(24,))[::12] for o in (0, 4, 8)])
                     self.cloud = xyz
             except ValueError as exc: self.rejects[str(exc)] += 1
+            finally: self.cloud_times.append((time.monotonic()-before)*1000)
 
         def on_joints(self, msg, group):
             self.counts['joints_'+group] += 1
@@ -217,6 +223,7 @@ def main():
                       'running': self.running,
                       'counts': dict(self.counts), 'rejected_ticks': dict(self.rejects), 'status': self.last_reason,
                       'floor': self.floor, 'latest_pose': self.last_pose, 'live_mount_tf_seen': sorted(self.live_tf_seen),
+                      'cloud_callback_ms_p50_max': [float(np.median(self.cloud_times)), float(max(self.cloud_times))] if self.cloud_times else None,
                       'header_mode': 'native_host_unchanged', 'hardware_sampling_time_verified': False,
                       'dynamic_accuracy_validated': False, 'covariance_validated': False,
                       'control_ready': False, 'motor_output_enabled': False}

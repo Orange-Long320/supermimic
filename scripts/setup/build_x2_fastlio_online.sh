@@ -38,5 +38,11 @@ cmake -S "$run/src/FAST_LIO_ROS2" -B "$run/build/fast_lio" \
   -DPYTHON_INCLUDE_DIR="$python_include" -DPYTHON_LIBRARY="$python_library"
 cmake --build "$run/build/fast_lio" -j2
 cmake --install "$run/build/fast_lio"
-file "$run/install/lib/fast_lio/fastlio_mapping"
+/usr/bin/python3 - "$run/install/lib/fast_lio/fastlio_mapping" <<'PY'
+from pathlib import Path
+import sys
+with Path(sys.argv[1]).open('rb') as stream: header=stream.read(20)
+assert header[:6] == b'\x7fELF\x02\x01' and int.from_bytes(header[18:20], 'little') == 183
+print('Verified ELF64 AArch64 executable')
+PY
 sha256sum "$run/install/lib/fast_lio/fastlio_mapping"

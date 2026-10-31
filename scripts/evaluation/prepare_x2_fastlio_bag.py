@@ -6,6 +6,7 @@ independent verification. This script never connects to the live robot.
 from __future__ import annotations
 
 import argparse
+from array import array
 import hashlib
 import json
 from pathlib import Path
@@ -71,7 +72,9 @@ def convert_cloud(msg, time_scale):
                             count=1) for name in dtype.names]
     out.is_bigendian, out.is_dense = False, True
     out.point_step, out.row_step = 24, 24 * len(points)
-    out.data = points.tobytes()
+    # ROS's generated setter validates a bytes sequence element by element.
+    # A typed byte array takes its supported bulk-assignment path instead.
+    out.data = array('B', points.tobytes())
     return out, [float(offsets.min()), float(offsets.max())]
 
 
