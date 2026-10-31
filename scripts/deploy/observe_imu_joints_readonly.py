@@ -30,14 +30,15 @@ def main():
                                                           lambda msg, g=group:self.on_joint(g,msg), qos))
 
         def on_imu(self, msg):
-            now = time.monotonic(); a = msg.linear_acceleration; w = msg.angular_velocity
+            now = time.monotonic(); a = msg.linear_acceleration; w = msg.angular_velocity; q = msg.orientation
             self.imu.append({'time':now, 'stamp':msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9,
-                             'accel':[a.x,a.y,a.z], 'omega':[w.x,w.y,w.z], 'frame':msg.header.frame_id})
+                             'accel':[a.x,a.y,a.z], 'omega':[w.x,w.y,w.z],
+                             'orientation':[q.w,q.x,q.y,q.z], 'frame':msg.header.frame_id})
 
         def on_joint(self, group, msg):
             self.times.setdefault(group, []).append(time.monotonic())
             if group not in self.groups:
-                self.groups[group] = {'count':len(msg.joints), 'names':[j.name for j in msg.joints],
+                self.groups[group] = {'joint_count':len(msg.joints), 'names':[j.name for j in msg.joints],
                                       'first_error_codes':[j.error_code for j in msg.joints]}
 
     rclpy.init(); node = Observer(); start = time.monotonic()
@@ -53,10 +54,12 @@ def main():
                     'median_gap_s':statistics.median(diffs) if diffs else None}
         acc_norm = [math.sqrt(sum(x*x for x in s['accel'])) for s in samples]
         omega_norm = [math.sqrt(sum(x*x for x in s['omega'])) for s in samples]
+        quat_norm = [math.sqrt(sum(x*x for x in s['orientation'])) for s in samples]
         report = {'seconds':time.monotonic()-start,
                   'imu':{**intervals([s['time'] for s in samples]),
                          'frame_ids':sorted(set(s['frame'] for s in samples)),
-                         'all_finite':all(math.isfinite(v) for s in samples for v in s['accel']+s['omega']),
+                         'all_finite':all(math.isfinite(v) for s in samples for v in s['accel']+s['omega']+s['orientation']),
+                         'orientation_norm_min':min(quat_norm), 'orientation_norm_max':max(quat_norm),
                          'acceleration_norm_median':statistics.median(acc_norm),
                          'acceleration_norm_min':min(acc_norm), 'acceleration_norm_max':max(acc_norm),
                          'angular_speed_median':statistics.median(omega_norm),
