@@ -23,6 +23,14 @@ def sha(path):
     return h.hexdigest()
 
 
+def body_frame_velocity(model, data, body):
+    # BODY uses the principal-inertia frame (ximat), not the link frame used by
+    # xquat and an identity-mounted gyro. XBODY preserves the link axes.
+    velocity = np.zeros(6)
+    mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, body, velocity, 1)
+    return velocity
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('scene', 'profile', 'dataset', 'policy', 'out'):
@@ -95,7 +103,7 @@ def main():
             q = d.qpos[qadr].copy(); v = d.qvel[vadr].copy()
             imu = d.xquat[torso].copy(); w,x,y,z = imu
             gravity = np.array([2*(w*y-x*z), -2*(w*x+y*z), -1+2*(x*x+y*y)])
-            vel = np.zeros(6); mujoco.mj_objectVelocity(m,d,mujoco.mjtObj.mjOBJ_BODY,torso,vel,1)
+            vel = body_frame_velocity(m, d, torso)
             history.append((q-default,v,vel[:3].copy(),gravity,previous.copy()))
             if len(history)==10:
                 features = goal.goal(d.qpos[:3].copy(),d.qpos[3:7].copy(),q,mode)
@@ -158,6 +166,7 @@ def main():
             'scope':'native MuJoCo CPU, same XML and independent PD implementation; actual solver contact forces, not official ROS simulator or hardware',
             'force_time_alignment':'last pre-integration solve, with post-integration joint and root states',
             'hold_load_threshold_n':10., 'imu_body_hypothesis':a.imu_body,
+            'angular_velocity_frame': 'link axes (mjOBJ_XBODY), not principal-inertia axes',
             'seed': None if seed is None else {'trace':str(a.seed_frames), 'elapsed':seed['elapsed'],
                  'limitations':'Approximate snapshot only: root velocity and prior policy history are unavailable; first 10 samples use held target.'}}
     (a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n'); print(json.dumps(result,indent=2))
