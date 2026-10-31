@@ -28,6 +28,8 @@ def main():
     parser.add_argument('--seconds', type=float, default=0., help='0 keeps the diagnostic running until stopped')
     parser.add_argument('--state-clock', choices=('latest-imu', 'imu-grid'), default='latest-imu',
                         help='imu-grid estimates on a 20 ms grid bracketed by received IMU; no extrapolation')
+    parser.add_argument('--joint-retain-hz',type=int,choices=(0,100,200),default=0,
+                        help='0 keeps native callbacks; otherwise retain original joint messages at this rate before Python deserialization')
     args = parser.parse_args(); args.out.mkdir(parents=True, exist_ok=False)
     import rclpy
     from rclpy.node import Node
@@ -38,6 +40,7 @@ def main():
     from std_msgs.msg import Float64MultiArray, String
     from tf2_msgs.msg import TFMessage
     from aimdk_msgs.msg import JointStateArray
+    from rclpy.serialization import deserialize_message
 
     spec = json.loads(args.profile.read_text()); names = spec['joint_names']
     if len(names) != 31 or spec['robot'] != 'x2_ultra': raise ValueError('Wrong robot profile')
@@ -71,6 +74,7 @@ def main():
             self.running = True
             self.imu_rows = deque(maxlen=256); self.imu_stamps_ns = deque(maxlen=256)
             self.groups = {g: deque(maxlen=128) for g in ('leg', 'waist', 'head', 'arm')}
+            self.joint_retained_at = {}
             self.propagation = CachedImuPropagation()
             self.last_emitted_ns = None
             self.counts = Counter(); self.rejects = Counter(); self.state = None
@@ -92,7 +96,8 @@ def main():
                          self.create_subscription(Float64MultiArray, prefix+'/filter_state', self.on_state, 20)]
             for group in self.groups:
                 self.subs.append(self.create_subscription(JointStateArray, '/aima/hal/joint/'+group+'/state',
-                                                          lambda msg, g=group: self.on_joints(msg, g), best))
+                    (lambda raw, g=group: self.on_raw_joints(raw,g)) if args.joint_retain_hz else
+                    (lambda msg, g=group: self.on_joints(msg,g)), best, raw=bool(args.joint_retain_hz)))
             tf_qos = QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
             self.subs.append(self.create_subscription(TFMessage, '/tf_static', self.on_tf, tf_qos))
             self.timer = self.create_timer(.02, self.publish_pose)
@@ -145,9 +150,18 @@ def main():
             except ValueError as exc: self.rejects[str(exc)] += 1
             finally: self.cloud_times.append((time.monotonic()-before)*1000)
 
-        def on_joints(self, msg, group):
+        def on_raw_joints(self, raw, group):
+            self.counts['raw_joint_callbacks_'+group] += 1
+            received_ns=time.time_ns()
+            previous=self.joint_retained_at.get(group)
+            if previous is not None and received_ns-previous < 10**9/args.joint_retain_hz: return
+            msg=deserialize_message(raw,JointStateArray)
+            self.on_joints(msg,group,received_ns=received_ns)
+            self.joint_retained_at[group]=received_ns
+
+        def on_joints(self, msg, group, *, received_ns=None):
             self.counts['joints_'+group] += 1
-            self.groups[group].append({'received_ns': time.time_ns(),
+            self.groups[group].append({'received_ns': time.time_ns() if received_ns is None else received_ns,
                                        'header_ns': msg.header.stamp.sec*10**9+msg.header.stamp.nanosec,
                                        'domain': int(msg.state.value),
                                        'joints': [(j.name, j.position, j.velocity, j.error_code) for j in msg.joints]})
@@ -270,6 +284,7 @@ def main():
                       'cloud_callback_ms_p50_max': [float(np.median(self.cloud_times)), float(max(self.cloud_times))] if self.cloud_times else None,
                       'header_mode': 'native_host_unchanged', 'hardware_sampling_time_verified': False,
                       'state_clock': args.state_clock,
+                      'joint_retention_hz':args.joint_retain_hz,
                       'dynamic_accuracy_validated': False, 'covariance_validated': False,
                       'control_ready': False, 'motor_output_enabled': False}
             msg = String(); msg.data = json.dumps(result, allow_nan=False); self.status_pub.publish(msg)
