@@ -7,6 +7,7 @@ consent bound to the exact plan. No low-level joint command publisher is used.
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import time
 import urllib.request
@@ -43,12 +44,16 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--plan',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
     p.add_argument('--mc-host',default='10.0.1.40')
+    p.add_argument('--candidate',type=Path)
     p.add_argument('--execute',action='store_true');p.add_argument('--consent',type=Path)
     a=p.parse_args()
     if not a.execute:
         if a.plan.exists():raise ValueError('New plan required')
         configs=em_get(a.mc_host,'get_all_apps_config');info=em_get(a.mc_host,'get_all_apps_info')
         if 'mc' not in configs or 'mc' not in info:raise ValueError('Native MC not found')
+        if a.candidate is None:raise ValueError('Selected startup candidate required for named-state checks')
+        candidate=json.loads(a.candidate.read_text());names=candidate['joint_names']
+        if len(names)!=31 or len(set(names))!=31:raise ValueError('Expected 31 unique joint names')
         plan={'schema':1,'scope':'official MC joint-position stand only; no 11500, locomotion or hoist unloading',
             'mc_host':a.mc_host,'native_mc_config_sha256':config_hash(configs['mc']),
             'initial_mc_status':info['mc'].get('status'),'action':'JOINT_DEFAULT','action_value':100,
@@ -56,6 +61,8 @@ def main():
             'user_motor_power_confirmation_required':True,'motor_output_enabled':False,
             'startup':'native EM start_app mc if Idle/Idel, then official SetMcAction',
             'verification':'mode accepted plus measured joint settling; selected 11500 pose must be checked separately',
+            'joint_names':names,'selected_preparation_position':candidate['startup']['position'],
+            'candidate_sha256':hashlib.sha256(a.candidate.read_bytes()).hexdigest(),
             'native_control_after_trial':'MC remains running in requested mode; never stop-app and retain a stiff last command'}
         a.plan.parent.mkdir(parents=True,exist_ok=True);a.plan.write_text(json.dumps(plan,indent=2)+'\n')
         print(json.dumps({'plan':str(a.plan),'plan_sha256':hashlib.sha256(a.plan.read_bytes()).hexdigest(),
@@ -100,6 +107,11 @@ def main():
         for group in groups.values():
             if time.monotonic()-group['received']>.05 or any(j['error_code'] for j in group['joints']):
                 raise RuntimeError('Pre-power joint state stale/faulted')
+        initial=[j for group in groups.values() for j in group['joints']]
+        if (len(initial)!=31 or set(j['name'] for j in initial)!=set(plan['joint_names'])
+                or any(not all(math.isfinite(j[k]) for k in ('position','velocity','effort'))
+                       or abs(j['velocity'])>.05 for j in initial)):
+            raise RuntimeError('Pre-power joint set, values or stationary condition invalid')
         info=em_get(a.mc_host,'get_all_apps_info')['mc'];state=info.get('status')
         if state in ('Idle','Idel'):
             # Recheck consent immediately before the operation that may energize motors.
@@ -109,7 +121,7 @@ def main():
         if not setter.wait_for_service(timeout_sec=10.) or not getter.wait_for_service(timeout_sec=5.):
             raise RuntimeError('Native MC action service not ready')
         stand_requested=True;action('JOINT_DEFAULT',100)
-        started=time.monotonic();last_poll=0.
+        started=time.monotonic();last_poll=0.;mode_received=started
         while time.monotonic()-started<plan['observation_seconds']:
             rclpy.spin_once(node,timeout_sec=.002);now=time.monotonic()
             if any(now-group['received']>.15 or group['domain'] in (2,3,4)
@@ -120,8 +132,13 @@ def main():
                 future=getter.call_async(req);rclpy.spin_until_future_complete(node,future,timeout_sec=.15)
                 if future.done() and future.result() is not None:
                     info=future.result().info;last_mode={'value':info.current_action.value,'description':info.action_desc,'status':info.status.value}
-                    if last_mode['value'] not in (100,):raise RuntimeError('Native mode differs from joint stand')
+                    mode_received=time.monotonic()
+                    if last_mode['value']!=100 and not (last_mode['status']==200 and now-started<5.):
+                        raise RuntimeError('Native mode differs from joint stand')
                 samples.append({'elapsed':now-started,'mode':last_mode,'groups':json.loads(json.dumps(groups))});last_poll=now
+            if now-mode_received>1.:raise RuntimeError('Native mode feedback stale')
+        if last_mode is None or last_mode['value']!=100 or last_mode['status']!=100:
+            raise RuntimeError('Joint-position stand mode not confirmed running')
     except Exception as exc:
         failure=str(exc)
         if (started_mc or stand_requested) and setter.service_is_ready():
@@ -131,6 +148,15 @@ def main():
         result={'scope':plan['scope'],'failure':failure,'started_native_mc':started_mc,
             'stand_requested':stand_requested,'last_mode':last_mode,'events':events,'samples':samples,
             'selected_11500_pose_verified':False,'policy_process_started':False,'user_motor_power_confirmation':True}
+        tail=[s for s in samples if s['elapsed']>=10.]
+        if tail:
+            latest={j['name']:j for group in tail[-1]['groups'].values() for j in group['joints']}
+            result['final_max_joint_speed_rad_s']=max(abs(j['velocity']) for sample in tail
+                for group in sample['groups'].values() for j in group['joints'])
+            if set(latest)==set(plan['joint_names']):
+                result['selected_pose_differences_deg']={name:math.degrees(latest[name]['position']-target)
+                    for name,target in zip(plan['joint_names'],plan['selected_preparation_position'])}
+            result['official_mode_running_and_low_speed']=failure is None and result['final_max_joint_speed_rad_s']<.1
         (a.out/'report.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps({k:v for k,v in result.items() if k!='samples'}))
         node.destroy_node();rclpy.try_shutdown()
     if failure:raise SystemExit(1)
