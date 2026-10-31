@@ -98,9 +98,16 @@ def main():
                 if a.orientation_assist:
                     roll=float(np.arctan2(-gravity[1],-gravity[2]));pitch=float(np.arcsin(np.clip(gravity[0],-1.,1.)))
                     requested=np.zeros(n);ramp=float(np.clip(now/2.,0.,1.));ramp=10*ramp**3-15*ramp**4+6*ramp**5
-                    for side in ('left','right'):
-                        requested[names.index(side+'_ankle_pitch_joint')]=ramp*np.clip(pitch+.1*omega[1],-.25,.25)
-                        requested[names.index(side+'_ankle_roll_joint')]=ramp*np.clip(roll+.1*omega[0],-.15,.15)
+                    for side,foot in zip(('left','right'),feet):
+                        indices=[names.index(side+'_ankle_pitch_joint'),names.index(side+'_ankle_roll_joint')]
+                        jac=np.zeros((3,m.nv));mujoco.mj_jacBody(m,d,None,jac,foot)
+                        axes=d.xmat[pelvis].reshape(3,3).T@jac[:,va[indices]]
+                        # With a foot on the ground, root rotation changes
+                        # opposite to ankle-relative rotation. Derive the ankle
+                        # signs from model axes instead of joint name guesses.
+                        error=np.array([roll+.1*omega[0],pitch+.1*omega[1],0.])
+                        correction=np.linalg.lstsq(axes,error,rcond=None)[0]
+                        requested[indices]=ramp*np.clip(correction,[-.25,-.15],[.25,.15])
                     balance_bias+=np.clip(requested-balance_bias,-.08*.02,.08*.02)
                     desired=desired+balance_bias
                 if compensator is not None: bias=compensator.update(desired,q,qd,.02)+balance_bias
@@ -162,6 +169,7 @@ def main():
             'prep_gain_source':'device SDK example, used only as a simulation candidate',
             'load_compensation_sim_only':a.load_compensation,
             'orientation_assist_sim_only':a.orientation_assist,
+            'orientation_assist_axes':'body-frame foot rotational Jacobian; no hardcoded ankle sign',
             'previous_action_history':'actual commanded PD target, normalized by selected action default/scale; no invented history',
             'events':events,'failure':failure,'frames':len(rows),'active_start_s':active_start,
             'active_seconds':0. if active_start is None or not rows else rows[-1]['time_s']-active_start,
