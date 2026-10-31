@@ -36,9 +36,13 @@ def main():
     p.add_argument('--active-seconds',type=float,default=15.)
     p.add_argument('--load-compensation', action='store_true')
     p.add_argument('--orientation-assist', action='store_true', help='Simulation candidate ankle tilt feedback')
+    p.add_argument('--diagnostic-handover-tilt',type=float,
+                   help='Counterfactual capture test only; override the .15 rad simulation entry tilt gate')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
-            or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120): raise ValueError('Invalid scenario')
+            or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
+            or (a.diagnostic_handover_tilt is not None and not .15<a.diagnostic_handover_tilt<=.35)):
+        raise ValueError('Invalid scenario')
     a.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
     spec=json.loads(a.profile.read_text());names=spec['joint_names']; n=len(names)
     snapshot=json.loads(a.snapshot.read_text());candidate=json.loads(a.candidate.read_text())
@@ -65,7 +69,7 @@ def main():
     prep_kp=np.asarray([special.get(name,{}).get('kp',gains['default_kp']) for name in names])
     prep_kd=np.asarray([special.get(name,{}).get('kd',gains['default_kd']) for name in names])
     path=QuinticPose(raw,ref,np.full(n,.35),np.full(n,.4),minimum_duration=8.)
-    thresholds=EntryThresholds(.08,.12,.20,.15,.5,12.,.031,10,1.)
+    thresholds=EntryThresholds(.08,.12,.20,a.diagnostic_handover_tilt or .15,.5,12.,.031,10,1.)
     entry=EntryController(path,thresholds,prep_kp,prep_kd,kp,kd)
     compensator=PreparationLoadCompensator(prep_kp,prep_kd,np.max(np.abs(limits),axis=1),
                     integral_gain=.3,max_bias_speed=.08,effort_fraction=.5) if a.load_compensation else None
@@ -175,7 +179,8 @@ def main():
     result={'scope':__doc__,'mujoco_version':mujoco.__version__,'sha256':{k:sha(getattr(a,k)) for k in ('scene','profile','policy','snapshot','candidate','prep_gains')},
             'support':{'fraction_preload':a.support_fraction,'attachment_body':'torso_link','attachment_local':local_attach.tolist(),
                 'spring_n_m':a.spring,'damping_ns_m':damping,'anchor_world':anchor.tolist(),'initial_rest_length_m':rest,'unload':a.unload,
-                'unload_model':'after active+3s, lengthen cable .5m over5s; fixed ceiling anchor, unilateral tension only',
+                'unload_model':('after supported joint settling' if a.unload_before_handover else 'after active+3s')+
+                               ', lengthen cable .5m over5s; fixed ceiling anchor, unilateral tension only',
                 'hardware_geometry_or_stiffness_validated':False},
             'initial_outside_file_envelope':initial_outside,'prep_duration_s':path.duration,'thresholds_sim_only':vars(thresholds),
             'prep_gain_source':'device SDK example, used only as a simulation candidate',
@@ -183,6 +188,8 @@ def main():
             'orientation_assist_sim_only':a.orientation_assist,
             'orientation_assist_axes':'body-frame foot rotational Jacobian; no hardcoded ankle sign',
             'support_transfer_before_handover':a.unload_before_handover,'support_transfer_start_s':unload_start,
+            'counterfactual_capture_test':a.diagnostic_handover_tilt is not None,
+            'counterfactual_scope':'Simulation entry gate experiment only; does not change hardware thresholds or approval',
             'previous_action_history':'actual commanded PD target, normalized by selected action default/scale; no invented history',
             'events':events,'failure':failure,'frames':len(rows),'active_start_s':active_start,
             'active_seconds':0. if active_start is None or not rows else rows[-1]['time_s']-active_start,
