@@ -145,12 +145,16 @@ def main():
                 states.settimeout(.1)
                 data = json.loads(raw)
                 sample_now = time.monotonic()
-                joints, stamps = [], []
+                joints, stamps, effort_by_name = [], [], {}
                 for group in ('leg', 'waist', 'head', 'arm'):
                     block = data['groups'][group]
                     if block['domain'] != 0: raise ValueError('simulator joint domain error')
                     for name, q, v, err in block['joints']:
                         joints.append(JointSample(name, q, v, err)); stamps.append(block['time'])
+                    for name, effort in block.get('efforts', []):
+                        if name in effort_by_name or not math.isfinite(effort):
+                            raise ValueError('invalid simulator effort sample')
+                        effort_by_name[name] = effort
                 state = State(tuple(joints), tuple(stamps), data['imu']['time'], tuple(data['imu']['q']), tuple(data['imu']['w']))
                 ordered = order_and_validate(state, contract, sample_now)
                 odom = data['odom']; position, quat = odom['position'], odom['q']
@@ -208,6 +212,8 @@ def main():
                        'odom_age_s': odom_age,
                        'packet_age_s': sample_now-data['time'],
                        'loop_processing_s': time.monotonic()-now,
+                       'body_angular_velocity': state.angular_velocity,
+                       'joint_effort': [effort_by_name[n] for n in names] if set(effort_by_name)==set(names) else None,
                        'joint_pos': q, 'joint_vel': qvel, 'target': target,
                        'goal_current': window[0].tolist(), 'anchor': goal[-9:].tolist(),
                        'future_overlap_error': overlap_error,

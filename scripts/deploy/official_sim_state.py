@@ -37,7 +37,8 @@ def main():
 
         def joint(self, group, msg):
             self.groups[group] = {'time': time.monotonic(), 'domain': msg.state.value,
-                                  'joints': [[j.name, j.position, j.velocity, j.error_code] for j in msg.joints]}
+                                  'joints': [[j.name, j.position, j.velocity, j.error_code] for j in msg.joints],
+                                  'efforts': [[j.name, j.effort] for j in msg.joints]}
 
         def on_imu(self, msg):
             q, w = msg.orientation, msg.angular_velocity
