@@ -28,6 +28,8 @@ def main():
     for name in ('scene', 'profile', 'dataset', 'policy', 'out'):
         p.add_argument('--' + name, type=Path, required=True)
     p.add_argument('--hold-seconds', type=float, default=30.)
+    p.add_argument('--seed-frames', type=Path, help='Official trace; approximate snapshot initialization only')
+    p.add_argument('--seed-time', type=float, default=0.)
     a = p.parse_args()
     if a.out.exists() or a.hold_seconds < 5:
         raise ValueError('New output and at least 5 seconds of hold required')
@@ -66,12 +68,23 @@ def main():
         roll,pitch,_ = Rotation.from_quat(quat).as_euler('xyz')
         initial_rot = Rotation.from_euler('xyz',[roll,pitch,0]).as_quat()[[3,0,1,2]]
     initial_pos[:2] = 0.
+    seed = None
+    if a.seed_frames:
+        with a.seed_frames.open() as f:
+            seed = next((row for line in f if (row := json.loads(line))['elapsed'] >= a.seed_time), None)
+        if seed is None or len(seed['joint_pos']) != n or len(seed['joint_vel']) != n:
+            raise ValueError('Missing or invalid seed frame')
+        initial_pos = np.asarray(seed['root'], dtype=float)
+        initial_rot = np.asarray(seed['q'], dtype=float)
+        initial_q = np.asarray(seed['joint_pos'], dtype=float)
     policy = TorchScriptPolicy(a.policy)
     a.out.mkdir(parents=True)
     outputs = {}
     substeps = round(.02/m.opt.timestep)
     for scenario in ('direct', 'post_jog'):
         d = mujoco.MjData(m); d.qpos[:7] = np.r_[initial_pos, initial_rot]; d.qpos[qadr] = initial_q
+        if seed is not None:
+            d.qvel[vadr] = seed['joint_vel']
         mujoco.mj_forward(m,d)
         goal = SkillGoal(a.dataset, a.profile, initial_pos, initial_rot)
         history = deque(maxlen=10); previous = np.zeros(n); target = initial_q.copy()
@@ -143,7 +156,9 @@ def main():
             'dataset_manifest_sha256':sha(a.dataset/'manifest.json'),
             'scope':'native MuJoCo CPU, same XML and independent PD implementation; actual solver contact forces, not official ROS simulator or hardware',
             'force_time_alignment':'last pre-integration solve, with post-integration joint and root states',
-            'hold_load_threshold_n':10.}
+            'hold_load_threshold_n':10.,
+            'seed': None if seed is None else {'trace':str(a.seed_frames), 'elapsed':seed['elapsed'],
+                 'limitations':'Approximate snapshot only: root velocity and prior policy history are unavailable; first 10 samples use held target.'}}
     (a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n'); print(json.dumps(result,indent=2))
 
 
