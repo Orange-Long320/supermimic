@@ -96,9 +96,24 @@ def main():
             stop.append({'skill':modes[i-1],'time_s':float(ts[i]),
                          'imu_only_relative_4s_error_m':float(np.linalg.norm((imu[k,:2]-imu[j,:2])-actual)),
                          'fusion_relative_4s_error_m':float(np.linalg.norm((est[k,:2]-est[j,:2])-actual))})
+    # Measure displacement error from each mode change without resetting the
+    # estimator. This separates motion errors from previously accumulated drift.
+    grid_mode = np.asarray([modes[min(len(modes)-1, max(0, j-1))]
+                            for j in np.searchsorted(ts, grid, side='right')])
+    cuts = np.r_[0, np.flatnonzero(grid_mode[1:] != grid_mode[:-1])+1, len(grid)]
+    segments = []
+    for begin, end in zip(cuts[:-1], cuts[1:]):
+        if end-begin < 2:
+            continue
+        delta = (est[begin:end,:2]-est[begin,:2])-(xy[begin:end]-xy[begin])
+        segment_error = np.linalg.norm(delta,axis=1)
+        segments.append({'mode':str(grid_mode[begin]), 'start_s':float(grid[begin]),
+                         'duration_s':float(grid[end-1]-grid[begin]),
+                         'end_displacement_error_m':float(segment_error[-1]),
+                         'max_displacement_error_m':float(segment_error.max())})
     report = {'seconds':float(grid[-1]-grid[0]),'samples':len(grid),
               'imu_only_xy_error':metrics(imu[:,:2]),'fusion_xy_error':metrics(est[:,:2]),
-              'foot_updates':accepted,'foot_switches':switches,'stop_windows':stop,
+              'foot_updates':accepted,'foot_switches':switches,'stop_windows':stop,'segments':segments,
               'simulation':'Recorded official simulation ROS IMU specific force and orientation, 50 Hz trace resampled by offline interpolation; recorded joint positions; no ground-truth acceleration used',
               'max_trace_gap_s':float(np.max(np.diff(ts))),
               'imu_age_p95_s':float(np.percentile([r['imu_age_s'] for r in rows],95)),
