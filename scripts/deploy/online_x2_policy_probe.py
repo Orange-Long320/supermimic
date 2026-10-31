@@ -140,8 +140,9 @@ def main():
                         tracker.yaw = tracker.rotation(quat).as_euler('xyz')[2]; initialized = True
                     if len(history) < 10: continue
                     obs = np.concatenate([frame[term] for term in range(5) for frame in history])
-                    goal = tracker.goal(pose['position'], quat, q, 'stand', joint_velocity=qd,
-                                        sample_time=pose['stamp'], base_angular_velocity=omega)
+                    # The selected ac6c755 runtime has the original four-argument
+                    # baseline goal interface; retain that exact scheduler.
+                    goal = tracker.goal(pose['position'], quat, q, 'stand')
                     if obs.shape != (990,) or goal.shape != (729,) or not np.isfinite(np.r_[obs, goal]).all():
                         raise RuntimeError('Unexpected or invalid model input')
                     begin = time.perf_counter(); action = np.asarray(policy.infer(obs, goal))
@@ -181,7 +182,7 @@ def main():
                          'No hardware motor controller or independent fault handover implemented']}
         (args.out/'report.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')
         print(json.dumps(report, indent=2, allow_nan=False))
-        tracker.close(); node.destroy_node(); rclpy.try_shutdown()
+        node.destroy_node(); rclpy.try_shutdown()
     if fatal or frames == 0: raise SystemExit(1)
 
 
