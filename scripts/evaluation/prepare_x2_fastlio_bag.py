@@ -6,6 +6,7 @@ independent verification. This script never connects to the live robot.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -80,9 +81,33 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--point-time-scale', type=float, required=True,
                         help='explicit candidate conversion to seconds; e.g. 1e-9 for ns')
+    parser.add_argument('--timing-audit', type=Path,
+                        help='packet audit directory; binds this bag and selects paired clouds')
+    parser.add_argument('--cloud-stamp-mode', choices=['host', 'raw_sensor'], default='host')
     args = parser.parse_args()
     if not np.isfinite(args.point_time_scale) or args.point_time_scale <= 0:
         parser.error('point time scale must be positive and finite')
+    if args.cloud_stamp_mode != 'host' and args.timing_audit is None:
+        parser.error('raw sensor cloud stamps require a matching packet timing audit')
+    raw_anchors = None
+    if args.timing_audit:
+        audit = json.loads((args.timing_audit / 'report.json').read_text())
+        if (not audit['paired_raw_cloud_frames'] or audit['mismatched_frames'] or
+                audit['exact_point_time_and_ring_matches'] != audit['paired_raw_cloud_frames'] or
+                audit.get('point_time_unit') != 'nanosecond' or args.point_time_scale != 1e-9):
+            raise ValueError('Packet audit does not verify the point time interpretation')
+        hashes = {}
+        for path in sorted(args.bag.glob('*.db3')):
+            digest = hashlib.sha256()
+            with path.open('rb') as stream:
+                for block in iter(lambda: stream.read(1024*1024), b''):
+                    digest.update(block)
+            hashes[path.name] = digest.hexdigest()
+        if not hashes or hashes != audit.get('source_db_sha256'):
+            raise ValueError('Packet audit belongs to a different bag')
+        raw_anchors = {row['cloud_header_ns']: row['sensor_scan_base_ns']
+                       for row in json.loads((args.timing_audit / 'frames.json').read_text())
+                       if not row.get('unpaired')}
     args.out.mkdir(parents=True, exist_ok=False)
     import rosbag2_py
     import yaml
@@ -103,13 +128,20 @@ def main():
     imu_bounds = []
     frames = set()
     extrinsic = None
+    skipped_unpaired_clouds = 0
     while reader.has_next():
         topic, raw, received = reader.read_next()
         if topic == LIDAR:
             msg = deserialize_message(raw, PointCloud2)
             if msg.header.frame_id != 'lidar_chest_front':
                 raise ValueError('Unexpected lidar frame')
+            host_stamp = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+            if raw_anchors is not None and host_stamp not in raw_anchors:
+                skipped_unpaired_clouds += 1
+                continue
             msg, interval = convert_cloud(msg, args.point_time_scale)
+            if args.cloud_stamp_mode == 'raw_sensor':
+                msg.header.stamp.sec, msg.header.stamp.nanosec = divmod(raw_anchors[host_stamp], 10**9)
             times.append(interval)
             writer.write(CLOUD_OUT, serialize_message(msg), received)
             counts['cloud'] += 1
@@ -154,6 +186,11 @@ def main():
               'imu_acceleration_norm_minmax': [min(imu_bounds), max(imu_bounds)],
               'static_frame_pairs': sorted(frames), 'extrinsic_T': extrinsic[0],
               'extrinsic_R': extrinsic[1], 'candidate_point_time_scale': args.point_time_scale,
+              'point_time_semantics_verified': raw_anchors is not None,
+              'cloud_stamp_mode': args.cloud_stamp_mode,
+              'timing_audit': str(args.timing_audit) if args.timing_audit else None,
+              'skipped_unpaired_clouds': skipped_unpaired_clouds,
+              'imu_stamp_mode': 'native_host_header_unchanged',
               'time_semantics_verified': False, 'motion_accuracy_validated': False,
               'scope': 'offline exploratory configuration; no prior map or leg odometry input; '
                        'pose is IMU frame, not pelvis; no robot control'}

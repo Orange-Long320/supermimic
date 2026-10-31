@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
 import struct
 from pathlib import Path
@@ -181,7 +182,18 @@ def main():
         comparisons.append(row)
     paired = [r for r in comparisons if not r.get('unpaired')]
     mismatched = [r for r in paired if r['missing_from_cloud'] or r['unexplained_cloud_points']]
-    report = {'source_bag': str(args.bag), 'raw_frames': len(raws), 'cloud_frames': len(clouds),
+    db_hashes = {}
+    for path in sorted(args.bag.glob('*.db3')):
+        digest = hashlib.sha256()
+        with path.open('rb') as stream:
+            for block in iter(lambda: stream.read(1024*1024), b''):
+                digest.update(block)
+        db_hashes[path.name] = digest.hexdigest()
+    report = {'source_bag': str(args.bag.resolve()), 'source_db_sha256': db_hashes,
+              'driver_sha256': '834074532c6df0879fb5ca01ed863156f285fd54245a5284a80a210d0b53ff3e',
+              'point_time_unit': 'nanosecond',
+              'point_time_origin': 'first_accepted_msop_packet_sensor_time',
+              'raw_frames': len(raws), 'cloud_frames': len(clouds),
               'imu_samples': len(imus), 'paired_raw_cloud_frames': len(paired),
               'exact_point_time_and_ring_matches': len(paired)-len(mismatched),
               'mismatched_frames': mismatched[:5], 'matched_difop_imu_samples': matched_imu,
