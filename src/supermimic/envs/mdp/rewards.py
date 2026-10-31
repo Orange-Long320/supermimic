@@ -17,7 +17,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from mjlab.utils.lab_api.math import quat_apply, quat_box_minus, quat_inv, quat_mul, yaw_quat
+from mjlab.utils.lab_api.math import quat_apply, quat_conjugate, quat_inv, quat_mul, yaw_quat
+
+from supermimic.kinematics.rotations import rotvec_from_quat
 
 
 @dataclass
@@ -68,7 +70,11 @@ def reanchor_reference(
 
 def _sq_quat_err(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     """Squared geodesic angle between quaternions, smooth at zero (== quat_error_magnitude**2)."""
-    v = quat_box_minus(q1, q2)
+    # mjlab's axis_angle_from_quat evaluates sin(half_angle)/angle even in
+    # the inactive Taylor branch. At identical rotations this is 0/0 and
+    # poisons autograd despite a finite zero forward error. Our logarithm
+    # uses a safe denominator in that branch, preserving the same geodesic.
+    v = rotvec_from_quat(quat_mul(q1, quat_conjugate(q2)))
     return (v * v).sum(-1)
 
 

@@ -35,9 +35,13 @@ class Trace:
 
     def check(self, stage, values):
         import torch
-        bad={k:v for k,v in values.items() if torch.is_tensor(v) and not torch.isfinite(v).all()}
-        if not bad:
+        tensors=[(k,v) for k,v in values.items() if torch.is_tensor(v)]
+        if not tensors:
             return
+        flags=torch.stack([torch.isfinite(v).all() for _,v in tensors])
+        if bool(flags.all()):
+            return
+        bad={k:v for (k,v),ok in zip(tensors,flags.cpu().tolist()) if not ok}
         if self.captured:
             raise NonfiniteCapture(stage)
         self.captured=True
@@ -57,8 +61,11 @@ class Trace:
         metadata=dict(stage=stage,iteration=self.trainer.iteration if self.trainer else None,
                       updates=self.trainer.num_updates if self.trainer else None,bad=stats)
         (target/'stage.json').write_text(json.dumps(metadata,indent=2)+'\n')
+        heads=self.trainer.wm.heads if self.trainer else None
         torch.save(cpu(dict(values=values,wm_batch=self.wm_batch,start_batch=self.start_batch,
-                            rollout=self.rollout,rng=self.rng)),target/'batch.pt')
+                            rollout=self.rollout,rng=self.rng,
+                            soft_limits=heads.soft_limits if heads else None,
+                            default_joint_pos=heads.default_joint_pos if heads else None)),target/'batch.pt')
         if self.trainer:
             self.trainer.save('pre-nonfinite.pt')
         print(json.dumps(metadata),flush=True)
@@ -121,6 +128,7 @@ def main():
     parser.add_argument('--seconds',type=float,default=600)
     parser.add_argument('--steps',type=int,default=1000)
     parser.add_argument('--compiled',action='store_true')
+    parser.add_argument('--legacy-rotation-loss',action='store_true',help='Diagnostic control: restore the old quaternion-error formula')
     args=parser.parse_args()
     if args.out.exists() or args.seconds<=0 or args.steps<=40:
         raise ValueError('New output and bounded diagnostic after replay warmup required')
@@ -133,6 +141,10 @@ def main():
     import torch
     from supermimic.config import TrainConfig
     from supermimic.training.loop import Trainer
+    if args.legacy_rotation_loss:
+        from supermimic.envs.mdp import rewards
+        from mjlab.utils.lab_api.math import quat_box_minus
+        rewards._sq_quat_err=lambda q1,q2:quat_box_minus(q1,q2).square().sum(-1)
     torch.set_num_threads(2)
     total,free=map(int,subprocess.check_output(['nvidia-smi','-i',str(args.gpu),
         '--query-gpu=memory.total,memory.free','--format=csv,noheader,nounits'],text=True).strip().split(','))
@@ -158,7 +170,8 @@ def main():
     cfg.wm_trainer.compile=cfg.policy_trainer.compile='default' if args.compiled else None
     args.out.mkdir(parents=True)
     record=dict(status='initializing',pid=os.getpid(),gpu=args.gpu,source_iteration=ck['iteration'],
-                argv=sys.argv,compiled=args.compiled,torch_memory_gib=5.5,free_memory_interrupt_enabled=False)
+                argv=sys.argv,compiled=args.compiled,legacy_rotation_loss=args.legacy_rotation_loss,
+                torch_memory_gib=5.5,free_memory_interrupt_enabled=False)
     del ck
     save=lambda:(args.out/'diagnostic.json').write_text(json.dumps(record,indent=2)+'\n')
     save();trace=Trace(args.out);trace.install();trainer=None;started=time.time()

@@ -73,10 +73,12 @@ class PolicyTrainer:
             v_H = None
         J = policy_objective(ro, v_H, cfg.gamma)
         loss = -J / cfg.horizon
+        if not torch.isfinite(loss):
+            raise FloatingPointError('Non-finite imagined policy loss before optimizer update')
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         allreduce_grads(self.policy)
-        gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.grad_clip_norm)
+        gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.grad_clip_norm, error_if_nonfinite=True)
         torch.nn.utils.clip_grad_value_(self.policy.parameters(), cfg.grad_clip_value)
         self.opt.step()
         self.wm.requires_grad_(True)
@@ -116,10 +118,12 @@ class PolicyTrainer:
                     idx = perm[i * mb : (i + 1) * mb]
                     pred = self.critic(X_feat[idx], X_goal[idx], X_xi[idx], X_er[idx])
                     closs = torch.nn.functional.mse_loss(pred, Y[idx])
+                    if not torch.isfinite(closs):
+                        raise FloatingPointError('Non-finite critic loss before optimizer update')
                     self.critic_opt.zero_grad(set_to_none=True)
                     closs.backward()
                     allreduce_grads(self.critic)
-                    torch.nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.critic_grad_clip)
+                    torch.nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.critic_grad_clip, error_if_nonfinite=True)
                     self.critic_opt.step()
                     last = closs.detach()
             metrics["critic_loss"] = float(last)
