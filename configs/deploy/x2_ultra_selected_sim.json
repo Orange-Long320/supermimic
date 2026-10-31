@@ -1,0 +1,10 @@
+{
+  "scope": "isolated official simulation only; not approved for hardware",
+  "selection": "user-selected original checkpoint tracking the parallel-foot candidate shown in the screenshot",
+  "checkpoint_iteration": 11500,
+  "checkpoint_sha256": "ff1f91d33631530d9d7f90f9f0675359fa1bff18445df43449312b9cb85db34b",
+  "policy": "/home/2025-Long.xh/HHD/data/supermimic/logs/x2_deploy_foundation_20261030_r1/export/policy.pt",
+  "policy_sha256": "4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c",
+  "dataset": "/home/2025-Long.xh/HHD/data/supermimic/logs/jog_parallel_stance_20261031_r1/reference/dataset",
+  "dataset_manifest_sha256": "40a2a31c1b84160f2ea6aa26548eb966f2e3c9ec23e10fa46ec1e9b2532b5b7d"
+}
