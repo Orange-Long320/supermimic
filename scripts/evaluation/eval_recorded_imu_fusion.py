@@ -40,6 +40,8 @@ def main():
     if not all('imu_linear_acceleration' in r and 'imu_orientation_wxyz' in r for r in rows):
         raise ValueError('Recorded acceleration and IMU orientation required')
     specific_body = interp(np.array([r['imu_linear_acceleration'] for r in rows]))
+    if specific_body.shape != (len(grid),3) or not np.isfinite(specific_body).all():
+        raise ValueError('Invalid recorded acceleration')
     measured_world = rot.apply(specific_body)+np.array([0.,0.,-9.81])
     m = mujoco.MjModel.from_xml_path(str(a.scene)); d = mujoco.MjData(m)
     names = json.loads(a.profile.read_text())['joint_names']
@@ -100,6 +102,7 @@ def main():
               'simulation':'Recorded official simulation ROS IMU specific force and orientation, 50 Hz trace resampled by offline interpolation; recorded joint positions; no ground-truth acceleration used',
               'max_trace_gap_s':float(np.max(np.diff(ts))),
               'imu_age_p95_s':float(np.percentile([r['imu_age_s'] for r in rows],95)),
+              'imu_age_max_s':float(max(r['imu_age_s'] for r in rows)),
               'limitations':'Offline replay with guessed foot support, resampling and simulator IMU; no measured contact, no physical hardware validation, no control integration.'}
     a.out.write_text(json.dumps(report,indent=2)+'\n'); print(json.dumps(report,indent=2))
 
