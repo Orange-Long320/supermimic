@@ -124,5 +124,12 @@ class DeploymentCoreTest(unittest.TestCase):
             with self.assertRaises(DeploymentError):
                 ShadowController(self.spec, self.policy, Goals(), startup=startup)
 
+    def test_startup_match_rejects_incomplete_or_nonfinite_samples(self):
+        ordered = tuple(reversed(self.ready_state().joints))
+        for joints in (ordered[:1], tuple(reversed(ordered)),
+                       (replace(ordered[0], position=float('nan')), ordered[1])):
+            with self.assertRaises(DeploymentError): self.startup().matches(joints, (0., 0., -1.))
+        with self.assertRaises(DeploymentError): self.startup().matches(ordered, (float('nan'), 0., -1.))
+
 
 if __name__ == '__main__': unittest.main()

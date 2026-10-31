@@ -2,6 +2,74 @@
 import numpy as np
 
 
+class UrdfPelvisMount:
+    """Measured-joint pelvis-to-IMU FK from a device URDF and native mount TF.
+
+    This selects geometry only. It does not establish encoder calibration,
+    modify measurements, align the world frame, or register floor height.
+    """
+    def __init__(self, urdf, joint_names, p_torso_imu, r_torso_imu, torso='torso_link'):
+        import xml.etree.ElementTree as ET
+        from scipy.spatial.transform import Rotation
+        self.rotation = Rotation
+        self.names = tuple(joint_names)
+        if not self.names or len(set(self.names)) != len(self.names):
+            raise ValueError('Invalid named joint mapping')
+        self.p_mount = np.asarray(p_torso_imu, dtype=float).copy()
+        self.r_mount = np.asarray(r_torso_imu, dtype=float).copy()
+        if (self.p_mount.shape != (3,) or self.r_mount.shape != (3, 3)
+                or not np.isfinite(self.p_mount).all() or not np.isfinite(self.r_mount).all()
+                or not np.allclose(self.r_mount.T@self.r_mount, np.eye(3), atol=1e-8)
+                or not np.isclose(np.linalg.det(self.r_mount), 1., atol=1e-8)):
+            raise ValueError('Invalid native mount transform')
+        by_child = {}
+        for joint in ET.parse(urdf).getroot().findall('joint'):
+            child = joint.find('child').get('link')
+            if child in by_child:
+                raise ValueError('Duplicate URDF child')
+            by_child[child] = joint
+        chain, visited = [], set()
+        child = torso
+        while child != 'pelvis':
+            if child in visited or child not in by_child:
+                raise ValueError('Torso is not connected to pelvis')
+            visited.add(child)
+            joint = by_child[child]
+            kind = joint.get('type')
+            if kind not in ('fixed', 'revolute', 'continuous'):
+                raise ValueError('Unsupported waist joint type')
+            origin = joint.find('origin')
+            xyz = np.fromstring(origin.get('xyz', '0 0 0'), sep=' ') if origin is not None else np.zeros(3)
+            rpy = np.fromstring(origin.get('rpy', '0 0 0'), sep=' ') if origin is not None else np.zeros(3)
+            axis_node = joint.find('axis')
+            axis = np.fromstring(axis_node.get('xyz', '1 0 0'), sep=' ') if axis_node is not None else np.array([1., 0., 0.])
+            if any(v.shape != (3,) or not np.isfinite(v).all() for v in (xyz, rpy, axis)):
+                raise ValueError('Invalid URDF transform')
+            index = None
+            if kind != 'fixed':
+                if joint.find('mimic') is not None or np.linalg.norm(axis) < 1e-8:
+                    raise ValueError('Unsupported waist axis or mimic joint')
+                index = self.names.index(joint.get('name'))
+                axis = axis/np.linalg.norm(axis)
+            chain.append((xyz, Rotation.from_euler('xyz', rpy).as_matrix(), axis, index))
+            child = joint.find('parent').get('link')
+        self.chain = tuple(reversed(chain))
+
+    def mount(self, positions, velocities=None):
+        q = np.asarray(positions, dtype=float)
+        qd = np.zeros_like(q) if velocities is None else np.asarray(velocities, dtype=float)
+        if q.shape != (len(self.names),) or qd.shape != q.shape or not np.isfinite(np.r_[q, qd]).all():
+            raise ValueError('Invalid named joint values')
+        p, r, omega = np.zeros(3), np.eye(3), np.zeros(3)
+        for xyz, origin_r, axis, index in self.chain:
+            p = p+r@xyz
+            r = r@origin_r
+            if index is not None:
+                omega += (r@axis)*qd[index]
+                r = r@self.rotation.from_rotvec(axis*q[index]).as_matrix()
+        return p+r@self.p_mount, r@self.r_mount, omega
+
+
 def gravity_level_rotation(up):
     """Minimal rotation taking static specific-force direction to world +Z."""
     v=np.asarray(up,dtype=float)

@@ -15,7 +15,7 @@ import time
 import numpy as np
 import mujoco
 from scipy.spatial.transform import Rotation
-from supermimic.deploy.pelvis_state import pelvis_from_imu, pelvis_angular_velocity, gravity_level_rotation, latest_causal
+from supermimic.deploy.pelvis_state import UrdfPelvisMount, pelvis_from_imu, pelvis_angular_velocity, gravity_level_rotation, latest_causal
 from supermimic.deploy.torch_policy import TorchScriptPolicy
 
 
@@ -35,6 +35,11 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for key in ('root','profile','dataset','policy','out'):
         parser.add_argument('--'+key,type=Path,required=True)
+    geometry=parser.add_mutually_exclusive_group(required=True)
+    geometry.add_argument('--mount-urdf', type=Path,
+                          help='Device URDF for pelvis-to-torso FK; policy/anchor FK stays on the training model')
+    geometry.add_argument('--legacy-training-mount', action='store_true',
+                          help='Explicitly reproduce the previous training-model mount FK for comparison only')
     parser.add_argument('--diagnose-out-of-range',action='store_true',
                         help='logging-only model probe with unchanged out-of-range joints; never validates inputs')
     a=parser.parse_args(); a.out.mkdir(parents=True,exist_ok=False)
@@ -79,6 +84,9 @@ def main():
             jac=np.zeros((3,model.nv));mujoco.mj_jacBody(model,data,None,jac,torso)
             omega=jac[:,vaddr]@qd
         return ppi,rpi,omega
+    if a.mount_urdf is not None:
+        native_mount=UrdfPelvisMount(a.mount_urdf,names,ptl+rtl@pli,rtl@rli)
+        mount=native_mount.mount
     feet=[]
     for name in ('foot_6_collision','foot_12_collision'):
         gid=mujoco.mj_name2id(model,mujoco.mjtObj.mjOBJ_GEOM,name)
@@ -269,6 +277,9 @@ def main():
             'capture_condition':'user: suspended for protection, soles touching ground',
             'selected_checkpoint':11500,'policy_sha256':digest(a.policy),'profile_sha256':digest(a.profile),
             'model_xml_sha256':digest(model_path),'dataset_manifest_sha256':digest(a.dataset/'manifest.json'),
+            'mount_fk_source':'device URDF' if a.mount_urdf is not None else 'training model (legacy diagnostic)',
+            'mount_urdf_sha256':digest(a.mount_urdf) if a.mount_urdf is not None else None,
+            'policy_anchor_fk_source':'unchanged training model',
             'raw_bag_sha256':digest(root/'capture_latest/bag/bag_0.db3'),
             'observation_dim':990,'goal_dim':729,'action_dim':31,'joint_names':names,
             'frequency_hz':50,'history_frames':10,'invented_startup_history':False,

@@ -104,6 +104,9 @@ class StartupPose:
             raise DeploymentError('invalid startup gravity')
 
     def matches(self, joints, gravity):
+        if (tuple(j.name for j in joints) != self.names or len(gravity) != 3 or not finite(gravity)
+                or any(j.error_code or not finite((j.position, j.velocity)) for j in joints)):
+            raise DeploymentError('invalid startup sample')
         if any(abs(j.position-q) > tolerance or abs(j.velocity) > speed
                for j, q, tolerance, speed in zip(joints, self.position, self.position_tolerance, self.max_speed)):
             return False
