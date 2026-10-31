@@ -4,11 +4,13 @@ Server-only bounded reproduction. Normal updates, losses and samples are unchang
 """
 import argparse
 from dataclasses import asdict, is_dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -17,8 +19,9 @@ class NonfiniteCapture(RuntimeError):
 
 
 class Trace:
-    def __init__(self, out):
+    def __init__(self, out, light=False):
         self.out=out
+        self.light=light
         self.trainer=None
         self.owner={}
         self.wm_batch=None
@@ -79,13 +82,13 @@ class Trace:
         trace=self
         add=ReplayBuffer.add
         def checked_add(buffer,env_ids,**values):
-            trace.check('replay_write',dict(env_ids=env_ids,**values))
+            if not trace.light:trace.check('replay_write',dict(env_ids=env_ids,**values))
             return add(buffer,env_ids,**values)
         ReplayBuffer.add=checked_add
         loss_on=WorldModelTrainer.loss_on
         def checked_loss(owner,batch):
             trace.wm_batch=batch
-            trace.check('wm_input',vars(batch))
+            if not trace.light:trace.check('wm_input',vars(batch))
             result=loss_on(owner,batch)
             trace.check('wm_loss',dict(loss=result[0],**result[1]))
             return result
@@ -95,13 +98,13 @@ class Trace:
             batch=starts(buffer,n,hist)
             trace.start_batch=batch
             trace.rng=dict(cpu=torch.get_rng_state(),cuda=torch.cuda.get_rng_state())
-            trace.check('policy_input',vars(batch))
+            if not trace.light:trace.check('policy_input',vars(batch))
             return batch
         ReplayBuffer.sample_starts=checked_starts
         objective=pi.policy_objective
         def checked_objective(rollout,*args,**kwargs):
             trace.rollout=rollout
-            trace.check('imagined_rollout',{k:v for k,v in vars(rollout).items() if torch.is_tensor(v)})
+            if not trace.light:trace.check('imagined_rollout',{k:v for k,v in vars(rollout).items() if torch.is_tensor(v)})
             value=objective(rollout,*args,**kwargs)
             trace.check('policy_objective',{'objective':value})
             return value
@@ -114,10 +117,22 @@ class Trace:
         clip=torch.nn.utils.clip_grad_norm_
         def checked_clip(parameters,*args,**kwargs):
             params=[parameters] if torch.is_tensor(parameters) else list(parameters)
-            trace.check('raw_gradient',{trace.owner.get(id(p),str(i)):p.grad
-                                        for i,p in enumerate(params) if p.grad is not None})
-            return clip(params,*args,**kwargs)
+            values={trace.owner.get(id(p),str(i)):p.grad for i,p in enumerate(params) if p.grad is not None}
+            if not trace.light:trace.check('raw_gradient',values)
+            try:return clip(params,*args,**kwargs)
+            except RuntimeError:
+                if trace.light:
+                    norms=torch.stack([v.norm() for v in values.values()])
+                    trace.check('raw_gradient',dict(total_norm=norms.norm(),**values))
+                raise
         torch.nn.utils.clip_grad_norm_=checked_clip
+        mse=torch.nn.functional.mse_loss
+        def checked_mse(prediction,target,*args,**kwargs):
+            loss=mse(prediction,target,*args,**kwargs)
+            if not torch.isfinite(loss):
+                trace.check('critic_loss',dict(loss=loss,prediction=prediction,target=target))
+            return loss
+        torch.nn.functional.mse_loss=checked_mse
 
 
 def main():
@@ -129,9 +144,12 @@ def main():
     parser.add_argument('--steps',type=int,default=1000)
     parser.add_argument('--compiled',action='store_true')
     parser.add_argument('--legacy-rotation-loss',action='store_true',help='Diagnostic control: restore the old quaternion-error formula')
+    parser.add_argument('--recovery',action='store_true',help='Full finite-checkpoint recovery with light failure capture and a time budget')
     args=parser.parse_args()
     if args.out.exists() or args.seconds<=0 or args.steps<=40:
         raise ValueError('New output and bounded diagnostic after replay warmup required')
+    if args.recovery and (not args.compiled or args.legacy_rotation_loss):
+        raise ValueError('Recovery requires both compilers and the repaired rotation loss')
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():
         raise ValueError('Dedicated server interpreter required')
     if os.environ.get('CUDA_VISIBLE_DEVICES')!=str(args.gpu):
@@ -153,6 +171,9 @@ def main():
     ck=torch.load(args.checkpoint,map_location='cpu',weights_only=False)
     if not all(torch.isfinite(v).all() for key in ('wm','policy','critic') for v in ck[key].values() if torch.is_tensor(v)):
         raise ValueError('Diagnostic source already nonfinite')
+    for key in ('wm_opt','policy_opt','critic_opt'):
+        if not all(torch.isfinite(v).all() for state in ck[key]['state'].values() for v in state.values() if torch.is_tensor(v)):
+            raise ValueError('Source optimizer already nonfinite')
     def restore(obj,values):
         for k,v in values.items():
             current=getattr(obj,k)
@@ -171,23 +192,43 @@ def main():
     args.out.mkdir(parents=True)
     record=dict(status='initializing',pid=os.getpid(),gpu=args.gpu,source_iteration=ck['iteration'],
                 argv=sys.argv,compiled=args.compiled,legacy_rotation_loss=args.legacy_rotation_loss,
-                torch_memory_gib=5.5,free_memory_interrupt_enabled=False)
+                phase='recovery' if args.recovery else 'diagnostic',
+                checkpoint_input=str(args.checkpoint),checkpoint_input_sha256=hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
+                dataset_sha256=hashlib.sha256((args.dataset/'manifest.json').read_bytes()).hexdigest(),
+                configuration=asdict(cfg),torch_memory_gib=5.5,shared_gpu=True,
+                minimum_free_interrupt_mib=0,free_memory_interrupt_enabled=False,physics_validated=False)
     del ck
-    save=lambda:(args.out/'diagnostic.json').write_text(json.dumps(record,indent=2)+'\n')
-    save();trace=Trace(args.out);trace.install();trainer=None;started=time.time()
+    save=lambda:(args.out/('result.json' if args.recovery else 'diagnostic.json')).write_text(json.dumps(record,indent=2,default=str)+'\n')
+    save();trace=Trace(args.out,light=args.recovery);trace.install();trainer=None;started=time.time()
+    stop=threading.Event();memory=[]
+    def monitor():
+        while not stop.is_set():
+            try:memory.append(int(subprocess.check_output(['nvidia-smi','-i',str(args.gpu),'--query-gpu=memory.used','--format=csv,noheader,nounits'],text=True,timeout=5).strip()))
+            except (ValueError,subprocess.SubprocessError):pass
+            stop.wait(1)
+    watcher=threading.Thread(target=monitor,daemon=True);watcher.start()
     try:
         trainer=Trainer(cfg);trace.attach(trainer)
         record.update(status='running',training_started_epoch=time.time());save()
-        trainer.run();record.update(status='completed_without_reproduction',iteration=trainer.iteration,updates=trainer.num_updates)
+        trainer.run();record.update(status='completed' if args.recovery else 'completed_without_reproduction',iteration=trainer.iteration,updates=trainer.num_updates)
+        checkpoint=args.out/'ckpt_latest.pt'
+        saved=torch.load(checkpoint,map_location='cpu',weights_only=False)
+        if not all(torch.isfinite(v).all() for key in ('wm','policy','critic') for v in saved[key].values() if torch.is_tensor(v)):
+            record['status']='failed_final_finiteness'
+            raise FloatingPointError('Non-finite final checkpoint')
+        del saved
+        record.update(checkpoint=str(checkpoint),checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest())
     except NonfiniteCapture as error:
         record.update(status='captured_nonfinite',stage=str(error),iteration=trainer.iteration if trainer else None)
     finally:
+        stop.set();watcher.join(timeout=6)
         if trainer:
             trainer.env.close()
             if trainer.writer:trainer.writer.close()
-        record.update(elapsed_s=time.time()-started,torch_peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20)
+        record.update(elapsed_s=time.time()-started,device_peak_mib=max(memory,default=0),torch_peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20)
         if record['status'] in ('initializing','running'):record['status']='failed'
         save()
+    if args.recovery and record['status']!='completed':raise SystemExit(1)
 
 
 if __name__=='__main__':main()

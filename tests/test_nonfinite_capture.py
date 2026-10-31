@@ -29,3 +29,26 @@ def test_nonfinite_evidence_is_saved_before_raising(tmp_path):
     saved=torch.load(folder/'batch.pt',weights_only=False)
     assert torch.isnan(saved['values']['state'][1])
     assert torch.isinf(saved['values']['state'][2])
+
+
+def test_light_capture_uses_native_gradient_rejection_and_preserves_finite_path(tmp_path,monkeypatch):
+    from supermimic.data.replay_buffer import ReplayBuffer
+    from supermimic.world_model.wm_trainer import WorldModelTrainer
+    from supermimic.imagination import policy_trainer
+    # Register originals before install() patches them inside this test process.
+    for owner,name in [(ReplayBuffer,'add'),(ReplayBuffer,'sample_starts'),
+                       (WorldModelTrainer,'loss_on'),(policy_trainer,'policy_objective'),
+                       (policy_trainer.PolicyTrainer,'update'),
+                       (torch.nn.utils,'clip_grad_norm_'),(torch.nn.functional,'mse_loss')]:
+        monkeypatch.setattr(owner,name,getattr(owner,name))
+    trace=module.Trace(tmp_path,light=True)
+    trace.install()
+    p=torch.nn.Parameter(torch.zeros(1));p.grad=torch.tensor([2.])
+    torch.nn.utils.clip_grad_norm_([p],1.,error_if_nonfinite=True)
+    torch.testing.assert_close(p.grad,torch.ones(1))
+    assert not list(tmp_path.iterdir())
+    p.grad=torch.tensor([float('nan')])
+    with pytest.raises(module.NonfiniteCapture,match='raw_gradient'):
+        torch.nn.utils.clip_grad_norm_([p],1.,error_if_nonfinite=True)
+    report=json.loads((tmp_path/'first-nonfinite/stage.json').read_text())
+    assert report['bad']['total_norm']['nonfinite']==1
