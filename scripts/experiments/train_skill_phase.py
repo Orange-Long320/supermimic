@@ -14,11 +14,17 @@ def sha(p):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--phase',choices=('prepare','capacity','train'),required=True)
+    p.add_argument('--phase',choices=('prepare','capacity','train','train-steps'),required=True)
     p.add_argument('--dataset',type=Path,required=True);p.add_argument('--checkpoint',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True);p.add_argument('--gpu',type=int,default=0);p.add_argument('--proof',type=Path)
     p.add_argument('--compiled',action='store_true');p.add_argument('--hours',type=float,default=1.)
+    p.add_argument('--additional-steps',type=int,help='Additional vectorized environment iterations for train-steps')
     a=p.parse_args()
+    if a.phase=='train-steps':
+        if not a.compiled or a.additional_steps is None or a.additional_steps <= 0:
+            raise ValueError('train-steps requires --compiled and positive --additional-steps')
+    elif a.additional_steps is not None:
+        raise ValueError('--additional-steps is only valid with train-steps')
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():raise ValueError('Dedicated server environment required')
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
@@ -66,6 +72,7 @@ def main():
     torch.set_num_threads(2);torch.cuda.set_per_process_memory_fraction(.8,0)
     ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
     if a.phase=='capacity' and (ck['iteration']!=manifest.get('initial_checkpoint_iteration',70000) or sha(a.checkpoint)!=manifest['initial_checkpoint_sha256']):raise ValueError('Initial checkpoint does not match dataset manifest')
+    if a.phase=='train-steps' and (ck['iteration']!=manifest['initial_checkpoint_iteration'] or sha(a.checkpoint)!=manifest['initial_checkpoint_sha256']):raise ValueError('Initial checkpoint does not match dataset manifest')
     def restore(obj,d):
         for k,v in d.items():
             current=getattr(obj,k)
@@ -85,11 +92,21 @@ def main():
         proof=json.loads(a.proof.read_text())
         if proof['status']!='completed' or proof['updates']<1 or proof['device_peak_mib']>20000 or proof['dataset_sha256']!=sha(a.dataset/'manifest.json') or proof['checkpoint_sha256']!=sha(a.checkpoint):raise ValueError('Capacity proof mismatch')
         cfg.resume=a.checkpoint
-    cfg.run_name=a.out.name;cfg.log_root=a.out.parent;cfg.schedule.total_iterations=100 if a.phase=='capacity' else 320000
+    elif a.phase=='train-steps':
+        # User explicitly requested direct long training without a separate
+        # capacity-training run. A fresh, unused GPU is still required above.
+        cfg.resume=a.checkpoint
+    cfg.run_name=a.out.name;cfg.log_root=a.out.parent
+    cfg.schedule.total_iterations=(int(ck['iteration'])+a.additional_steps if a.phase=='train-steps'
+                                   else 100 if a.phase=='capacity' else 320000)
     if a.hours<=0:raise ValueError('Hours must be positive')
-    cfg.schedule.max_hours=.15 if a.phase=='capacity' else a.hours;cfg.schedule.lr_final_ratio=1.;cfg.schedule.log_interval=20;cfg.schedule.checkpoint_interval=100 if a.phase=='capacity' else 500
+    cfg.schedule.max_hours=None if a.phase=='train-steps' else .15 if a.phase=='capacity' else a.hours
+    cfg.schedule.lr_final_ratio=1.;cfg.schedule.log_interval=20;cfg.schedule.checkpoint_interval=100 if a.phase=='capacity' else 500
     a.out.mkdir(parents=True,exist_ok=False)
     record={'status':'initializing','phase':a.phase,'pid':os.getpid(),'gpu':a.gpu,'argv':sys.argv,'dataset_sha256':sha(a.dataset/'manifest.json'),'checkpoint_input':str(a.checkpoint),'checkpoint_input_sha256':sha(a.checkpoint),'source_iteration':ck['iteration'],'configuration':asdict(cfg),'weights_only_transfer':a.phase=='capacity','physics_validated':False,'python':sys.executable,'torch':torch.__version__,'cuda_runtime':torch.version.cuda}
+    if a.phase=='train-steps':
+        record.update(capacity_run='skipped at user request',additional_env_iterations=a.additional_steps,
+                      target_saved_iteration=cfg.schedule.total_iterations)
     def save():(a.out/'result.json').write_text(json.dumps(record,indent=2,default=str)+'\n')
     save();trainer=None;stop=threading.Event();samples=[];start=time.monotonic()
     def monitor():
@@ -107,6 +124,7 @@ def main():
         record.update(status='running',training_started_epoch=time.time());save();trainer.run()
         path=a.out/'ckpt_latest.pt';z=torch.load(path,map_location='cpu',weights_only=False)
         if not all(torch.isfinite(v).all() for key in ('wm','policy','critic') for v in z[key].values() if torch.is_tensor(v)):raise ValueError('Non-finite checkpoint')
+        if a.phase=='train-steps' and z['iteration']!=cfg.schedule.total_iterations:raise ValueError('Training did not reach requested saved iteration')
         record.update(status='completed',iteration=z['iteration'],updates=z['num_updates'],checkpoint=str(path),checkpoint_sha256=sha(path))
     finally:
         stop.set();thread.join(timeout=6)
