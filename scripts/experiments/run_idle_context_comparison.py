@@ -47,7 +47,7 @@ def main():
     p.add_argument('--trials', nargs='+', default=['baseline', 'context-idle'],
                    choices=('baseline', 'context-idle', 'context-baseline-idle', 'context-baseline-motion',
                             'context-long-join', 'context-no-entry-skip', 'baseline-zero-xy', 'context-zero-xy',
-                            'baseline-damping', 'context-damping', 'context-foot-aligned'))
+                            'baseline-damping', 'context-damping', 'context-foot-aligned', 'context-foot-register-only'))
     a = p.parse_args()
     root = a.run/'source'
     if not 128 <= a.domain <= 232 or not 40 <= a.seconds <= 90 or len(set(a.trials)) != len(a.trials):
@@ -94,8 +94,10 @@ def main():
             diagnostic += ['--idle-anchor-mode', 'zero-xy']
         if trial_name in ('baseline-damping', 'context-damping'):
             diagnostic += ['--idle-velocity-feedback']
-        if trial_name == 'context-foot-aligned':
+        if trial_name in ('context-foot-aligned','context-foot-register-only'):
             diagnostic += ['--foot-aligned-scene', str(a.run/'sim/configuration/robot/lx2501_3_t2d5/model_info/scene.xml')]
+        if trial_name == 'context-foot-register-only':
+            diagnostic += ['--foot-registration-only']
         # Bind both unused UDP endpoints before launching this trial.
         for port in (a.state_port, a.command_port):
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:

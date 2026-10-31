@@ -10,7 +10,7 @@ from supermimic.control.idle_velocity_feedback import RootVelocityEstimate
 
 
 class FootIdleSession:
-    def __init__(self, scene, spec, scheduler):
+    def __init__(self, scene, spec, scheduler, registration_only=False):
         self.planner = FootAlignedIdle(scene,spec,scheduler.dt)
         self.scheduler = scheduler
         self.original_stand = scheduler.stand.copy()
@@ -26,6 +26,7 @@ class FootIdleSession:
         self.status = 'initial'
         self.applied_step = None
         self.duration_steps = None
+        self.registration_only = registration_only
 
     def prepare(self, tracker, position, quat, joints, qvel, angular, stamp, mode):
         if stamp is None or angular is None:
@@ -39,6 +40,7 @@ class FootIdleSession:
             if self.future is not None:
                 # In-flight stale work is allowed to finish but never applied.
                 self.future.cancel()
+                self.events.append(dict(kind='discarded_on_mode_change',step=self.scheduler.steps))
                 self.future = None
             self.status = 'braking' if mode == 'stand' else 'motion'
             self.previous = mode
@@ -80,6 +82,17 @@ class FootIdleSession:
             raise ValueError('Planning context stale: relative feet or readiness changed')
         positions = rz.apply(plan.root_positions)+translation
         yaw = plan.yaw+angle
+        if getattr(self,'registration_only',False):
+            # Causal control only: keep every joint/velocity/height goal from
+            # the original stand and change only its fixed world registration.
+            # The unused IK plan is not evidence of this control's foot match.
+            plan.features = np.repeat(self.original_stand[None],2,axis=0)
+            positions = np.repeat(positions[:1],2,axis=0)
+            yaw = np.repeat(yaw[:1],2)
+            plan.report = dict(diagnostic='registration-only; no endpoint alignment claim',
+                               support_side=plan.report['support_side'],
+                               measured_foot_targets=plan.report['measured_foot_targets'],
+                               total_planning_seconds=plan.report['total_planning_seconds'])
         # Exactly preserve all already-published rows. Their world registration
         # remains old until the first new row reaches the front of this queue.
         self.poses = deque([(tracker.position.copy(),tracker.yaw) for _ in range(self.scheduler.horizon)])

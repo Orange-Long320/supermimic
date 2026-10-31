@@ -20,7 +20,8 @@ class SkillGoal:
                  *, sustained=True, straight=True, horizon=10, jog_brake_fade=None, stand_anchor_gain=1.,
                  stand_gain_quiet_time=0., stand_gain_speed_limit=.08, planner='baseline',
                  planner_ablation='none', idle_join_frames=None, idle_entry_offset=None,
-                 idle_anchor_mode='fixed', idle_velocity_feedback=False, foot_aligned_scene=None):
+                 idle_anchor_mode='fixed', idle_velocity_feedback=False, foot_aligned_scene=None,
+                 foot_registration_only=False):
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -103,7 +104,9 @@ class SkillGoal:
             if planner != 'context-idle' or idle_velocity_feedback or idle_anchor_mode != 'fixed' or stand_anchor_gain != 1. or planner_ablation != 'none':
                 raise ValueError('Foot-aligned Idle requires the unmodified context planner and anchor')
             from supermimic.deploy.foot_idle_session import FootIdleSession
-            self.foot_idle = FootIdleSession(foot_aligned_scene,spec,self.scheduler)
+            self.foot_idle = FootIdleSession(foot_aligned_scene,spec,self.scheduler,foot_registration_only)
+        elif foot_registration_only:
+            raise ValueError('Registration diagnostic requires the foot planner scene')
 
     @staticmethod
     def rotation(wxyz):

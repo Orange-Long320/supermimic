@@ -61,3 +61,16 @@ def test_contact_hull_projection_and_degenerate_support():
     inside = project_inside(square,[.3,.2],margin=.01)
     assert polygon_margin(square,inside) >= .01-1e-8
     assert polygon_margin([[0,0]], [0,0]) == -np.inf
+
+
+def test_registration_diagnostic_preserves_original_joint_and_velocity_goals():
+    session,tracker,plan,context = fixture()
+    session.registration_only = True
+    session.original_stand = tracker.scheduler.stand.copy()
+    plan.report['total_planning_seconds'] = 0.
+    original = tracker.scheduler.window().copy()
+    session.install(tracker,plan,context)
+    for _ in range(20):
+        session.advance(tracker)
+        np.testing.assert_array_equal(tracker.scheduler.window(),original)
+    np.testing.assert_allclose(tracker.position,plan.root_positions[0])

@@ -81,6 +81,7 @@ def main():
     p.add_argument('--idle-anchor-mode', choices=('fixed', 'zero-xy'), default='fixed', help='zero-xy removes position feedback for causal diagnosis only')
     p.add_argument('--idle-velocity-feedback', action='store_true', help='Experimental measured-velocity damping during static Idle')
     p.add_argument('--foot-aligned-scene', type=Path, help='Official scene for experimental foot-aligned Idle IK')
+    p.add_argument('--foot-registration-only', action='store_true', help='Causal diagnostic: fixed original posture, change only world registration')
     a = p.parse_args()
     if a.schedule and a.keyboard_port: raise ValueError('Select schedule or keyboard, not both')
     if (not 128 <= a.ros_domain <= 232 or os.environ.get('ROS_LOCALHOST_ONLY') != '1'
@@ -127,7 +128,8 @@ def main():
     tracker = SkillGoal(a.dataset, a.profile, [0., 0., .65], [1., 0., 0., 0.], jog_brake_fade=a.jog_brake_fade, stand_anchor_gain=a.stand_anchor_gain, stand_gain_quiet_time=a.stand_gain_quiet_time, planner=a.planner,
                         planner_ablation=a.planner_ablation, idle_join_frames=a.idle_join_frames,
                         idle_entry_offset=a.idle_entry_offset, idle_anchor_mode=a.idle_anchor_mode,
-                        idle_velocity_feedback=a.idle_velocity_feedback, foot_aligned_scene=a.foot_aligned_scene)
+                        idle_velocity_feedback=a.idle_velocity_feedback, foot_aligned_scene=a.foot_aligned_scene,
+                        foot_registration_only=a.foot_registration_only)
     schedule = json.loads(a.schedule.read_text()) if a.schedule else None
     valid = ('stand', 'walk', 'jog', 'backward', 'turn_left_inplace', 'turn_right_inplace')
     if schedule and (schedule[0][0] != 0 or any(m not in valid for _, m in schedule) or any(schedule[i][0] >= schedule[i+1][0] for i in range(len(schedule)-1))):
@@ -277,6 +279,7 @@ def main():
                   'idle_anchor_mode': a.idle_anchor_mode,
                   'idle_velocity_feedback': a.idle_velocity_feedback,
                   'foot_aligned_scene': str(a.foot_aligned_scene) if a.foot_aligned_scene else None,
+                  'foot_registration_only': a.foot_registration_only,
                   'foot_idle_events': tracker.foot_idle.events if tracker.foot_idle else [],
                   'max_future_overlap_error': max_overlap_error,
                   'scope': 'official simulator exploratory run, simulation odometry ground truth'}
