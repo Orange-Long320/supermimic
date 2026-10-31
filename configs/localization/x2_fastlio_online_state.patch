@@ -1,0 +1,83 @@
+--- a/src/IMU_Processing.hpp
++++ b/src/IMU_Processing.hpp
+@@ -33,6 +33,8 @@
+  public:
+   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+ 
++  double sm_acc_scale() const { return G_m_s2 / mean_acc.norm(); }
++
+   ImuProcess();
+   ~ImuProcess();
+   
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -43,6 +43,7 @@
+ #include <Python.h>
+ #include <so3_math.h>
+ #include <rclcpp/rclcpp.hpp>
++#include <std_msgs/msg/float64_multi_array.hpp>
+ #include <Eigen/Core>
+ #include "IMU_Processing.hpp"
+ #include <nav_msgs/msg/odometry.hpp>
+@@ -69,6 +70,8 @@
+ #define PUBFRAME_PERIOD     (20)
+ 
+ /*** Time Log Variables ***/
++uint64_t sm_imu_received = 0, sm_cloud_received = 0;
++
+ double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
+ double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN], s_plot8[MAXN], s_plot9[MAXN], s_plot10[MAXN], s_plot11[MAXN];
+ double match_time = 0, solve_time = 0, solve_const_H_time = 0;
+@@ -282,6 +285,7 @@
+ 
+ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::UniquePtr msg) 
+ {
++    ++sm_cloud_received;
+     mtx_buffer.lock();
+     scan_count ++;
+     double cur_time = get_time_sec(msg->header.stamp);
+@@ -349,6 +353,7 @@
+ 
+ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
+ {
++    ++sm_imu_received;
+     publish_count ++;
+     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
+     sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+@@ -932,6 +937,7 @@
+         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
+         pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 20);
+         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
++        sm_state_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/supermimic/x2_online_lio/filter_state", 20);
+         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
+         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+ 
+@@ -1062,6 +1068,20 @@
+ 
+             /******* Publish odometry *******/
+             publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
++            // Read-only estimator state export. Does not change filtering.
++            std_msgs::msg::Float64MultiArray exported;
++            exported.data = {lidar_end_time,
++                state_point.pos[0], state_point.pos[1], state_point.pos[2],
++                geoQuat.x, geoQuat.y, geoQuat.z, geoQuat.w};
++            for (int k=0;k<3;++k) exported.data.push_back(state_point.vel[k]);
++            for (int k=0;k<3;++k) exported.data.push_back(state_point.bg[k]);
++            for (int k=0;k<3;++k) exported.data.push_back(state_point.ba[k]);
++            for (int k=0;k<3;++k) exported.data.push_back(state_point.grav[k]);
++            exported.data.push_back(p_imu->sm_acc_scale());
++            exported.data.push_back(static_cast<double>(sm_imu_received));
++            exported.data.push_back(static_cast<double>(sm_cloud_received));
++            sm_state_pub_->publish(exported);
++
+ 
+             /*** add the feature points to map kdtree ***/
+             t3 = omp_get_wtime();
+@@ -1134,6 +1154,7 @@
+     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect_;
+     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap_;
+     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
++    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr sm_state_pub_;
+     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
+     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
