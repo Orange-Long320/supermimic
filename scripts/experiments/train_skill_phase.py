@@ -1,7 +1,7 @@
 """Bounded exploratory motion tracking transfer from LAFAN70000; no PPO."""
 import argparse
 from dataclasses import asdict,is_dataclass
-import hashlib,json,os,shutil,subprocess,sys,threading,time
+import hashlib,json,os,shutil,signal,subprocess,sys,threading,time
 from pathlib import Path
 
 
@@ -19,12 +19,20 @@ def main():
     p.add_argument('--out',type=Path,required=True);p.add_argument('--gpu',type=int,default=0);p.add_argument('--proof',type=Path)
     p.add_argument('--compiled',action='store_true');p.add_argument('--hours',type=float,default=1.)
     p.add_argument('--additional-steps',type=int,help='Additional vectorized environment iterations for train-steps')
+    p.add_argument('--share-gpu',action='store_true',help='Explicitly permit an occupied GPU for train-steps')
+    p.add_argument('--torch-memory-gib',type=float,help='PyTorch allocator cap in GiB; excludes non-PyTorch allocations')
+    p.add_argument('--min-free-mib',type=int,default=12288,help='Minimum GPU free MiB before shared launch')
+    p.add_argument('--stop-free-mib',type=int,default=3072,help='Interrupt this process if shared GPU free MiB drops below threshold')
     a=p.parse_args()
     if a.phase=='train-steps':
         if not a.compiled or a.additional_steps is None or a.additional_steps <= 0:
             raise ValueError('train-steps requires --compiled and positive --additional-steps')
     elif a.additional_steps is not None:
         raise ValueError('--additional-steps is only valid with train-steps')
+    if a.share_gpu and (a.phase!='train-steps' or a.torch_memory_gib is None or not 0 < a.torch_memory_gib <= 8 or a.stop_free_mib < 3072 or a.min_free_mib < a.stop_free_mib+8192):
+        raise ValueError('Shared training requires train-steps, a PyTorch cap <= 8 GiB, and adequate free-memory thresholds')
+    if not a.share_gpu and a.torch_memory_gib is not None:
+        raise ValueError('--torch-memory-gib requires --share-gpu')
     if Path(sys.prefix).resolve()!=Path('/home/2025-Long.xh/HHD/venvs/supermimic').resolve():raise ValueError('Dedicated server environment required')
     from supermimic.robots.paths import select_robot
     select_robot('x2_ultra',check_assets=True)
@@ -61,7 +69,11 @@ def main():
         (a.dataset/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');print(json.dumps(manifest,indent=2));return
     if os.environ.get('CUDA_VISIBLE_DEVICES')!=str(a.gpu):raise ValueError('Explicit physical GPU required')
     busy=subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-compute-apps=pid','--format=csv,noheader,nounits'],text=True).strip()
-    if busy:raise ValueError('Selected GPU is occupied: '+busy)
+    if busy and not a.share_gpu:raise ValueError('Selected GPU is occupied: '+busy)
+    gpu_memory=subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-gpu=memory.total,memory.free','--format=csv,noheader,nounits'],text=True).strip()
+    total_mib,free_mib=(int(x.strip()) for x in gpu_memory.split(','))
+    if a.share_gpu and (free_mib<a.min_free_mib or a.torch_memory_gib*1024>=free_mib-a.stop_free_mib):
+        raise ValueError('Insufficient GPU memory headroom for shared training')
     manifest=json.loads((a.dataset/'manifest.json').read_text())
     for c in manifest['clips']:
         if sha(a.dataset/(c['name']+'.npz'))!=c['sha256']:raise ValueError('Dataset changed')
@@ -69,7 +81,7 @@ def main():
     from supermimic.config import TrainConfig
     from supermimic.training.loop import Trainer
     if torch.cuda.device_count()!=1:raise ValueError('Expected one visible GPU')
-    torch.set_num_threads(2);torch.cuda.set_per_process_memory_fraction(.8,0)
+    torch.set_num_threads(2);torch.cuda.set_per_process_memory_fraction(a.torch_memory_gib*1024/total_mib if a.share_gpu else .8,0)
     ck=torch.load(a.checkpoint,map_location='cpu',weights_only=False)
     if a.phase=='capacity' and (ck['iteration']!=manifest.get('initial_checkpoint_iteration',70000) or sha(a.checkpoint)!=manifest['initial_checkpoint_sha256']):raise ValueError('Initial checkpoint does not match dataset manifest')
     if a.phase=='train-steps' and (ck['iteration']!=manifest['initial_checkpoint_iteration'] or sha(a.checkpoint)!=manifest['initial_checkpoint_sha256']):raise ValueError('Initial checkpoint does not match dataset manifest')
@@ -107,11 +119,21 @@ def main():
     if a.phase=='train-steps':
         record.update(capacity_run='skipped at user request',additional_env_iterations=a.additional_steps,
                       target_saved_iteration=cfg.schedule.total_iterations)
+    if a.share_gpu:
+        record.update(shared_gpu=True,initial_other_compute_pids=busy.splitlines(),initial_gpu_free_mib=free_mib,
+                      torch_allocator_cap_gib=a.torch_memory_gib,minimum_free_interrupt_mib=a.stop_free_mib,
+                      memory_cap_scope='PyTorch allocator only; excludes Warp, driver and other CUDA allocations')
     def save():(a.out/'result.json').write_text(json.dumps(record,indent=2,default=str)+'\n')
     save();trainer=None;stop=threading.Event();samples=[];start=time.monotonic()
     def monitor():
         while not stop.is_set():
-            try:samples.append(int(subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-gpu=memory.used','--format=csv,noheader,nounits'],text=True,timeout=5).strip()))
+            try:
+                mem=subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-gpu=memory.used,memory.free','--format=csv,noheader,nounits'],text=True,timeout=5).strip()
+                used,free=(int(x.strip()) for x in mem.split(','));samples.append(used)
+                if a.share_gpu and free<a.stop_free_mib:
+                    record.update(memory_guard_triggered=True,memory_guard_free_mib=free);save()
+                    os.kill(os.getpid(),signal.SIGINT)
+                    return
             except (ValueError,subprocess.SubprocessError):pass
             stop.wait(1)
     thread=threading.Thread(target=monitor,daemon=True);thread.start()
