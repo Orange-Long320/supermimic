@@ -67,8 +67,8 @@ def main():
     groups, counts, pose, status = {}, Counter(), {}, {}
     def stamp(msg): return msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
     def joints(msg, group):
-        groups[group] = (time.monotonic(), stamp(msg),
-                         [(j.name, j.position, j.velocity, j.error_code) for j in msg.joints])
+        groups.setdefault(group, deque(maxlen=128)).append((time.monotonic(), stamp(msg),
+                         [(j.name, j.position, j.velocity, j.error_code) for j in msg.joints]))
         counts[group] += 1
     def odometry(msg):
         p, q, w = msg.pose.pose.position, msg.pose.pose.orientation, msg.twist.twist.angular
@@ -107,15 +107,22 @@ def main():
                         raise RuntimeError('Expected exactly one pelvis publisher')
                     if (pose['parent'], pose['child']) != ('supermimic_world', 'pelvis'):
                         raise RuntimeError('Unexpected pelvis frames')
+                    # Match each joint group causally to the pelvis acquisition
+                    # time, rather than pairing delayed odometry with newer joints.
+                    aligned = {group: next((row for row in reversed(rows)
+                               if row[1] <= pose['stamp'] and row[0] <= now), None)
+                               for group, rows in groups.items()}
+                    if any(row is None for row in aligned.values()):
+                        raise ValueError('waiting for causal joint history')
                     wall = time.time()
-                    ages = [wall-pose['stamp']] + [wall-row[1] for row in groups.values()]
-                    receives = [pose['received']] + [row[0] for row in groups.values()]
-                    stamps = [pose['stamp']] + [row[1] for row in groups.values()]
+                    ages = [wall-pose['stamp']] + [wall-row[1] for row in aligned.values()]
+                    receives = [pose['received']] + [row[0] for row in aligned.values()]
+                    stamps = [pose['stamp']] + [row[1] for row in aligned.values()]
                     if min(ages) < 0 or max(ages) > .05 or any(now-t > .05 for t in receives):
                         raise ValueError('input stale or future')
                     if max(stamps)-min(stamps) > .03:
                         raise ValueError('acquisition skew over 30 ms')
-                    measured = [j for row in groups.values() for j in row[2]]
+                    measured = [j for row in aligned.values() for j in row[2]]
                     by_name = {j[0]: j for j in measured}
                     if len(measured) != n or set(by_name) != set(names) or any(j[3] for j in measured):
                         raise ValueError('joint set duplicate missing or faulted')
@@ -145,7 +152,7 @@ def main():
                     goal = tracker.goal(pose['position'], quat, q, 'stand')
                     if obs.shape != (990,) or goal.shape != (729,) or not np.isfinite(np.r_[obs, goal]).all():
                         raise RuntimeError('Unexpected or invalid model input')
-                    begin = time.perf_counter(); action = np.asarray(policy.infer(obs, goal))
+                    begin = time.perf_counter(); action = np.asarray(policy.infer(tuple(obs), tuple(goal)))
                     latencies.append((time.perf_counter()-begin)*1000)
                     if action.shape != (31,) or not np.isfinite(action).all():
                         raise RuntimeError('Invalid model output')
@@ -155,7 +162,9 @@ def main():
                     header_ages.append(wall-pose['stamp'])
                     log.write(json.dumps({'elapsed': now-started, 'session_id': session, 'position': pose['position'],
                         'quat_wxyz': quat.tolist(), 'joint_pos': q.tolist(), 'joint_vel': qd.tolist(),
-                        'header_ages_s': ages, 'measured_outside_file_bounds': [name for name, b in zip(names, bad) if b],
+                        'header_ages_s': ages, 'joint_acquisition_stamps': [row[1] for row in aligned.values()],
+                        'pose_acquisition_stamp': pose['stamp'],
+                        'measured_outside_file_bounds': [name for name, b in zip(names, bad) if b],
                         'observation': obs.tolist(), 'goal': goal.tolist(), 'action': action.tolist(),
                         'raw_pd_target': target.tolist(), 'eligible_for_control': False,
                         'previous_action_scope': 'counterfactual unexecuted shadow output'})+'\n')
