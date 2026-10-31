@@ -17,9 +17,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('trace', 'profile', 'scene', 'out'):
         p.add_argument('--'+name, type=Path, required=True)
+    p.add_argument('--foot-dwell', type=float, default=0.,
+                   help='Exploratory minimum time between support-foot changes')
     a = p.parse_args()
-    if a.out.exists():
-        raise ValueError('Output already exists')
+    if a.out.exists() or not 0. <= a.foot_dwell <= .5:
+        raise ValueError('Expected new output and a dwell time between 0 and 0.5 seconds')
     rows = [json.loads(s) for s in a.trace.open()]
     if len(rows) < 100:
         raise ValueError('Trace too short')
@@ -66,6 +68,7 @@ def main():
     Q = np.diag([1e-7,1e-7,4e-5,4e-5,1e-7,1e-7])
     H = np.zeros((2,6)); H[0,2]=H[1,3]=1
     R = np.eye(2)*(.10**2); I = np.eye(6); accepted = switches = 0; last = None
+    last_switch_step = -len(grid)
     for i in range(1,len(grid)):
         u = measured_world[i,:2]; x = F@x+B@u; P = F@P@F.T+Q
         imu[i,:2] = imu[i-1,:2]+imu[i-1,2:]*dt+.5*u*dt**2
@@ -77,11 +80,14 @@ def main():
                 candidates.append((np.linalg.norm(measurement-H@x),foot,measurement))
         if candidates:
             diff,foot,z = min(candidates,key=lambda c:c[0])
-            if diff < .6:
+            switch_too_soon = last is not None and foot != last and (i-last_switch_step)*dt < a.foot_dwell
+            if diff < .6 and not switch_too_soon:
                 S = H@P@H.T+R; K = np.linalg.solve(S,(P@H.T).T).T
                 x = x+K@(z-H@x); P = (I-K@H)@P@(I-K@H).T+K@R@K.T
                 accepted += 1
-                if last is not None and foot != last: switches += 1
+                if last is not None and foot != last:
+                    switches += 1
+                    last_switch_step = i
                 last = foot
         est[i] = x
     xy = truth[:,:2]-truth[0,:2]
@@ -113,7 +119,8 @@ def main():
                          'max_displacement_error_m':float(segment_error.max())})
     report = {'seconds':float(grid[-1]-grid[0]),'samples':len(grid),
               'imu_only_xy_error':metrics(imu[:,:2]),'fusion_xy_error':metrics(est[:,:2]),
-              'foot_updates':accepted,'foot_switches':switches,'stop_windows':stop,'segments':segments,
+              'foot_updates':accepted,'foot_switches':switches,'foot_dwell_s':a.foot_dwell,
+              'stop_windows':stop,'segments':segments,
               'simulation':'Recorded official simulation ROS IMU specific force and orientation, 50 Hz trace resampled by offline interpolation; recorded joint positions; no ground-truth acceleration used',
               'max_trace_gap_s':float(np.max(np.diff(ts))),
               'imu_age_p95_s':float(np.percentile([r['imu_age_s'] for r in rows],95)),
