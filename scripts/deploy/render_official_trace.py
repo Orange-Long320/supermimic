@@ -19,6 +19,7 @@ def main():
     p.add_argument('--width', type=int, default=960)
     p.add_argument('--height', type=int, default=720)
     p.add_argument('--stride', type=int, default=2, help='Sample every N frames from the nominal 50 Hz trace')
+    p.add_argument('--timeline', action='store_true', help='Sample uniformly in recorded elapsed time; --end is exclusive')
     a = p.parse_args()
     if a.out.exists(): raise ValueError('output exists')
     if a.width <= 0 or a.height <= 0 or a.width % 2 or a.height % 2 or a.stride < 1:
@@ -31,8 +32,22 @@ def main():
         if joint < 0: raise ValueError('missing official model joint '+name)
         adr.append(model.jnt_qposadr[joint])
     default = np.asarray([spec['default_joint_pos'][name] for name in names])
-    frames = [row for line in a.trace.open() if a.start <= (row := json.loads(line))['elapsed'] <= a.end]
+    if a.timeline and (not np.isfinite(a.end) or a.end <= a.start):
+        raise ValueError('Timeline rendering needs a finite end later than start')
+    pad = .1 if a.timeline else 0.
+    frames = [row for line in a.trace.open() if a.start-pad <= (row := json.loads(line))['elapsed'] <= a.end+pad]
     if not frames: raise ValueError('no frames in requested interval')
+    if a.timeline:
+        times = np.array([f['elapsed'] for f in frames])
+        if np.any(np.diff(times) <= 0) or a.start < times[0] or a.end > times[-1] + .021:
+            raise ValueError('Timeline interval is outside the recorded monotonic trace')
+        grid = np.arange(a.start, a.end, a.stride / 50.)
+        indices = np.clip(np.searchsorted(times, grid, side='left'), 0, len(times)-1)
+        before = np.maximum(indices-1, 0)
+        indices = np.where(abs(times[before]-grid) < abs(times[indices]-grid), before, indices)
+        render_frames = [frames[i] for i in indices]
+    else:
+        render_frames = frames[::a.stride]
     model.vis.global_.offwidth = a.width; model.vis.global_.offheight = a.height
     renderer = mujoco.Renderer(model, width=a.width, height=a.height)
     camera = mujoco.MjvCamera(); camera.type = mujoco.mjtCamera.mjCAMERA_FREE
@@ -41,7 +56,7 @@ def main():
         '-s', f'{a.width}x{a.height}', '-r', str(50 / a.stride), '-i', '-', '-c:v', 'libx264', '-preset', 'fast',
         '-pix_fmt', 'yuv420p', '-y', str(a.out)], stdin=subprocess.PIPE)
     try:
-        for frame in frames[::a.stride]:
+        for frame in render_frames:
             data.qpos[:7] = np.r_[frame['root'], frame['q']]
             data.qpos[adr] = frame['joint_pos'] if 'joint_pos' in frame else np.asarray(frame['observation'][9*n:10*n])+default
             mujoco.mj_forward(model, data)
