@@ -34,7 +34,8 @@ def main():
     p.add_argument('--seconds', type=float, default=55.)
     p.add_argument('--trials', nargs='+', default=['baseline', 'context-idle'],
                    choices=('baseline', 'context-idle', 'context-baseline-idle', 'context-baseline-motion',
-                            'context-long-join', 'context-no-entry-skip', 'baseline-zero-xy', 'context-zero-xy'))
+                            'context-long-join', 'context-no-entry-skip', 'baseline-zero-xy', 'context-zero-xy',
+                            'baseline-damping', 'context-damping'))
     a = p.parse_args()
     root = a.run/'source'
     if not 128 <= a.domain <= 232 or not 40 <= a.seconds <= 90 or len(set(a.trials)) != len(a.trials):
@@ -69,7 +70,7 @@ def main():
         tmp.replace(result_path)
     save()
     for trial_name in a.trials:
-        planner = 'baseline' if trial_name in ('baseline', 'baseline-zero-xy') else 'context-idle'
+        planner = 'baseline' if trial_name in ('baseline', 'baseline-zero-xy', 'baseline-damping') else 'context-idle'
         ablation = {'context-baseline-idle': 'baseline-idle', 'context-baseline-motion': 'baseline-motion'}.get(trial_name, 'none')
         diagnostic = ['--planner-ablation', ablation]
         if trial_name == 'context-long-join':
@@ -78,6 +79,8 @@ def main():
             diagnostic += ['--idle-entry-offset', '0']
         if trial_name in ('baseline-zero-xy', 'context-zero-xy'):
             diagnostic += ['--idle-anchor-mode', 'zero-xy']
+        if trial_name in ('baseline-damping', 'context-damping'):
+            diagnostic += ['--idle-velocity-feedback']
         # Bind both unused UDP endpoints before launching this trial.
         for port in (a.state_port, a.command_port):
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:

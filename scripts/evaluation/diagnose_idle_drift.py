@@ -39,7 +39,9 @@ def reconstruct(rows, profile):
         mujoco.mj_kinematics(model, reference)
         ra = Rotation.from_quat(actual.xquat[anchor][[1,2,3,0]]).as_matrix()
         rr = Rotation.from_quat(reference.xquat[anchor][[1,2,3,0]]).as_matrix()
-        value = np.asarray(row['anchor'])
+        value = np.array(row['anchor'])
+        if 'raw_anchor_translation' in row:
+            value[:3] = row['raw_anchor_translation']
         columns = value[3:].reshape(3,2)
         relative = np.column_stack((columns, np.cross(columns[:,0], columns[:,1])))
         yaw_matrix = ra@relative@rr.T

@@ -20,7 +20,7 @@ class SkillGoal:
                  *, sustained=True, straight=True, horizon=10, jog_brake_fade=None, stand_anchor_gain=1.,
                  stand_gain_quiet_time=0., stand_gain_speed_limit=.08, planner='baseline',
                  planner_ablation='none', idle_join_frames=None, idle_entry_offset=None,
-                 idle_anchor_mode='fixed'):
+                 idle_anchor_mode='fixed', idle_velocity_feedback=False):
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
         self.names = tuple(spec['joint_names'])
@@ -64,6 +64,14 @@ class SkillGoal:
             raise ValueError('Unknown Idle anchor diagnostic')
         self.idle_anchor_mode = idle_anchor_mode
         self.has_motion_request = False
+        if idle_velocity_feedback and idle_anchor_mode != 'fixed':
+            raise ValueError('Idle damping requires the original fixed root target')
+        self.idle_velocity_feedback = idle_velocity_feedback
+        self.idle_root_velocity = np.zeros(3)
+        self.idle_lookahead = 0.
+        if idle_velocity_feedback:
+            from supermimic.control.idle_velocity_feedback import RootVelocityEstimate
+            self.root_velocity_estimate = RootVelocityEstimate()
         if planner == 'context-idle':
             from supermimic.control.idle_planner import ContextIdlePlanner
             self.foot_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, side+'_ankle_roll_link')
@@ -110,8 +118,12 @@ class SkillGoal:
         self.fk(self.reference, [0., 0., row[-1]], quat, row[:self.nj]+self.default)
         return self.reference.xpos[self.foot_ids].copy()
 
-    def goal(self, position, quat_wxyz, joints, mode, joint_velocity=None):
+    def goal(self, position, quat_wxyz, joints, mode, joint_velocity=None, sample_time=None):
         self.has_motion_request = self.has_motion_request or mode != 'stand'
+        if self.idle_velocity_feedback:
+            if sample_time is None:
+                raise ValueError('Idle damping requires timestamped measured odometry')
+            self.idle_root_velocity = self.root_velocity_estimate.update(sample_time, position)
         if self.planner == 'context-idle':
             if joint_velocity is None:
                 raise ValueError('Context planner requires measured joint velocity')
@@ -132,6 +144,14 @@ class SkillGoal:
             # This follows the actual root and cannot qualify as position hold.
             target_pos[:2] += np.asarray(position)[:2]-self.position[:2]
         delta_pos = actual_rot.inv().apply(target_pos-actual_pos)
+        self.raw_anchor_translation = delta_pos.copy()
+        self.idle_lookahead = self.scheduler.horizon*self.scheduler.dt if (
+            self.idle_velocity_feedback and stable_reference and self.has_motion_request) else 0.
+        if self.idle_lookahead:
+            # Feed predicted position error over the existing committed horizon.
+            # The world target, joint trajectory and reference velocities stay
+            # fixed; at zero measured speed this reduces to original feedback.
+            delta_pos -= actual_rot.inv().apply(self.idle_root_velocity*self.idle_lookahead)
         # Experimental feedback scaling once the complete committed window is
         # standing. Ramped so an immediate mode change cannot jump the anchor.
         position = np.asarray(position, dtype=float)
