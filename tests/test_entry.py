@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from supermimic.deploy.entry import EntryController, EntryPhase, EntryThresholds, QuinticPose
+from supermimic.deploy.entry import EntryController, EntryPhase, EntryThresholds, QuinticPose, PreparationLoadCompensator
 
 
 class EntryTests(unittest.TestCase):
@@ -42,6 +42,27 @@ class EntryTests(unittest.TestCase):
         c=self.controller()
         with self.assertRaisesRegex(ValueError, 'settle'):
             for t in np.arange(0., 2.5, .02): c.step(float(t), [1.], [0.], [0.]*3, [0., 0., -1.])
+
+    def test_load_compensation_budget_slew_and_antiwindup(self):
+        c=PreparationLoadCompensator([40.], [4.], [36.], integral_gain=.3,max_bias_speed=.08,effort_fraction=.5)
+        old=0.
+        for _ in range(2000):
+            bias=c.update([.2],[0.],[0.],.02)[0]
+            self.assertLessEqual(abs(bias-old),.001600001);old=bias
+        self.assertLessEqual(bias,.45000001)
+        # A target already saturating the actuator cannot wind the bias farther.
+        before=c.bias.copy();c.update([2.],[0.],[0.],.02);np.testing.assert_array_equal(c.bias,before)
+        c.update([-.2],[0.],[0.],.02);self.assertLess(c.bias[0],before[0])
+
+    def test_compensated_target_is_continuous_at_first_handover_frame(self):
+        c=self.controller();t=0.
+        while c.phase!=EntryPhase.HANDOVER:
+            c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],preparation_bias=[.2]);t+=.02
+        np.testing.assert_allclose(c.last_command[0],[.2])
+        c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],policy_target=[1.])
+        self.assertGreater(c.last_command[0][0],.2)
+        with self.assertRaisesRegex(ValueError,'cannot change'):
+            c.step(t+.02,[0.],[0.],[0.]*3,[0.,0.,-1.],policy_target=[1.],preparation_bias=[.3])
 
 
 if __name__ == '__main__': unittest.main()

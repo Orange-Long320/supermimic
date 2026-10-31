@@ -71,12 +71,13 @@ class EntryController:
         self.phase = EntryPhase.PREPARE; self.reason = None
         self.started = self.last_tick = self.settle_started = self.quiet_since = self.handover_started = None
         self.history_samples = 0; self.last_command = None
+        self.preparation_bias = np.zeros_like(trajectory.start)
 
     def fault(self, reason):
         self.phase = EntryPhase.FAULT; self.reason = str(reason)
         raise ValueError(self.reason)
 
-    def step(self, now, q, velocity, omega, gravity, *, policy_target=None):
+    def step(self, now, q, velocity, omega, gravity, *, policy_target=None, preparation_bias=None):
         if self.phase == EntryPhase.FAULT: raise ValueError('Entry fault is latched: '+self.reason)
         q, velocity, omega, gravity = (np.asarray(x, dtype=float) for x in (q, velocity, omega, gravity))
         if (q.shape != self.path.start.shape or velocity.shape != q.shape or omega.shape != (3,)
@@ -86,12 +87,18 @@ class EntryController:
             self.fault('Entry sample clock or gap')
         self.last_tick = now
         if self.started is None: self.started = now
+        if preparation_bias is not None:
+            if self.phase not in (EntryPhase.PREPARE, EntryPhase.SETTLE, EntryPhase.HISTORY):
+                self.fault('Preparation compensation cannot change after handover starts')
+            bias = np.asarray(preparation_bias, dtype=float)
+            if bias.shape != q.shape or not np.isfinite(bias).all(): self.fault('Invalid preparation compensation')
+            self.preparation_bias = bias.copy()
         prep_kp, prep_kd, policy_kp, policy_kd = self.gains
         if self.phase == EntryPhase.PREPARE:
             target, target_velocity, _ = self.path.sample(now-self.started)
             if now-self.started >= self.path.duration:
                 self.phase = EntryPhase.SETTLE; self.settle_started = now
-            command = (target, target_velocity, prep_kp.copy(), prep_kd.copy())
+            command = (target+self.preparation_bias, target_velocity, prep_kp.copy(), prep_kd.copy())
         else:
             norm = np.linalg.norm(gravity)
             quiet = (norm > 1e-8 and np.max(np.abs(q-self.path.target)) <= self.thresholds.position_error
@@ -113,15 +120,46 @@ class EntryController:
                             self.phase = EntryPhase.HANDOVER; self.handover_started = now
                     else:
                         self.phase = EntryPhase.SETTLE; self.quiet_since = None; self.history_samples = 0
-                command = (self.path.target.copy(), np.zeros_like(q), prep_kp.copy(), prep_kd.copy())
+                command = (self.path.target+self.preparation_bias, np.zeros_like(q), prep_kp.copy(), prep_kd.copy())
             else:
                 if policy_target is None: self.fault('Missing policy target during handover/active')
                 policy_target = np.asarray(policy_target, dtype=float)
                 if policy_target.shape != q.shape or not np.isfinite(policy_target).all(): self.fault('Invalid policy target')
                 s = float(np.clip((now-self.handover_started)/self.thresholds.handover_seconds, 0., 1.))
                 blend = 10*s**3-15*s**4+6*s**5
-                command = ((1-blend)*self.path.target+blend*policy_target, np.zeros_like(q),
+                command = ((1-blend)*(self.path.target+self.preparation_bias)+blend*policy_target, np.zeros_like(q),
                            (1-blend)*prep_kp+blend*policy_kp, (1-blend)*prep_kd+blend*policy_kd)
                 if s >= 1.: self.phase = EntryPhase.ACTIVE
         self.last_command = tuple(v.copy() for v in command)
         return self.last_command
+
+
+class PreparationLoadCompensator:
+    """Slow command-space bias for static PD load error, never sensor zeroing.
+
+    Caller supplies the validated effort budget; bias is slew limited and stops
+    integrating farther into predicted actuator saturation. Freeze at handover;
+    EntryController fades its final command contribution continuously to zero.
+    """
+    def __init__(self, kp, kd, effort, *, integral_gain, max_bias_speed, effort_fraction):
+        self.kp, self.kd, self.effort = (np.asarray(v, dtype=float) for v in (kp, kd, effort))
+        if (self.kp.ndim != 1 or any(v.shape != self.kp.shape for v in (self.kd, self.effort))
+                or not np.isfinite(np.r_[self.kp, self.kd, self.effort, integral_gain, max_bias_speed, effort_fraction]).all()
+                or np.any(self.kp <= 0) or np.any(self.kd < 0) or np.any(self.effort <= 0)
+                or integral_gain <= 0 or max_bias_speed <= 0 or not 0 < effort_fraction < 1):
+            raise ValueError('Invalid preparation compensation contract')
+        self.ki, self.speed = integral_gain, max_bias_speed
+        self.limit = effort_fraction*self.effort/self.kp
+        self.bias = np.zeros_like(self.kp)
+
+    def update(self, desired, measured, velocity, dt):
+        desired, measured, velocity = (np.asarray(x, dtype=float) for x in (desired, measured, velocity))
+        if (any(x.shape != self.bias.shape for x in (desired, measured, velocity))
+                or not np.isfinite(np.r_[desired, measured, velocity, dt]).all() or not 0 < dt <= .031):
+            raise ValueError('Invalid preparation compensation sample')
+        change = np.clip(self.ki*(desired-measured)*dt, -self.speed*dt, self.speed*dt)
+        proposed = np.clip(self.bias+change, -self.limit, self.limit)
+        effort = self.kp*(desired+proposed-measured)-self.kd*velocity
+        drives_saturation = (np.abs(effort) >= self.effort) & ((proposed-self.bias)*effort > 0)
+        self.bias = np.where(drives_saturation, self.bias, proposed)
+        return self.bias.copy()

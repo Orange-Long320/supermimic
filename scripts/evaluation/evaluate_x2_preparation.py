@@ -16,7 +16,7 @@ from scipy.spatial.transform import Rotation
 import torch
 import yaml
 
-from supermimic.deploy.entry import EntryController, EntryPhase, EntryThresholds, QuinticPose
+from supermimic.deploy.entry import EntryController, EntryPhase, EntryThresholds, QuinticPose, PreparationLoadCompensator
 from supermimic.deploy.skill_goal import SkillGoal
 from supermimic.deploy.torch_policy import TorchScriptPolicy
 
@@ -33,6 +33,7 @@ def main():
     p.add_argument('--spring',type=float,default=2000.)
     p.add_argument('--unload',action='store_true')
     p.add_argument('--active-seconds',type=float,default=15.)
+    p.add_argument('--load-compensation', action='store_true')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120): raise ValueError('Invalid scenario')
@@ -64,6 +65,8 @@ def main():
     path=QuinticPose(raw,ref,np.full(n,.35),np.full(n,.4),minimum_duration=8.)
     thresholds=EntryThresholds(.08,.12,.20,.15,.5,12.,.031,10,1.)
     entry=EntryController(path,thresholds,prep_kp,prep_kd,kp,kd)
+    compensator=PreparationLoadCompensator(prep_kp,prep_kd,np.max(np.abs(limits),axis=1),
+                    integral_gain=.3,max_bias_speed=.08,effort_fraction=.5) if a.load_compensation else None
     policy=TorchScriptPolicy(a.policy);tracker=None;history=deque(maxlen=10)
     previous=(raw-default)/scale;previous_target=raw.copy();current_target=raw.copy()
     local_attach=np.array([a.attachment_x,0.,.15]);point=d.xpos[torso]+d.xmat[torso].reshape(3,3)@local_attach
@@ -87,7 +90,11 @@ def main():
                 obs=tuple(float(v) for term in range(5) for h in history for v in h[term])
                 action=np.asarray(policy.infer(obs,tuple(float(v) for v in goal)))
                 proposed=default+scale*action;tracker.advance()
-            current_target,target_v,kp_now,kd_now=entry.step(now,q,qd,omega,gravity,policy_target=proposed)
+            bias=None
+            if compensator is not None and entry.phase in (EntryPhase.PREPARE,EntryPhase.SETTLE,EntryPhase.HISTORY):
+                desired=path.sample(now)[0]
+                bias=compensator.update(desired,q,qd,.02)
+            current_target,target_v,kp_now,kd_now=entry.step(now,q,qd,omega,gravity,policy_target=proposed,preparation_bias=bias)
             if entry.phase!=last_phase:
                 events.append({'time_s':now,'phase':entry.phase.value})
                 if entry.phase in (EntryPhase.HISTORY,EntryPhase.SETTLE):history.clear()
@@ -124,7 +131,7 @@ def main():
                 'joint_position':q.tolist(),'target':current_target.tolist(),'kp':kp_now.tolist(),'kd':kd_now.tolist(),
                 'max_target_step_rad':float(np.max(np.abs(current_target-previous_target))),
                 'max_joint_error_rad':float(np.max(np.abs(q-ref))), 'max_joint_speed_rad_s':float(np.max(np.abs(qd))),
-                'angular_speed_rad_s':float(np.linalg.norm(omega)), 'normal_n':normal.tolist(),
+                'angular_speed_rad_s':float(np.linalg.norm(omega)), 'gravity_body':gravity.tolist(), 'normal_n':normal.tolist(),
                 'loaded_slip_m_s':np.divide(slip_force,normal,out=np.zeros(2),where=normal>1e-6).tolist(),
                 'max_tension_n':maximum_tension,'last_support_force':support_force.tolist(),
                 'actuator_effort_ratio':float(np.max(np.abs(d.actuator_force[motors])/np.max(np.abs(limits),axis=1))),
@@ -141,6 +148,7 @@ def main():
                 'hardware_geometry_or_stiffness_validated':False},
             'initial_outside_file_envelope':initial_outside,'prep_duration_s':path.duration,'thresholds_sim_only':vars(thresholds),
             'prep_gain_source':'device SDK example, used only as a simulation candidate',
+            'load_compensation_sim_only':a.load_compensation,
             'previous_action_history':'actual commanded PD target, normalized by selected action default/scale; no invented history',
             'events':events,'failure':failure,'frames':len(rows),'active_start_s':active_start,
             'active_seconds':0. if active_start is None or not rows else rows[-1]['time_s']-active_start,
