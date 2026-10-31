@@ -16,6 +16,8 @@ profile="$source_root/assets/robots/x2_ultra/profile.json"
 dataset=${8:-/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r2/dataset}
 model=${9:-/home/2025-Long.xh/HHD/data/supermimic/logs/x2_deploy_foundation_20261030_r1/export/policy.pt}
 [[ -f "$model" ]] || { echo "Policy does not exist: $model" >&2; exit 1; }
+[[ -f "$dataset/manifest.json" ]] || { echo "Dataset manifest missing: $dataset" >&2; exit 1; }
+sha256sum "$model" "$dataset/manifest.json" > "$trial/input-sha256.txt"
 cmd_pid= state_pid= policy_pid= sim_pid=
 cleanup() {
   if [[ -n "$sim_pid" ]]; then
