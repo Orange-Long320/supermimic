@@ -93,6 +93,13 @@ def main():
                 now = time.monotonic()
                 if now < next_tick:
                     rclpy.spin_once(node, timeout_sec=min(.002, next_tick-now)); continue
+                # Even an inference overrun must service incoming subscriptions
+                # before another sample; otherwise cached inputs age indefinitely.
+                drain_deadline = time.monotonic()+.004
+                for _ in range(32):
+                    rclpy.spin_once(node, timeout_sec=0.)
+                    if time.monotonic() >= drain_deadline: break
+                now = time.monotonic()
                 next_tick = now+.02
                 try:
                     if not pose or set(groups) != {'leg', 'waist', 'head', 'arm'} or not status:
