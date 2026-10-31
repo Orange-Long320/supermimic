@@ -66,16 +66,24 @@ def main():
     history = deque(maxlen=10); previous = np.zeros(31); session = None; last_stamp = None
     initialized = False; rejected = Counter(); outside = Counter(); frames = 0
     durations, inference, intervals, ages, steps = [], [], [], [], []
-    started = time.monotonic(); next_tick = started; previous_target = None; last_begin = None; fatal = None
+    started = time.monotonic(); processed_received = 0; previous_target = None; last_begin = None; fatal = None
     slowest_frame = None
     try:
         with (a.out/'frames.jsonl').open('x') as log:
             while time.monotonic()-started < a.seconds:
-                # Only one 50 Hz subscription; no repeated high-rate HAL parsing.
-                rclpy.spin_once(node, timeout_sec=max(0., min(.002, next_tick-time.monotonic())))
-                if time.monotonic() < next_tick: continue
-                begin = time.monotonic(); next_tick += .02
-                if next_tick < begin: next_tick = begin+.02
+                # The producer already samples at 50 Hz. A second independent
+                # 50 Hz timer aliases its phase/jitter and can skip a real sample,
+                # breaking the ten-frame history even when both loops keep up.
+                # Consume each received state once, using its acquisition clock
+                # for history validation; never pad a missing observation.
+                rclpy.spin_once(node, timeout_sec=.02)
+                if received == processed_received:
+                    if latest and time.time()-latest['state_stamp'] > .05 and history:
+                        history.clear(); previous = np.zeros(31); last_stamp = None
+                        rejected['state stream stopped or stale'] += 1
+                    continue
+                processed_received = received
+                begin = time.monotonic()
                 try:
                     if not latest: raise ValueError('waiting for atomic state')
                     row = validate_policy_packet(latest, names, time.time())
@@ -130,6 +138,7 @@ def main():
     finally:
         result = dict(scope=__doc__, policy_sha256=digest, seconds=time.monotonic()-started,
             backend='numpy-fp32' if a.numpy_policy else 'torch-frozen-fp32', numpy_archive_sha256=a.numpy_sha256,
+            sampling='one evaluation per received state; producer 50 Hz; acquisition-time history',
             received=received, frames=frames, session_id=session, rejected=dict(rejected),
             fixture_error=fixture_error, inference_ms=percentiles(inference), processing_ms=percentiles(durations),
             policy_frame_interval_s=percentiles(intervals), state_age_after_inference_s=percentiles(ages),
