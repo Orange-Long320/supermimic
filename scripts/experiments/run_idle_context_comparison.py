@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -22,6 +24,16 @@ def sha(path):
         for b in iter(lambda: f.read(1024*1024), b''):
             h.update(b)
     return h.hexdigest()
+
+
+def validate_fixture_launcher(run, domain_id):
+    launcher = (run/'start-sim.sh').read_text()
+    match = re.search(r'^run=(.+)$', launcher, re.MULTILINE)
+    if not match or Path(shlex.split(match.group(1))[0]).resolve() != run.resolve():
+        raise ValueError('Simulator launcher working directory is not this isolated fixture')
+    domain = re.search(r'ROS_DOMAIN_ID=(\d+)', launcher)
+    if not domain or int(domain.group(1)) != domain_id:
+        raise ValueError('Simulator launcher ROS domain differs from selected isolated domain')
 
 
 def main():
@@ -40,6 +52,7 @@ def main():
     root = a.run/'source'
     if not 128 <= a.domain <= 232 or not 40 <= a.seconds <= 90 or len(set(a.trials)) != len(a.trials):
         raise ValueError('Invalid bounded simulation configuration')
+    validate_fixture_launcher(a.run, a.domain)
     schedule = [[0., 'stand'], [3., 'walk'], [6.6, 'stand'], [13., 'walk'],
                 [17., 'stand'], [23.4, 'walk'], [27.8, 'stand']]
     schedule_path = a.run/'schedule.json'
