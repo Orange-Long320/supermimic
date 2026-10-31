@@ -67,6 +67,7 @@ def main():
     initialized = False; rejected = Counter(); outside = Counter(); frames = 0
     durations, inference, intervals, ages, steps = [], [], [], [], []
     started = time.monotonic(); next_tick = started; previous_target = None; last_begin = None; fatal = None
+    slowest_frame = None
     try:
         with (a.out/'frames.jsonl').open('x') as log:
             while time.monotonic()-started < a.seconds:
@@ -98,8 +99,10 @@ def main():
                         tracker.position = np.asarray(row['position']).copy()
                         tracker.yaw = tracker.rotation(quat).as_euler('xyz')[2]; initialized = True
                     if len(history) < 10: continue
+                    goal_begin=time.monotonic()
                     obs = np.concatenate([h[term] for term in range(5) for h in history])
                     goal = tracker.goal(row['position'], quat, q, 'stand')
+                    goal_end=time.monotonic()
                     infer_begin = time.perf_counter(); action = policy.infer(obs, goal)
                     inference.append((time.perf_counter()-infer_begin)*1000)
                     target = default+scale*action
@@ -108,13 +111,19 @@ def main():
                     if last_begin is not None: intervals.append(begin-last_begin)
                     last_begin = begin; ages.append(time.time()-stamp)
                     if previous_target is not None: steps.append(float(np.max(np.abs(target-previous_target))))
+                    log_begin=time.monotonic()
                     log.write(json.dumps({'elapsed': begin-started, 'state_stamp': stamp,
                         'session_id': session, 'joint_position': q.tolist(), 'position': row['position'],
                         'observation': obs.tolist(), 'goal': goal.tolist(), 'action': action.tolist(),
                         'raw_pd_target': target.tolist(), 'measured_outside_file_bounds': bad,
                         'eligible_for_control': False, 'previous_action_scope': 'unexecuted shadow output'})+'\n')
                     previous = action; previous_target = target; tracker.advance(); frames += 1
-                    durations.append((time.monotonic()-begin)*1000)
+                    duration=(time.monotonic()-begin)*1000;durations.append(duration)
+                    if slowest_frame is None or duration>slowest_frame['total_ms']:
+                        slowest_frame={'elapsed':begin-started,'total_ms':duration,
+                            'validation_graph_and_history_ms':(goal_begin-begin)*1000,
+                            'observation_goal_ms':(goal_end-goal_begin)*1000,
+                            'inference_ms':inference[-1],'log_ms':(time.monotonic()-log_begin)*1000}
                 except ValueError as exc:
                     rejected[str(exc)] += 1; history.clear(); previous = np.zeros(31); last_stamp = None
     except Exception as exc: fatal = repr(exc)
@@ -126,6 +135,7 @@ def main():
             policy_frame_interval_s=percentiles(intervals), state_age_after_inference_s=percentiles(ages),
             raw_target_step_rad=percentiles(steps), measured_outside_file_bounds_frame_counts=dict(outside),
             processing_over_20ms=sum(t>20 for t in durations), fatal=fatal,
+            slowest_frame=slowest_frame,
             motor_output_enabled=False, control_transferred=False, ready_for_hardware_trial=False)
         (a.out/'report.json').write_text(json.dumps(result, indent=2, allow_nan=False)+'\n')
         print(json.dumps(result, indent=2, allow_nan=False)); node.destroy_node(); rclpy.try_shutdown()
