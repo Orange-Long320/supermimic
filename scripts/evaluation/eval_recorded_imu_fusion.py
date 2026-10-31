@@ -10,6 +10,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+from scipy.signal import savgol_filter
 from scipy.spatial.transform import Rotation, Slerp
 
 
@@ -99,6 +100,7 @@ def main():
     H = np.zeros((2,6)); H[0,2]=H[1,3]=1
     R = np.eye(2)*(.10**2); I = np.eye(6); accepted = switches = 0; last = None
     last_switch_step = -len(grid); rejected_innovation = 0; reduced_confidence = 0
+    selected = np.full(len(grid), -1, dtype=int)
     for i in range(1,len(grid)):
         u = measured_world[i,:2]; x = F@x+B@u; P = F@P@F.T+Q
         imu[i,:2] = imu[i-1,:2]+imu[i-1,2:]*dt+.5*u*dt**2
@@ -135,6 +137,7 @@ def main():
                     switches += 1
                     last_switch_step = i
                 last = foot
+                selected[i] = foot
         est[i] = x
     xy = truth[:,:2]-truth[0,:2]
     def metrics(estimate):
@@ -163,11 +166,29 @@ def main():
                          'duration_s':float(grid[end-1]-grid[begin]),
                          'end_displacement_error_m':float(segment_error[-1]),
                          'max_displacement_error_m':float(segment_error.max())})
+    ground_proxy = None
+    if a.foot_method == 'contact_jac':
+        indices = np.flatnonzero(selected >= 0)
+        if len(indices):
+            # These signals use simulator truth for evaluation only; neither
+            # penetration nor proximity proves force-bearing contact.
+            sides = selected[indices]
+            gap = truth[indices,2] + rel[indices,sides,2]
+            truth_vel = savgol_filter(truth,15,3,deriv=1,delta=dt,axis=0,mode='interp')
+            speed = np.linalg.norm(truth_vel[indices,:2]+foot_v[indices,sides,:2],axis=1)
+            near = gap <= .005
+            ground_proxy = {'selected_samples':len(indices),
+                            'near_ground_fraction':float(np.mean(near)),
+                            'above_2cm_fraction':float(np.mean(gap > .02)),
+                            'near_ground_speed_p95_m_s':float(np.percentile(speed[near],95)) if near.any() else None,
+                            'near_ground_speed_over_0_1_fraction':float(np.mean(speed[near] > .1)) if near.any() else None,
+                            'scope':'offline kinematic proxy with simulator root truth; no actual load or slip labels'}
     report = {'seconds':float(grid[-1]-grid[0]),'samples':len(grid),
               'imu_only_xy_error':metrics(imu[:,:2]),'fusion_xy_error':metrics(est[:,:2]),
               'foot_updates':accepted,'foot_switches':switches,'foot_dwell_s':a.foot_dwell,'foot_method':a.foot_method,
               'slip_guard':a.slip_guard,'rejected_innovation':rejected_innovation,
               'reduced_confidence':reduced_confidence,
+              'selected_foot_ground_proxy':ground_proxy,
               'stop_windows':stop,'segments':segments,
               'simulation':'Recorded official simulation ROS IMU specific force and orientation, 50 Hz trace resampled by offline interpolation; recorded joint positions; no ground-truth acceleration used',
               'max_trace_gap_s':float(np.max(np.diff(ts))),
