@@ -19,6 +19,8 @@ def main():
         p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--foot-dwell', type=float, default=0.,
                    help='Exploratory minimum time between support-foot changes')
+    p.add_argument('--foot-method', choices=('ankle_diff', 'contact_jac'), default='ankle_diff',
+                   help='Kinematic velocity proxy; neither option measures actual contact')
     a = p.parse_args()
     if a.out.exists() or not 0. <= a.foot_dwell <= .5:
         raise ValueError('Expected new output and a dwell time between 0 and 0.5 seconds')
@@ -52,14 +54,40 @@ def main():
     if min(*ids,*feet) < 0:
         raise ValueError('Missing model joint or foot')
     addr = [m.jnt_qposadr[i] for i in ids]
+    vaddr = [m.jnt_dofadr[i] for i in ids]
     rel = np.zeros((len(grid),2,3)); quats = rot.as_quat()[:,[3,0,1,2]]
-    for i in range(len(grid)):
-        d.qpos[:7] = np.r_[[0.,0.,0.],quats[i]]; d.qpos[addr] = q[i]
-        mujoco.mj_kinematics(m,d); rel[i] = d.xpos[feet]
-    # Causal first difference with a simple IIR low-pass.
     foot_v = np.zeros_like(rel)
-    for i in range(1,len(grid)):
-        foot_v[i] = .25*(rel[i]-rel[i-1])/dt+.75*foot_v[i-1]
+    if a.foot_method == 'contact_jac':
+        if not all('joint_vel' in r and 'body_angular_velocity' in r for r in rows):
+            raise ValueError('Recorded joint velocities and body angular velocity required')
+        joint_v = interp(np.array([r['joint_vel'] for r in rows]))
+        gyro = interp(np.array([r['body_angular_velocity'] for r in rows]))
+        if not np.isfinite(joint_v).all() or not np.isfinite(gyro).all():
+            raise ValueError('Nonfinite gyro or joint velocity')
+        spheres = [[j for j in range(m.ngeom) if m.geom_bodyid[j] == body
+                    and m.geom_type[j] == mujoco.mjtGeom.mjGEOM_SPHERE and m.geom_contype[j]]
+                   for body in feet]
+        if not all(spheres):
+            raise ValueError('Missing foot collision spheres')
+        for i in range(len(grid)):
+            d.qpos[:7] = np.r_[[0.,0.,0.],quats[i]]; d.qpos[addr] = q[i]
+            d.qvel[:] = 0.; d.qvel[3:6] = gyro[i]; d.qvel[vaddr] = joint_v[i]
+            mujoco.mj_kinematics(m,d); mujoco.mj_comPos(m,d)
+            for foot, ids_ in enumerate(spheres):
+                sphere = min(ids_, key=lambda j:d.geom_xpos[j,2]-m.geom_size[j,0])
+                point = d.geom_xpos[sphere].copy(); point[2] -= m.geom_size[sphere,0]
+                rel[i,foot] = point
+                jac = np.zeros((3,m.nv))
+                mujoco.mj_jac(m,d,jac,None,point,feet[foot])
+                raw_v = jac@d.qvel
+                foot_v[i,foot] = raw_v if i == 0 else .5*raw_v+.5*foot_v[i-1,foot]
+    else:
+        for i in range(len(grid)):
+            d.qpos[:7] = np.r_[[0.,0.,0.],quats[i]]; d.qpos[addr] = q[i]
+            mujoco.mj_kinematics(m,d); rel[i] = d.xpos[feet]
+        # Causal first difference with a simple IIR low-pass.
+        for i in range(1,len(grid)):
+            foot_v[i] = .25*(rel[i]-rel[i-1])/dt+.75*foot_v[i-1]
     # State: horizontal position, velocity and world-frame acceleration bias.
     x = np.zeros(6); P = np.diag([.01,.01,.1,.1,.01,.01])
     imu = np.zeros((len(grid),4)); est = np.zeros((len(grid),6))
@@ -119,7 +147,7 @@ def main():
                          'max_displacement_error_m':float(segment_error.max())})
     report = {'seconds':float(grid[-1]-grid[0]),'samples':len(grid),
               'imu_only_xy_error':metrics(imu[:,:2]),'fusion_xy_error':metrics(est[:,:2]),
-              'foot_updates':accepted,'foot_switches':switches,'foot_dwell_s':a.foot_dwell,
+              'foot_updates':accepted,'foot_switches':switches,'foot_dwell_s':a.foot_dwell,'foot_method':a.foot_method,
               'stop_windows':stop,'segments':segments,
               'simulation':'Recorded official simulation ROS IMU specific force and orientation, 50 Hz trace resampled by offline interpolation; recorded joint positions; no ground-truth acceleration used',
               'max_trace_gap_s':float(np.max(np.diff(ts))),
