@@ -3,9 +3,12 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <array>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -23,7 +26,7 @@ static int64_t wall_ns() {
 }
 class Audit : public rclcpp::Node {
  public:
-  Audit() : Node("supermimic_readonly_imu_transport_audit") {
+  explicit Audit(bool stop_on_gap) : Node("supermimic_readonly_imu_transport_audit"), stop_on_gap_(stop_on_gap) {
     for (int i=0;i<3;++i) {
       rows[i].reserve(65000);
       auto qos=rclcpp::QoS(400).durability_volatile();
@@ -37,23 +40,29 @@ class Audit : public rclcpp::Node {
             wall_ns(),static_cast<int64_t>(m.source_timestamp),static_cast<int64_t>(m.received_timestamp),
             m.publication_sequence_number,m.reception_sequence_number,{}};
           std::copy(std::begin(m.publisher_gid.data),std::end(m.publisher_gid.data),row.gid.begin());
+          if(stop_on_gap_ && i==1 && !rows[i].empty() && row.header-rows[i].back().header>30000000LL && !gap_seen_) {
+            gap_seen_=true; finish_at_=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+          }
           rows[i].push_back(row);
         });
     }
   }
   std::array<std::vector<Row>,3> rows;
+  bool finished() const {return gap_seen_ && std::chrono::steady_clock::now()>=finish_at_;}
  private:
+  bool stop_on_gap_,gap_seen_=false;
+  std::chrono::steady_clock::time_point finish_at_;
   std::array<rclcpp::Subscription<Imu>::SharedPtr,3> subs;
 };
 int main(int argc,char **argv) {
-  if(argc!=3) return 2;
+  if(argc!=3 && (argc!=4 || std::string(argv[3])!="stop_on_gap")) return 2;
   const double seconds=std::stod(argv[1]); const std::string out=argv[2];
   if(!std::isfinite(seconds)||seconds<5||seconds>300||std::filesystem::exists(out)) return 2;
   rclcpp::init(argc,argv);
-  auto node=std::make_shared<Audit>();
+  auto node=std::make_shared<Audit>(argc==4);
   rclcpp::executors::SingleThreadedExecutor executor;executor.add_node(node);
   const auto until=std::chrono::steady_clock::now()+std::chrono::duration<double>(seconds);
-  while(rclcpp::ok()&&std::chrono::steady_clock::now()<until) executor.spin_once(std::chrono::milliseconds(10));
+  while(rclcpp::ok()&&std::chrono::steady_clock::now()<until&&!node->finished()) executor.spin_once(std::chrono::milliseconds(10));
   std::ofstream file(out); if(!file) throw std::runtime_error("Cannot create audit output");
   file<<"reader,header_ns,callback_ns,rmw_source_ns,rmw_received_ns,publication_sequence,reception_sequence,gid\n";
   const char *labels[]={"native_best_effort","native_reliable","relay_reliable"};
