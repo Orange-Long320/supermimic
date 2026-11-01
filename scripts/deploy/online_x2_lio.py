@@ -134,6 +134,7 @@ def main():
             try:
                 for stamp_ns, received_ns, *values in self.imu_relay.decode(msg.data, time.time_ns()):
                     self.accept_imu(stamp_ns, 'lidar_imu_chest_front', values)
+                self.counts['imu_relay_recovered_packets'] = self.imu_relay.recovered_packets
             except (ValueError, TypeError, KeyError) as exc:
                 # Never splice integration across missing/invalid batches.
                 self.imu_rows.clear(); self.imu_stamps_ns.clear(); self.state = None

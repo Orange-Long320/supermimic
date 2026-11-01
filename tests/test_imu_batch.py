@@ -36,5 +36,31 @@ class ImuBatchTest(unittest.TestCase):
         p['sequence']=3; p['overflow']=1
         with self.assertRaises(ValueError): self.read(p)
 
+    def test_replay_recovers_dropped_packet_using_original_samples(self):
+        d=ImuBatchDecoder('a'*32)
+        row=[1,900,950,1.,2.,3.,4.,5.,6.]
+        p={'schema':2,'session':'a'*32,'sequence':1,'published_ns':1000,'rejected':0,'source_seq':1,'samples':[row]}
+        self.assertEqual(d.decode(json.dumps(p),1010), [row[1:]])
+        r2=[2,902,952,2.,3.,4.,5.,6.,7.]; r3=[3,904,954,3.,4.,5.,6.,7.,8.]
+        p.update(sequence=3,source_seq=3,samples=[row,r2,r3])
+        self.assertEqual(d.decode(json.dumps(p),1010), [r2[1:],r3[1:]])
+        self.assertEqual(d.recovered_packets,1)
+        p.update(sequence=4)
+        self.assertEqual(d.decode(json.dumps(p),1010), [])
+
+    def test_replay_unrecoverable_gap_and_source_error_reset(self):
+        d=ImuBatchDecoder('a'*32)
+        row=[1,900,950,1.,2.,3.,4.,5.,6.]
+        p={'schema':2,'session':'a'*32,'sequence':1,'published_ns':1000,'rejected':0,'source_seq':1,'samples':[row]}
+        d.decode(json.dumps(p),1010)
+        p.update(sequence=3,source_seq=3,samples=[[3,904,954,3.,4.,5.,6.,7.,8.]])
+        with self.assertRaises(ValueError): d.decode(json.dumps(p),1010)
+        p.update(sequence=4,source_seq=4,samples=[[3,904,954,3.,4.,5.,6.,7.,8.], [4,905,955,3.,4.,5.,6.,7.,8.]])
+        self.assertEqual(d.decode(json.dumps(p),1010), [p['samples'][-1][1:]])
+        p.update(sequence=5,rejected=1)
+        with self.assertRaises(ValueError): d.decode(json.dumps(p),1010)
+        p.update(sequence=6)
+        self.assertEqual(d.decode(json.dumps(p),1010), [])
+
 
 if __name__=='__main__': unittest.main()
