@@ -65,6 +65,21 @@ class PelvisStateTest(unittest.TestCase):
             skew=((plus-minus)/(2*epsilon))@r.T
             np.testing.assert_allclose(w,[skew[2,1],skew[0,2],skew[1,0]],atol=1e-9)
 
+    def test_analytic_mount_linear_velocity_matches_finite_difference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mount = self.mount_model(directory)
+            rng = np.random.default_rng(103)
+            for _ in range(50):
+                q, qd = rng.uniform(-1., 1., (2, 2)); epsilon = 1e-6
+                p, r, omega, velocity = mount.mount_with_velocity(q, qd)
+                expected_p, expected_r, expected_omega = mount.mount(q, qd)
+                plus = mount.mount(q+epsilon*qd)[0]
+                minus = mount.mount(q-epsilon*qd)[0]
+                np.testing.assert_allclose(p, expected_p, atol=1e-12)
+                np.testing.assert_allclose(r, expected_r, atol=1e-12)
+                np.testing.assert_allclose(omega, expected_omega, atol=1e-12)
+                np.testing.assert_allclose(velocity, (plus-minus)/(2*epsilon), atol=1e-9)
+
     def test_device_mount_rejects_bad_measurements_and_rotation(self):
         with tempfile.TemporaryDirectory() as directory:
             mount=self.mount_model(directory)

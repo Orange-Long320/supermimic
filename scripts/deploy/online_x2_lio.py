@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation
 import yaml
 
 from prepare_x2_fastlio_bag import convert_cloud, lidar_pose_in_imu
-from supermimic.deploy.online_inertial import parse_filter_state, CachedImuPropagation, fit_level_floor
+from supermimic.deploy.online_inertial import parse_filter_state, CachedImuPropagation, fit_level_floor, grid_tick_pending
 from supermimic.deploy.pelvis_state import UrdfPelvisMount, pelvis_from_imu, pelvis_angular_velocity, gravity_level_rotation, latest_causal
 
 
@@ -99,7 +99,11 @@ def main():
                          self.create_subscription(PointCloud2, '/aima/hal/sensor/lidar_chest_front/lidar_pointcloud', self.on_cloud, best),
                          self.create_subscription(Float64MultiArray, prefix+'/filter_state', self.on_state, 20)]
             if self.relay:
-                self.subs.append(self.create_subscription(String, '/supermimic/x2_joint_relay/state', self.on_relay, best))
+                # Absorb short executor stalls; decoder still rejects packets
+                # older than 50 ms, gaps, and original stale source samples.
+                relay_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
+                                       durability=DurabilityPolicy.VOLATILE)
+                self.subs.append(self.create_subscription(String, '/supermimic/x2_joint_relay/state', self.on_relay, relay_qos))
             else:
                 for group in self.groups:
                     self.subs.append(self.create_subscription(JointStateArray, '/aima/hal/joint/'+group+'/state',
@@ -125,11 +129,14 @@ def main():
             if reason:
                 self.rejects[reason] += 1; return
             self.imu_rows.append(row)
-            self.imu_stamps_ns.append(msg.header.stamp.sec*10**9+msg.header.stamp.nanosec)
+            sample_ns = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+            self.imu_stamps_ns.append(sample_ns)
             self.imu_pub.publish(msg); self.counts['adapted_imu'] += 1
-            if args.state_clock == 'imu-grid':
+            if args.state_clock == 'imu-grid' and grid_tick_pending(sample_ns, self.last_emitted_ns):
                 # Emit as soon as actual IMU data bracket the next grid time.
-                # The timer remains a retry path, not a second sampling clock.
+                # Once that grid tick succeeded, repeated IMUs cannot produce
+                # another state for it. Failed ticks still retry; the timer is
+                # also a retry path, not a second sampling clock.
                 self.publish_pose()
 
         def on_cloud(self, msg):
@@ -242,12 +249,10 @@ def main():
                 imu_age = now-propagated.stamp
                 if not 0 <= imu_age <= .05: raise ValueError('latest IMU stale')
                 q, qd, joint_ages, joint_rows = self.joints(propagated.stamp, with_rows=True, at_ns=ns)
-                ppi, rpi, chain_omega = mount.mount(q, qd)
+                ppi, rpi, chain_omega, mount_v = mount.mount_with_velocity(q, qd)
                 position, rotation = pelvis_from_imu(propagated.position, propagated.rotation.as_matrix(), ppi, rpi)
                 position = self.level.apply(position); rotation = self.level.as_matrix()@rotation
                 omega = pelvis_angular_velocity(gyro, rpi, chain_omega)
-                epsilon = 1e-5
-                mount_v = (mount.mount(q+epsilon*qd)[0]-mount.mount(q-epsilon*qd)[0])/(2*epsilon)
                 velocity = self.level.apply(propagated.velocity)-rotation@mount_v-np.cross(rotation@omega, rotation@ppi)
                 if self.shift is None:
                     if self.cloud is None: raise ValueError('waiting for live floor cloud')

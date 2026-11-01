@@ -9,6 +9,11 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
+def grid_tick_pending(sample_ns, last_emitted_ns):
+    """Retry a grid time until it succeeds; never emit that time twice."""
+    return last_emitted_ns is None or sample_ns//20_000_000*20_000_000 > last_emitted_ns
+
+
 @dataclass(frozen=True)
 class InertialState:
     stamp: float

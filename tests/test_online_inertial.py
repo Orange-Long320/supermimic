@@ -3,11 +3,17 @@ import unittest
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from supermimic.deploy.online_inertial import parse_filter_state, propagate_imu, fit_level_floor, CachedImuPropagation
+from supermimic.deploy.online_inertial import parse_filter_state, propagate_imu, fit_level_floor, CachedImuPropagation, grid_tick_pending
 from dataclasses import replace
 
 
 class OnlineInertialTest(unittest.TestCase):
+    def test_grid_tick_retries_until_success_without_repeating(self):
+        self.assertTrue(grid_tick_pending(25_000_000, None))
+        self.assertTrue(grid_tick_pending(25_000_000, 0))
+        self.assertFalse(grid_tick_pending(39_999_999, 20_000_000))
+        self.assertTrue(grid_tick_pending(40_000_000, 20_000_000))
+
     def state(self, rotation=None):
         rotation = rotation or Rotation.identity()
         return parse_filter_state([1., 0., 0., 0., *rotation.as_quat(), 0., 0., 0.,

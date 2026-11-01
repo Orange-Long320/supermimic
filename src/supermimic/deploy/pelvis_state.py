@@ -69,6 +69,23 @@ class UrdfPelvisMount:
                 r = r@self.rotation.from_rotvec(axis*q[index]).as_matrix()
         return p+r@self.p_mount, r@self.r_mount, omega
 
+    def mount_with_velocity(self, positions, velocities):
+        """Mount pose and linear/angular velocity expressed in the pelvis frame."""
+        q, qd = np.asarray(positions, dtype=float), np.asarray(velocities, dtype=float)
+        if q.shape != (len(self.names),) or qd.shape != q.shape or not np.isfinite(np.r_[q, qd]).all():
+            raise ValueError('Invalid named joint values')
+        p, r, omega, v = np.zeros(3), np.eye(3), np.zeros(3), np.zeros(3)
+        for xyz, origin_r, axis, index in self.chain:
+            offset = r@xyz
+            p += offset
+            v += np.cross(omega, offset)
+            r = r@origin_r
+            if index is not None:
+                omega += (r@axis)*qd[index]
+                r = r@self.rotation.from_rotvec(axis*q[index]).as_matrix()
+        offset = r@self.p_mount
+        return p+offset, r@self.r_mount, omega, v+np.cross(omega, offset)
+
 
 def gravity_level_rotation(up):
     """Minimal rotation taking static specific-force direction to world +Z."""
