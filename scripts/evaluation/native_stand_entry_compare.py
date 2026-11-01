@@ -181,7 +181,8 @@ def main():
         outputs[scenario] = summary
     result={'scenarios':outputs,'model_sha256':sha(a.scene),'policy_sha256':sha(a.policy),
             'dataset_manifest_sha256':sha(a.dataset/'manifest.json'),
-            'scope':'native MuJoCo CPU, same XML and independent PD implementation; actual solver contact forces, not official ROS simulator or hardware',
+            'scope':('native MuJoCo CPU, XML plus fixed-head equality and independent PD; actual solver contact forces, not hardware'
+                     if a.lock_head_pitch else 'native MuJoCo CPU, same XML and independent PD implementation; actual solver contact forces, not official ROS simulator or hardware'),
             'force_time_alignment':'last pre-integration solve, with post-integration joint and root states',
             'hold_load_threshold_n':10., 'imu_body_hypothesis':a.imu_body,
             'head_pitch_mode': 'fixed at zero with motor torque disabled; simulation counterfactual' if a.lock_head_pitch else 'original',
