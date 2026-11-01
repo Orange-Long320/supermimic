@@ -20,7 +20,7 @@ def main():
     p.add_argument('--hold-active-seconds',type=float,default=.2);a=p.parse_args()
     if os.environ.get('ROS_DOMAIN_ID')!='197' or not a.prefix.startswith('/supermimic/isolated_'):
         raise ValueError('Requires isolated domain and topics')
-    if not .2<=a.hold_active_seconds<=60.:raise ValueError('Invalid synthetic hold duration')
+    if not .2<=a.hold_active_seconds<=180.:raise ValueError('Invalid synthetic hold duration')
     from aimdk_msgs.msg import JointCommandArray
     import rclpy
     from rclpy.node import Node
