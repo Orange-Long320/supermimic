@@ -16,9 +16,11 @@ def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--folder',type=Path,required=True)
-    p.add_argument('--release',type=Path,required=True);p.add_argument('--prefix',required=True);a=p.parse_args()
+    p.add_argument('--release',type=Path,required=True);p.add_argument('--prefix',required=True)
+    p.add_argument('--hold-active-seconds',type=float,default=.2);a=p.parse_args()
     if os.environ.get('ROS_DOMAIN_ID')!='197' or not a.prefix.startswith('/supermimic/isolated_'):
         raise ValueError('Requires isolated domain and topics')
+    if not .2<=a.hold_active_seconds<=60.:raise ValueError('Invalid synthetic hold duration')
     from aimdk_msgs.msg import JointCommandArray
     import rclpy
     from rclpy.node import Node
@@ -41,33 +43,31 @@ def main():
         'max_stiffness':[100.]*n,'max_damping':[100.]*n,'fallback_damping':[3.]*n,
         'max_state_age':.05,'max_target_age':.05,'output_hz':100,'prep_kp':[1.]*n,'prep_kd':[1.]*n,
         'policy_kp':[1.]*n,'policy_kd':[1.]*n,'max_velocity':[10.]*n,'max_acceleration':[10.]*n,
-        'minimum_duration':.1,'blend_seconds':.2,'max_tick_gap':.031,'max_tilt':3.,'max_angular_speed':10.}
+        'minimum_duration':.1,'blend_seconds':.2,'max_tick_gap':.031,'max_tilt':3.,'max_angular_speed':10.,
+        'history_source':'policy'}
     pp=a.folder/'synthetic-plan.json';pp.write_text(json.dumps(plan));cp=a.folder/'synthetic-consent.json'
     cp.write_text(json.dumps({'user_confirmed_motor_power':True,'plan_sha256':sha(pp),'confirmed_wall':now,
                               'scope':'SYNTHETIC ISOLATED TEST ONLY; NOT USER CONSENT'}))
     (a.folder/'fixtures-ready').write_text('synthetic isolated test only\n')
     rclpy.init();node=Node('supermimic_synthetic_probe',enable_rosout=False,start_parameter_services=False)
     reliable=QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.VOLATILE)
-    best=QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.VOLATILE)
-    state=node.create_publisher(String,a.prefix+'/policy_state',best);trigger=node.create_publisher(String,a.prefix+'/policy_request',reliable)
-    groups={g:[] for g in JOINT_GROUPS}; subs=[];phases=[]
+    groups={g:[] for g in JOINT_GROUPS}; subs=[];phases=[];phase_times=[]
     for group in JOINT_GROUPS:
         def capture(msg,g=group):groups[g].append((time.monotonic(),[j.stiffness for j in msg.joints]))
         subs.append(node.create_subscription(JointCommandArray,a.prefix+'/hal/'+group+'/command',capture,reliable))
-    start=time.monotonic();requested=False;target_sub=None;state_enabled=True;stop_at=None;request_process=None
-    q=candidate['startup']['position'];quat=candidate['startup']['root_quat_wxyz'];position=candidate['startup']['root_position']
-    def capture_target(msg):phases.append(json.loads(msg.data)['phase'])
-    def publish_state():
-        if not state_enabled:return
-        t=time.time_ns();ts=t*1e-9
-        row={'schema':2,'session_id':'synthetic-only','motor_output_enabled':False,'joint_names':names,
-             'state_stamp_ns':t,'state_stamp':ts,'published_wall':ts,'joint_stamps_ns':[t]*4,
-             'joint_stamps':[ts]*4,'joint_received_wall':[ts]*4,'joint_domains':[0]*4,
-             'joint_position':q,'joint_velocity':[0.]*n,'quat_wxyz':quat,'position':position,'angular_velocity_body':[0.]*3}
-        msg=String();msg.data=json.dumps(row);state.publish(msg)
-    node.create_timer(.02,publish_state)
+    start=time.monotonic();requested=False;target_sub=None;stop_at=None;request_process=None;active_at=None
+    source_command=[sys.executable,str(a.folder/'tests/isolated_x2_state_source.py'),
+        '--release',str(a.release),'--prefix',a.prefix,'--out',str(a.folder/'synthetic-source-timing.json')]
+    if os.environ.get('SM_TEST_SOURCE_CPU'):
+        cpu=os.environ['SM_TEST_SOURCE_CPU']
+        if not cpu.isdigit():raise ValueError('Invalid test CPU')
+        source_command=['taskset','-c',cpu,*source_command]
+    sensor_process=subprocess.Popen(source_command,
+        stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
+    def capture_target(msg):
+        phase=json.loads(msg.data)['phase'];phases.append(phase);phase_times.append((time.monotonic(),phase))
     try:
-        while time.monotonic()-start<30:
+        while time.monotonic()-start<30+a.hold_active_seconds:
             rclpy.spin_once(node,timeout_sec=.01)
             if target_sub is None and node.count_subscribers(a.prefix+'/policy_request')==1:
                 target_sub=node.create_subscription(String,a.prefix+'/control_target',capture_target,reliable)
@@ -76,22 +76,30 @@ def main():
                     '--plan',str(pp),'--consent',str(cp),'--isolated-prefix',a.prefix,'--request-policy'],
                     stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
                 requested=True
-            if 'active' in phases and stop_at is None and request_process is not None and request_process.poll() is not None:
-                state_enabled=False;stop_at=time.monotonic()
+            if 'active' in phases and active_at is None:active_at=time.monotonic()
+            if (active_at is not None and time.monotonic()-active_at>=a.hold_active_seconds and stop_at is None
+                    and request_process is not None and request_process.poll() is not None):
+                stop_at=time.monotonic();sensor_process.terminate();sensor_process.wait(timeout=2)
             if stop_at is not None and time.monotonic()-stop_at>.4:break
-        if not requested or 'active' not in phases:raise ValueError('Synthetic worker did not reach active')
+        if not requested or 'active' not in phases or stop_at is None:raise ValueError('Synthetic worker did not sustain active')
+        if not any(t>=stop_at-.06 and phase=='active' for t,phase in phase_times):
+            raise ValueError('Active target stream stopped before hold ended')
         if request_process is None:raise ValueError('Missing policy request process')
         request_output,_=request_process.communicate(timeout=5)
         if request_process.returncode!=0 or 'acknowledged' not in request_output:
             raise ValueError('Policy request CLI did not receive acknowledgement: '+request_output)
         for group,items in groups.items():
             if not any(v and all(x==1. for x in v) for _,v in items):raise ValueError('Missing command: '+group)
+            if any(active_at<=t<stop_at and v and all(x==0. for x in v) for t,v in items):
+                raise ValueError('Premature watchdog fallback: '+group)
             if not any(t>=stop_at and v and all(x==0. for x in v) for t,v in items):raise ValueError('Missing fallback: '+group)
         result={'scope':__doc__,'synthetic_test_only':True,'state_stopped_after_active':True,
-                'observed_phases':sorted(set(phases)),'policy_request_cli_acknowledged':True,
+                'observed_phases':sorted(set(phases)),'active_hold_s':stop_at-active_at,
+                'policy_request_cli_acknowledged':True,
                 'fallback_all_groups':True,'hardware_output':False}
         (a.folder/'worker-probe-result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
     finally:
+        if sensor_process.poll() is None:sensor_process.terminate();sensor_process.wait(timeout=2)
         if request_process is not None and request_process.poll() is None:
             request_process.terminate();request_process.wait(timeout=2)
         node.destroy_node();rclpy.try_shutdown()

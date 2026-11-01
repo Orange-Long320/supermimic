@@ -103,10 +103,18 @@ def main():
                    help='Simulation only: ablate previous-action input; changes policy observation semantics')
     p.add_argument('--diagnostic-profile-armature',action='store_true',
                    help='Simulation-only: replace official XML armature with training profile values')
+    p.add_argument('--diagnostic-training-scene',type=Path,
+                   help='Counterfactual: use separately compiled mjlab training scene and its position actuators')
     p.add_argument('--diagnostic-early-controller',action='store_true',
                    help='Run the actual early handover controller in the diagnostic simulation')
     p.add_argument('--diagnostic-target-step',type=float,default=.3,
                    help='Simulated per-frame command step fault threshold, not a validated hardware value')
+    p.add_argument('--diagnostic-slew-rad',type=float,
+                   help='Counterfactual simulation only: clamp target change per policy frame')
+    p.add_argument('--diagnostic-history-source',choices=('executed','policy'),default='executed',
+                   help='Counterfactual during policy control: feedback executed target or clean policy action')
+    p.add_argument('--diagnostic-effort-fraction',type=float,
+                   help='Simulation only: reshape PD target to constrain initially estimated effort fraction')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
@@ -120,6 +128,11 @@ def main():
             or (a.diagnostic_previous_action_scale!=1. and a.diagnostic_early_blend is None)
             or (a.diagnostic_early_controller and (a.diagnostic_early_blend is None or a.diagnostic_previous_action_scale!=1.
                     or not 0<a.diagnostic_target_step<=2.))
+            or (a.diagnostic_slew_rad is not None and (a.diagnostic_early_blend is None or a.diagnostic_early_controller
+                    or not 0<a.diagnostic_slew_rad<=1.))
+            or (a.diagnostic_history_source!='executed' and a.diagnostic_early_blend is None)
+            or (a.diagnostic_effort_fraction is not None and (a.diagnostic_early_blend is None
+                    or a.diagnostic_early_controller or not 0<a.diagnostic_effort_fraction<=1.))
             or (a.diagnostic_handover_tilt is not None and not .15<a.diagnostic_handover_tilt<=.35)):
         raise ValueError('Invalid scenario')
     a.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
@@ -127,13 +140,16 @@ def main():
     snapshot=json.loads(a.snapshot.read_text());candidate=json.loads(a.candidate.read_text())
     if snapshot['joint_names']!=names or candidate['joint_names']!=names or n!=31: raise ValueError('Joint order mismatch')
     if sha(a.policy)!='4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c':raise ValueError('Wrong policy')
-    m=mujoco.MjModel.from_xml_path(str(a.scene));d=mujoco.MjData(m)
+    training_scene=a.diagnostic_training_scene is not None
+    m=(mujoco.MjModel.from_binary_path(str(a.diagnostic_training_scene)) if training_scene
+       else mujoco.MjModel.from_xml_path(str(a.scene)));d=mujoco.MjData(m)
+    prefix='robot/' if training_scene else ''
     inertia_diagnostic=None
     if a.diagnostic_pelvis_urdf:
         inertia_diagnostic=diagnostic_urdf_pelvis_inertia(m,a.diagnostic_pelvis_urdf)
         mujoco.mj_setConst(m,d)
     if abs(round(.02/m.opt.timestep)*m.opt.timestep-.02)>1e-9:raise ValueError('Timestep mismatch')
-    joint=[mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_JOINT,name) for name in names]
+    joint=[mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_JOINT,prefix+name) for name in names]
     if min(joint)<0:raise ValueError('Missing joint')
     qa=np.asarray([m.jnt_qposadr[j] for j in joint]);va=np.asarray([m.jnt_dofadr[j] for j in joint])
     armature_before=m.dof_armature[va].copy()
@@ -142,11 +158,12 @@ def main():
         if not np.isfinite(armature).all() or np.any(armature<0):raise ValueError('Invalid profile armature')
         m.dof_armature[va]=armature;mujoco.mj_setConst(m,d)
     lookup={int(j):i for i,j in enumerate(m.actuator_trnid[:,0])};motors=np.asarray([lookup[j] for j in joint])
-    limits=m.actuator_ctrlrange[motors]
-    torso=mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_BODY,'torso_link')
-    pelvis=mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_BODY,'pelvis')
-    floor=mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_GEOM,'floor')
-    feet=[mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_BODY,s+'_ankle_roll_link') for s in ('left','right')]
+    limits=(m.actuator_forcerange[motors] if training_scene else m.actuator_ctrlrange[motors])
+    torso=mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_BODY,prefix+'torso_link')
+    pelvis=mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_BODY,prefix+'pelvis')
+    floor=mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_GEOM,'terrain' if training_scene else 'floor')
+    feet=[mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_BODY,prefix+s+'_ankle_roll_link') for s in ('left','right')]
+    if min(torso,pelvis,floor,*feet)<0:raise ValueError('Missing selected scene geometry')
     raw=np.asarray(snapshot['joint_position']);ref=np.asarray(candidate['startup']['position'])
     original_joint_limited=m.jnt_limited.copy();original_joint_ranges=m.jnt_range.copy()
     grace_joints={int(j) for j,q in zip(joint,raw) if m.jnt_limited[j]
@@ -194,7 +211,8 @@ def main():
             max_velocity=np.full(n,.35),max_acceleration=np.full(n,.4),
             minimum_duration=.1 if a.diagnostic_reference_prepare else 8.,blend_seconds=a.diagnostic_early_blend,
             max_tick_gap=.031,max_tilt=.78,max_angular_speed=10.,policy=policy,
-            tracker_factory=lambda position,quat:SkillGoal(a.dataset,a.profile,position,quat))
+            tracker_factory=lambda position,quat:SkillGoal(a.dataset,a.profile,position,quat),
+            history_source=a.diagnostic_history_source)
     previous=(raw-default)/scale;previous_target=raw.copy();current_target=raw.copy()
     local_attach=np.array([a.attachment_x,0.,.15]);point=d.xpos[torso]+d.xmat[torso].reshape(3,3)@local_attach
     anchor=point+np.array([0.,0.,2.]);mass=float(m.body_mass.sum());weight=mass*abs(m.opt.gravity[2])
@@ -223,7 +241,7 @@ def main():
         now=step*.02;q=d.qpos[qa].copy();qd=d.qvel[va].copy();quat=d.xquat[pelvis].copy();w,x,y,z=quat
         gravity=np.array([2*(w*y-x*z),-2*(w*x+y*z),-1+2*(x*x+y*y)])
         body_velocity=np.zeros(6);mujoco.mj_objectVelocity(m,d,mujoco.mjtObj.mjOBJ_XBODY,pelvis,body_velocity,1)
-        omega=body_velocity[:3].copy();proposed=None;trace=None
+        omega=body_velocity[:3].copy();proposed=None;trace=None;action=None
         try:
             if (a.unload_before_handover and unload_start is None and now>=path.duration
                     and np.max(np.abs(q-ref-(balance_bias if a.waist_orientation_assist else 0.)))<thresholds.position_error
@@ -295,7 +313,14 @@ def main():
                     s=float(np.clip((now-early_started)/a.diagnostic_early_blend,0.,1.))
                     blend=10*s**3-15*s**4+6*s**5
                     current_target=(1-blend)*early_start_target+blend*proposed
+                    if a.diagnostic_slew_rad is not None:
+                        current_target=previous_target+np.clip(current_target-previous_target,-a.diagnostic_slew_rad,a.diagnostic_slew_rad)
                     target_v=np.zeros(n);kp_now=(1-blend)*prep_kp+blend*kp;kd_now=(1-blend)*prep_kd+blend*kd
+                    if a.diagnostic_effort_fraction is not None:
+                        if np.any(kp_now<=0):raise ValueError('Effort mapping requires nonzero gain')
+                        max_effort=a.diagnostic_effort_fraction*np.max(np.abs(limits),axis=1)
+                        estimated=kp_now*(current_target-q)-kd_now*qd
+                        current_target=q+(np.clip(estimated,-max_effort,max_effort)+kd_now*qd)/kp_now
                     if s>=1.:entry.phase=EntryPhase.ACTIVE
             elif coordinator is not None:
                 if bias is not None: raise ValueError('Coordinator simulation does not implement preparation bias')
@@ -312,7 +337,10 @@ def main():
                 if entry.phase==EntryPhase.ACTIVE:active_start=now
                 last_phase=entry.phase
             if d.qpos[2]<.4 or gravity[2]>-.7:raise ValueError('Height or tilt gate')
-            previous=(current_target-default)/scale
+            previous=(action.copy() if a.diagnostic_history_source=='policy' and action is not None
+                      else (current_target-default)/scale)
+            if training_scene:
+                m.actuator_gainprm[motors,0]=kp_now;m.actuator_biasprm[motors,1]=-kp_now;m.actuator_biasprm[motors,2]=-kd_now
             maximum_tension=0.;support_force=np.zeros(3)
             for _ in range(substeps):
                 for j in tuple(grace_joints):
@@ -332,8 +360,11 @@ def main():
                     tension=max(0.,a.spring*(length-rest-.5*blend)-damping*float((jac@d.qvel)@direction))
                     support_force=tension*direction;maximum_tension=max(maximum_tension,tension)
                     mujoco.mj_applyFT(m,d,support_force,np.zeros(3),point,torso,d.qfrc_applied)
-                torque=kp_now*(current_target-d.qpos[qa])-kd_now*d.qvel[va]
-                d.ctrl[motors]=np.clip(torque,limits[:,0],limits[:,1]);mujoco.mj_step(m,d)
+                if training_scene:d.ctrl[motors]=current_target
+                else:
+                    torque=kp_now*(current_target-d.qpos[qa])-kd_now*d.qvel[va]
+                    d.ctrl[motors]=np.clip(torque,limits[:,0],limits[:,1])
+                mujoco.mj_step(m,d)
             mujoco.mj_forward(m,d)
             normal=np.zeros(2);slip_force=np.zeros(2);other_contacts=[];contact_details=[]
             for ci in range(d.ncon):
@@ -383,7 +414,13 @@ def main():
             'diagnostic_target_step_rad':a.diagnostic_target_step if a.diagnostic_early_controller else None,
             'diagnostic_target_bounds':'[-10,10] rad and widened measured bounds if grace; simulated diagnostic only',
             'diagnostic_previous_action_scale':a.diagnostic_previous_action_scale,
+            'diagnostic_slew_rad':a.diagnostic_slew_rad,'diagnostic_history_source':a.diagnostic_history_source,
+            'diagnostic_effort_fraction':a.diagnostic_effort_fraction,
+            'diagnostic_effort_scope':'Simulation-only instantaneous PD estimate, not a proven per-step or hardware torque bound',
+            'diagnostic_slew_scope':'Simulation-only observation and action intervention; not calibrated hardware limits',
             'diagnostic_profile_armature':a.diagnostic_profile_armature,
+            'diagnostic_training_scene_sha256':sha(a.diagnostic_training_scene) if training_scene else None,
+            'diagnostic_training_scene_scope':'Position servos and training collisions; self-collision settings may differ from hardware',
             'original_armature_range': [float(armature_before.min()),float(armature_before.max())],
             'used_armature_range': [float(m.dof_armature[va].min()),float(m.dof_armature[va].max())],
             'diagnostic_early_scope':'Bypasses settle gate in simulation, history contains actual simulated frames; not authorized for hardware',
@@ -405,7 +442,10 @@ def main():
             'initial_limit_grace_joints':initial_grace_names if a.diagnostic_initial_limit_grace else [],
             'initial_limit_restored_events':grace_events,
             'initial_limit_grace_unrestored':[mujoco.mj_id2name(m,mujoco.mjtObj.mjOBJ_JOINT,j) for j in sorted(grace_joints)],
-            'previous_action_history':'actual commanded PD target, normalized by selected action default/scale; no invented history',
+            'previous_action_history':('clean policy action after inference; before policy, normalized preparation command'
+                    if a.diagnostic_history_source=='policy' and not a.diagnostic_early_controller else
+                    'controller history_source='+a.diagnostic_history_source if a.diagnostic_early_controller else
+                    'actual commanded PD target, normalized by selected action default/scale'),
             'events':events,'failure':failure,'frames':len(rows),'active_start_s':active_start,
             'active_seconds':0. if active_start is None or not rows else rows[-1]['time_s']-active_start,
             'mass_kg':mass,'root_fixed':False,'motor_output_enabled':False,'ready_for_hardware_trial':False}

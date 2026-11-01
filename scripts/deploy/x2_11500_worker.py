@@ -110,7 +110,8 @@ def main():
                     plan['command_lower'],plan['command_upper'],plan['max_target_step'],max_velocity=plan['max_velocity'],
                     max_acceleration=plan['max_acceleration'],minimum_duration=plan['minimum_duration'],
                     blend_seconds=plan['blend_seconds'],max_tick_gap=plan['max_tick_gap'],max_tilt=plan['max_tilt'],
-                    max_angular_speed=plan['max_angular_speed'],policy=policy,tracker_factory=factory)
+                    max_angular_speed=plan['max_angular_speed'],policy=policy,tracker_factory=factory,
+                    history_source=plan['history_source'])
                 return  # Reacquire fresh input after setup; no command sent yet.
             out=controller.step(row['state_stamp'],row['position'],quat,q,qd,row['angular_velocity_body'],gravity)
             generated=time.monotonic();state_sampled=generated-(time.time()-row['state_stamp'])

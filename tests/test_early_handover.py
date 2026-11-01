@@ -13,10 +13,10 @@ class Tracker:
 
 
 class EarlyHandoverTests(unittest.TestCase):
-    def make(self,max_step=.5):
+    def make(self,max_step=.5,history_source='executed'):
         return EarlyHandover([0.],[.1],[0.],[1.],[20.],[2.],[40.],[4.],[-1.],[1.],[-2.],[2.],[max_step],
             max_velocity=[1.],max_acceleration=[1.],minimum_duration=.2,blend_seconds=.1,max_tick_gap=.031,
-            max_tilt=.5,max_angular_speed=1.,policy=Policy(),tracker_factory=lambda p,q:Tracker())
+            max_tilt=.5,max_angular_speed=1.,policy=Policy(),tracker_factory=lambda p,q:Tracker(),history_source=history_source)
 
     def tick(self,c,t,q=0.,w=(0.,0.,0.),gravity=(0.,0.,-1.)):
         return c.step(t,[0,0,.6],[1,0,0,0],[q],[0],w,gravity)
@@ -43,6 +43,15 @@ class EarlyHandoverTests(unittest.TestCase):
         for i in range(10):self.tick(c,i*.02)
         c.request_handover();self.tick(c,.2);c.policy.infer=lambda obs,goal:np.array([99.])
         with self.assertRaisesRegex(ValueError,'command contract'):self.tick(c,.22)
+
+    def test_policy_history_uses_clean_output_during_blending(self):
+        c=self.make(history_source='policy')
+        for i in range(10):self.tick(c,i*.02)
+        c.request_handover();command=self.tick(c,.2)
+        self.assertLess(command['position'][0],.1)
+        np.testing.assert_allclose(c.previous,[.2])
+        self.tick(c,.22)
+        np.testing.assert_allclose(c.history[-1][4],[.2])
 
 
 if __name__=='__main__':unittest.main()
