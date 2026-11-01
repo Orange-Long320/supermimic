@@ -24,6 +24,20 @@ from supermimic.deploy.torch_policy import TorchScriptPolicy
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+class OfficialLinearPose:
+    """Offline approximation of the SDK's 1.5 s JOINT_DEFAULT interpolation."""
+    def __init__(self, start, target):
+        self.start = np.asarray(start, dtype=float).copy()
+        self.target = np.asarray(target, dtype=float).copy()
+        self.duration = 1.5
+
+    def sample(self, elapsed):
+        progress = float(np.clip(elapsed / self.duration, 0., 1.))
+        # The SDK sends zero velocity and effort even during interpolation.
+        zero = np.zeros_like(self.start)
+        return self.start + progress * (self.target - self.start), zero, zero
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('scene','profile','dataset','policy','snapshot','candidate','prep-gains','out'):
@@ -48,6 +62,8 @@ def main():
                    help='Simulation candidate: use waist posture to balance a single-point suspension')
     p.add_argument('--diagnostic-initial-limit-grace',action='store_true',
                    help='Counterfactual only: disable initially violated model limits until each joint reenters its original range')
+    p.add_argument('--official-preparation', action='store_true',
+                   help='Simulation only: 1.5 s linear interpolation to SDK default_joints with SDK gains')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
@@ -90,7 +106,12 @@ def main():
     prep_kp=np.asarray([special.get(name,{}).get('kp',gains['default_kp']) for name in names])
     prep_kd=np.asarray([special.get(name,{}).get('kd',gains['default_kd']) for name in names])
     if a.prep_gain_source=='policy':prep_kp,prep_kd=kp.copy(),kd.copy()
-    path=QuinticPose(raw,ref,np.full(n,.35),np.full(n,.4),minimum_duration=8.)
+    if a.official_preparation:
+        if a.prep_gain_source != 'sdk': raise ValueError('Official preparation requires SDK gains')
+        ref=np.asarray([special.get(name,{}).get('position',0.) for name in names],dtype=float)
+        path=OfficialLinearPose(raw,ref)
+    else:
+        path=QuinticPose(raw,ref,np.full(n,.35),np.full(n,.4),minimum_duration=8.)
     thresholds=EntryThresholds(.08,.12,.20,a.diagnostic_handover_tilt or .15,.5,12.,.031,10,a.handover_seconds)
     entry=EntryController(path,thresholds,prep_kp,prep_kd,kp,kd)
     compensator=PreparationLoadCompensator(prep_kp,prep_kd,np.max(np.abs(limits),axis=1),
@@ -238,6 +259,8 @@ def main():
                                f', lengthen cable .5m over {a.unload_seconds}s; fixed ceiling anchor, unilateral tension only',
                 'hardware_geometry_or_stiffness_validated':False},
             'initial_outside_file_envelope':initial_outside,'prep_duration_s':path.duration,'thresholds_sim_only':vars(thresholds),
+            'official_preparation_simulation':a.official_preparation,
+            'official_preparation_scope':'20 ms sampled approximation of SDK 1.5 s interpolation, followed by project handover gates; not an exact SDK controller replay',
             'prep_gain_source':('device SDK example' if a.prep_gain_source=='sdk' else 'selected policy profile')+
                                ', used only as a simulation candidate',
             'load_compensation_sim_only':a.load_compensation,
