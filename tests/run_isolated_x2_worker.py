@@ -27,6 +27,9 @@ def main():
         raise ValueError('Expected bounded hold up to 180 seconds')
     if (a.folder/'fixtures-ready').exists():
         raise ValueError('New test folder required')
+    def stop(signum, _frame):
+        raise SystemExit(128+signum)
+    signal.signal(signal.SIGTERM, stop)
     children = []
     logs = []
     try:
