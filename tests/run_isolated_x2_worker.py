@@ -7,6 +7,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -32,7 +33,7 @@ def main():
         def launch(name, command):
             log = (a.folder/(name+'.log')).open('x')
             logs.append(log)
-            child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+            child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             children.append(child)
             return child
 
@@ -48,13 +49,23 @@ def main():
             launch(name, [sys.executable, str(a.folder/'scripts/deploy'/script),
                 '--plan', str(a.folder/'synthetic-plan.json'),
                 '--consent', str(a.folder/'synthetic-consent.json'), '--isolated-prefix', a.prefix])
-        code = probe.wait(timeout=a.hold_active_seconds+45.)
-        if code:
+        deadline = time.monotonic()+a.hold_active_seconds+45.
+        while probe.poll() is None:
+            if any(child.poll() is not None for child in children[1:]):
+                raise RuntimeError('Isolated worker/publisher exited; see logs')
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Isolated integration timed out')
+            time.sleep(.05)
+        if probe.returncode:
             raise RuntimeError('Isolated integration failed; see probe/worker logs')
     finally:
         for child in reversed(children):
-            if child.poll() is None:
-                child.terminate()
+            # The probe owns a source and request CLI too. Reap the entire
+            # private process group even when the probe already exited.
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         for child in reversed(children):
             try:
                 child.wait(timeout=5.)

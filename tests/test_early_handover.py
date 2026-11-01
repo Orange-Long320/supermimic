@@ -38,6 +38,14 @@ class EarlyHandoverTests(unittest.TestCase):
         c=self.make()
         with self.assertRaisesRegex(ValueError,'Measured joint'):self.tick(c,0.,q=1.1)
 
+    def test_reported_31_489ms_gap_remains_a_latched_fault(self):
+        c=self.make();self.tick(c,0.)
+        with self.assertRaisesRegex(ValueError,'State timing gap'):
+            self.tick(c,.031489)
+        self.assertEqual(c.phase,Phase.FAULT)
+        with self.assertRaisesRegex(ValueError,'latched'):
+            self.tick(c,.051489)
+
     def test_bad_policy_target_and_jump_are_faults(self):
         c=self.make();
         for i in range(10):self.tick(c,i*.02)

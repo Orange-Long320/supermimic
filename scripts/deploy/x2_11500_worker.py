@@ -123,7 +123,11 @@ def main():
             if controller is not None:controller.phase=Phase.FAULT;controller.reason=str(exc)
             print('policy worker fault: '+str(exc),flush=True)
             # The independent publisher lease detects the absence of fresh targets.
-    sensor_qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.VOLATILE)
+    # History requires every real sample. KEEP_LAST(1) discards an intervening
+    # sample whenever dispatch is briefly delayed, turning regular 20 ms source
+    # ticks into a 40 ms history gap. Retain a bounded queue; receive() still
+    # rejects stale packets at 50 ms and the controller keeps its gap guard.
+    sensor_qos=QoSProfile(depth=10,reliability=ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.VOLATILE)
     node.create_subscription(String,state_topic,receive,sensor_qos)
     try:rclpy.spin(node)
     finally:node.destroy_node();rclpy.try_shutdown()
