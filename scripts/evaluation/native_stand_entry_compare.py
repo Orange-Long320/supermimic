@@ -39,6 +39,7 @@ def main():
     p.add_argument('--seed-frames', type=Path, help='Official trace; approximate snapshot initialization only')
     p.add_argument('--seed-time', type=float, default=0.)
     p.add_argument('--imu-body', choices=('torso_link', 'pelvis'), default='torso_link', help='Diagnostic IMU body hypothesis')
+    p.add_argument('--lock-head-pitch', action='store_true', help='Counterfactual fixed head pitch with no motor torque')
     a = p.parse_args()
     if a.out.exists() or a.hold_seconds < 5:
         raise ValueError('New output and at least 5 seconds of hold required')
@@ -48,7 +49,17 @@ def main():
     spec = json.loads(a.profile.read_text()); names = spec['joint_names']; n = len(names)
     if spec['robot'] != 'x2_ultra' or n != 31:
         raise ValueError('Expected X2 Ultra')
-    m = mujoco.MjModel.from_xml_path(str(a.scene))
+    if a.lock_head_pitch:
+        model_spec = mujoco.MjSpec.from_file(str(a.scene))
+        constraint = model_spec.add_equality()
+        constraint.name = 'diagnostic_fixed_head_pitch'
+        constraint.type = mujoco.mjtEq.mjEQ_JOINT
+        constraint.objtype = mujoco.mjtObj.mjOBJ_JOINT
+        constraint.name1 = 'head_pitch_joint'
+        constraint.data[:5] = 0.
+        m = model_spec.compile()
+    else:
+        m = mujoco.MjModel.from_xml_path(str(a.scene))
     if m.nu != n or abs(round(.02/m.opt.timestep)*m.opt.timestep-.02) > 1e-9:
         raise ValueError('Unexpected actuator count or simulation timestep')
     ids = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, name) for name in names]
@@ -86,6 +97,9 @@ def main():
         initial_pos = np.asarray(seed['root'], dtype=float)
         initial_rot = np.asarray(seed['q'], dtype=float)
         initial_q = np.asarray(seed['joint_pos'], dtype=float)
+    head_index = names.index('head_pitch_joint')
+    if a.lock_head_pitch:
+        initial_q[head_index] = 0.
     policy = TorchScriptPolicy(a.policy)
     a.out.mkdir(parents=True)
     outputs = {}
@@ -94,6 +108,7 @@ def main():
         d = mujoco.MjData(m); d.qpos[:7] = np.r_[initial_pos, initial_rot]; d.qpos[qadr] = initial_q
         if seed is not None:
             d.qvel[vadr] = seed['joint_vel']
+            if a.lock_head_pitch: d.qvel[vadr[head_index]] = 0.
         mujoco.mj_forward(m,d)
         goal = SkillGoal(a.dataset, a.profile, initial_pos, initial_rot)
         history = deque(maxlen=10); previous = np.zeros(n); target = initial_q.copy()
@@ -118,6 +133,7 @@ def main():
                 goal.advance()
             for _ in range(substeps):
                 torque = kp*(target-d.qpos[qadr])-kd*d.qvel[vadr]
+                if a.lock_head_pitch: torque[head_index] = 0.
                 d.ctrl[motors] = np.clip(torque, motor_limits[:,0], motor_limits[:,1])
                 mujoco.mj_step(m,d)
             # Contacts and solved forces are from the last pre-integration solve.
@@ -150,6 +166,8 @@ def main():
         hold = [r for r in records if r['time_s'] >= start_stand+5.]
         summary = {'failure':failure, 'frames':len(records),'resets_after_initialization':0,
                    'recorded_hold_seconds_after_5s':len(hold)*.02}
+        if records:
+            summary['head_pitch_abs_max_rad'] = max(abs(r['joint_pos_before_step'][head_index]) for r in records)
         if hold:
             positions=np.array([r['root'] for r in hold]);displacement=np.linalg.norm(positions[:,:2]-positions[0,:2],axis=1)
             normal=np.array([r['left_right_normal_n'] for r in hold]);slip=np.array([r['loaded_slip_m_s'] for r in hold])
@@ -166,6 +184,7 @@ def main():
             'scope':'native MuJoCo CPU, same XML and independent PD implementation; actual solver contact forces, not official ROS simulator or hardware',
             'force_time_alignment':'last pre-integration solve, with post-integration joint and root states',
             'hold_load_threshold_n':10., 'imu_body_hypothesis':a.imu_body,
+            'head_pitch_mode': 'fixed at zero with motor torque disabled; simulation counterfactual' if a.lock_head_pitch else 'original',
             'angular_velocity_frame': 'link axes (mjOBJ_XBODY), not principal-inertia axes',
             'seed': None if seed is None else {'trace':str(a.seed_frames), 'elapsed':seed['elapsed'],
                  'limitations':'Approximate snapshot only: root velocity and prior policy history are unavailable; first 10 samples use held target.'}}

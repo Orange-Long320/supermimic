@@ -5,6 +5,7 @@
 #include <std_msgs/msg/string.hpp>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <deque>
 #include <iomanip>
 #include <sstream>
@@ -27,6 +28,12 @@ class Relay : public rclcpp::Node {
         if (m->header.frame_id != "lidar_imu_chest_front" || stamp <= last_stamp_ || stamp > received ||
             received-stamp > 100000000LL || !std::isfinite(w.x) || !std::isfinite(w.y) || !std::isfinite(w.z) ||
             !std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z)) { ++rejected_; return; }
+        if (last_stamp_ && stamp-last_stamp_ > 30000000LL) {
+          // Rare-only diagnostic; records the native header and receipt times.
+          std::fprintf(stderr, "imu_source_gap previous=%lld current=%lld received=%lld\n",
+                       static_cast<long long>(last_stamp_), static_cast<long long>(stamp),
+                       static_cast<long long>(received));
+        }
         last_stamp_=stamp;
         imu_pub_->publish(*m);
         if (queue_.size() == 16) queue_.pop_front();

@@ -77,8 +77,9 @@ class EntryController:
         self.phase = EntryPhase.FAULT; self.reason = str(reason)
         raise ValueError(self.reason)
 
-    def step(self, now, q, velocity, omega, gravity, *, policy_target=None, preparation_bias=None, support_ready=True):
+    def step(self, now, q, velocity, omega, gravity, *, support_ready, policy_target=None, preparation_bias=None):
         if self.phase == EntryPhase.FAULT: raise ValueError('Entry fault is latched: '+self.reason)
+        if type(support_ready) is not bool: self.fault('Support state must be explicitly known')
         q, velocity, omega, gravity = (np.asarray(x, dtype=float) for x in (q, velocity, omega, gravity))
         if (q.shape != self.path.start.shape or velocity.shape != q.shape or omega.shape != (3,)
                 or gravity.shape != (3,) or not np.isfinite(np.r_[now, q, velocity, omega, gravity]).all()):
@@ -122,6 +123,7 @@ class EntryController:
                         self.phase = EntryPhase.SETTLE; self.quiet_since = None; self.history_samples = 0
                 command = (self.path.target+self.preparation_bias, np.zeros_like(q), prep_kp.copy(), prep_kd.copy())
             else:
+                if not support_ready: self.fault('Required support lost during handover or active control')
                 if policy_target is None: self.fault('Missing policy target during handover/active')
                 policy_target = np.asarray(policy_target, dtype=float)
                 if policy_target.shape != q.shape or not np.isfinite(policy_target).all(): self.fault('Invalid policy target')

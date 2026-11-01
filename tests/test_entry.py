@@ -20,7 +20,7 @@ class EntryTests(unittest.TestCase):
 
     def test_noisy_settle_resets_history_before_handover(self):
         c = self.controller()
-        def step(t, v=0., policy=None): return c.step(t, [0.], [v], [0.]*3, [0., 0., -1.], policy_target=policy)
+        def step(t, v=0., policy=None): return c.step(t, [0.], [v], [0.]*3, [0., 0., -1.], support_ready=True, policy_target=policy)
         t=0.
         while c.phase != EntryPhase.HISTORY:
             step(t); t+=.02
@@ -34,14 +34,14 @@ class EntryTests(unittest.TestCase):
         np.testing.assert_allclose(c.last_command[0], [1.]); np.testing.assert_allclose(c.last_command[2], [40.])
 
     def test_gap_fault_is_latched(self):
-        c=self.controller(); c.step(0., [0.], [0.], [0.]*3, [0., 0., -1.])
-        with self.assertRaisesRegex(ValueError, 'gap'): c.step(.1, [0.], [0.], [0.]*3, [0., 0., -1.])
-        with self.assertRaisesRegex(ValueError, 'latched'): c.step(.12, [0.], [0.], [0.]*3, [0., 0., -1.])
+        c=self.controller(); c.step(0., [0.], [0.], [0.]*3, [0., 0., -1.], support_ready=True)
+        with self.assertRaisesRegex(ValueError, 'gap'): c.step(.1, [0.], [0.], [0.]*3, [0., 0., -1.], support_ready=True)
+        with self.assertRaisesRegex(ValueError, 'latched'): c.step(.12, [0.], [0.], [0.]*3, [0., 0., -1.], support_ready=True)
 
     def test_never_settled_times_out(self):
         c=self.controller()
         with self.assertRaisesRegex(ValueError, 'settle'):
-            for t in np.arange(0., 2.5, .02): c.step(float(t), [1.], [0.], [0.]*3, [0., 0., -1.])
+            for t in np.arange(0., 2.5, .02): c.step(float(t), [1.], [0.], [0.]*3, [0., 0., -1.], support_ready=True)
 
     def test_load_compensation_budget_slew_and_antiwindup(self):
         c=PreparationLoadCompensator([40.], [4.], [36.], integral_gain=.3,max_bias_speed=.08,effort_fraction=.5)
@@ -57,12 +57,12 @@ class EntryTests(unittest.TestCase):
     def test_compensated_target_is_continuous_at_first_handover_frame(self):
         c=self.controller();t=0.
         while c.phase!=EntryPhase.HANDOVER:
-            c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],preparation_bias=[.2]);t+=.02
+            c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=True,preparation_bias=[.2]);t+=.02
         np.testing.assert_allclose(c.last_command[0],[.2])
-        c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],policy_target=[1.])
+        c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=True,policy_target=[1.])
         self.assertGreater(c.last_command[0][0],.2)
         with self.assertRaisesRegex(ValueError,'cannot change'):
-            c.step(t+.02,[0.],[0.],[0.]*3,[0.,0.,-1.],policy_target=[1.],preparation_bias=[.3])
+            c.step(t+.02,[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=True,policy_target=[1.],preparation_bias=[.3])
 
     def test_support_transfer_must_finish_before_history(self):
         c=self.controller();t=0.
@@ -72,6 +72,27 @@ class EntryTests(unittest.TestCase):
         while c.phase!=EntryPhase.HISTORY:
             t+=.02;c.step(float(t),[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=True)
         self.assertEqual(c.history_samples,0)
+
+    def test_support_loss_latches_during_handover(self):
+        c=self.controller();t=0.
+        while c.phase != EntryPhase.HANDOVER:
+            c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=True);t+=.02
+        with self.assertRaisesRegex(ValueError,'support lost'):
+            c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=False,policy_target=[1.])
+        with self.assertRaisesRegex(ValueError,'latched'):
+            c.step(t+.02,[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=True,policy_target=[1.])
+
+    def test_unknown_support_is_rejected(self):
+        c=self.controller()
+        with self.assertRaisesRegex(ValueError,'explicitly known'):
+            c.step(0.,[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=None)
+
+    def test_support_loss_also_latches_after_activation(self):
+        c=self.controller();t=0.
+        while c.phase != EntryPhase.ACTIVE:
+            c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=True,policy_target=[0.]);t+=.02
+        with self.assertRaisesRegex(ValueError,'support lost'):
+            c.step(t,[0.],[0.],[0.]*3,[0.,0.,-1.],support_ready=False,policy_target=[0.])
 
 
 if __name__ == '__main__': unittest.main()
