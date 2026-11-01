@@ -32,6 +32,8 @@ def main():
                         help='0 keeps native callbacks; otherwise retain original joint messages at this rate before Python deserialization')
     parser.add_argument('--joint-relay-session', help='Use this private diagnostic relay session instead of direct joint subscriptions')
     parser.add_argument('--imu-relay-session', help='Use a private native IMU batch relay; diagnostic only')
+    parser.add_argument('--native-stamp-source', choices=('host', 'lidar'), default='host',
+                        help='Declared verified driver setting; records provenance, never rewrites a header')
     args = parser.parse_args(); args.out.mkdir(parents=True, exist_ok=False)
     if args.joint_relay_session and args.joint_retain_hz: raise ValueError('joint modes are mutually exclusive')
     import rclpy
@@ -329,7 +331,7 @@ def main():
                       'counts': dict(self.counts), 'rejected_ticks': dict(self.rejects), 'status': self.last_reason,
                       'floor': self.floor, 'latest_pose': self.last_pose, 'live_mount_tf_seen': sorted(self.live_tf_seen),
                       'cloud_callback_ms_p50_max': [float(np.median(self.cloud_times)), float(max(self.cloud_times))] if self.cloud_times else None,
-                      'header_mode': 'native_host_unchanged', 'hardware_sampling_time_verified': False,
+                      'header_mode': 'native_'+args.native_stamp_source+'_unchanged', 'hardware_sampling_time_verified': False,
                       'state_clock': args.state_clock,
                       'joint_retention_hz':args.joint_retain_hz,
                       'joint_relay_session':args.joint_relay_session,
