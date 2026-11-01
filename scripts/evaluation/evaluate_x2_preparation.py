@@ -96,6 +96,12 @@ def main():
                    help='Counterfactual: start exactly at reference target with short settle; not an actual preparation')
     p.add_argument('--diagnostic-early-blend',type=float,
                    help='Simulation only: after 10 actual physics frames, blend immediately to policy over this many seconds')
+    p.add_argument('--diagnostic-policy-trace',action='store_true',
+                   help='Retain policy input and action per simulated frame for offline causality diagnostics')
+    p.add_argument('--diagnostic-previous-action-scale',type=float,default=1.,
+                   help='Simulation only: ablate previous-action input; changes policy observation semantics')
+    p.add_argument('--diagnostic-profile-armature',action='store_true',
+                   help='Simulation-only: replace official XML armature with training profile values')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
@@ -105,6 +111,8 @@ def main():
             or (a.diagnostic_early_blend is not None and (not .02<=a.diagnostic_early_blend<=2.
                     or a.independent_coordinator or a.unload or a.load_compensation or a.orientation_assist
                     or a.waist_orientation_assist))
+            or not 0.<=a.diagnostic_previous_action_scale<=1.
+            or (a.diagnostic_previous_action_scale!=1. and a.diagnostic_early_blend is None)
             or (a.diagnostic_handover_tilt is not None and not .15<a.diagnostic_handover_tilt<=.35)):
         raise ValueError('Invalid scenario')
     a.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
@@ -121,6 +129,11 @@ def main():
     joint=[mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_JOINT,name) for name in names]
     if min(joint)<0:raise ValueError('Missing joint')
     qa=np.asarray([m.jnt_qposadr[j] for j in joint]);va=np.asarray([m.jnt_dofadr[j] for j in joint])
+    armature_before=m.dof_armature[va].copy()
+    if a.diagnostic_profile_armature:
+        armature=np.asarray([spec['armature'][name] for name in names],dtype=float)
+        if not np.isfinite(armature).all() or np.any(armature<0):raise ValueError('Invalid profile armature')
+        m.dof_armature[va]=armature;mujoco.mj_setConst(m,d)
     lookup={int(j):i for i,j in enumerate(m.actuator_trnid[:,0])};motors=np.asarray([lookup[j] for j in joint])
     limits=m.actuator_ctrlrange[motors]
     torso=mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_BODY,'torso_link')
@@ -190,7 +203,7 @@ def main():
         now=step*.02;q=d.qpos[qa].copy();qd=d.qvel[va].copy();quat=d.xquat[pelvis].copy();w,x,y,z=quat
         gravity=np.array([2*(w*y-x*z),-2*(w*x+y*z),-1+2*(x*x+y*y)])
         body_velocity=np.zeros(6);mujoco.mj_objectVelocity(m,d,mujoco.mjtObj.mjOBJ_XBODY,pelvis,body_velocity,1)
-        omega=body_velocity[:3].copy();proposed=None
+        omega=body_velocity[:3].copy();proposed=None;trace=None
         try:
             if (a.unload_before_handover and unload_start is None and now>=path.duration
                     and np.max(np.abs(q-ref-(balance_bias if a.waist_orientation_assist else 0.)))<thresholds.position_error
@@ -198,7 +211,7 @@ def main():
                     and rows and min(rows[-1]['normal_n'])>10.):
                 unload_start=now;events.append({'time_s':now,'phase':'support_transfer_started'})
             if a.diagnostic_early_blend is not None:
-                history.append((q-default,qd,omega,gravity,previous.copy()))
+                history.append((q-default,qd,omega,gravity,previous.copy()*a.diagnostic_previous_action_scale))
                 if tracker is None:tracker=SkillGoal(a.dataset,a.profile,d.qpos[:3].copy(),d.qpos[3:7].copy())
             elif coordinator is None and entry.phase in (EntryPhase.HISTORY,EntryPhase.HANDOVER,EntryPhase.ACTIVE):
                 history.append((q-default,qd,omega,gravity,previous.copy()))
@@ -208,6 +221,7 @@ def main():
                 obs=tuple(float(v) for term in range(5) for h in history for v in h[term])
                 action=np.asarray(policy.infer(obs,tuple(float(v) for v in goal)))
                 if action.shape!=(n,) or not np.isfinite(action).all():raise ValueError('Invalid policy action')
+                if a.diagnostic_policy_trace:trace={'observation':list(obs),'goal':np.asarray(goal).tolist(),'action':action.tolist()}
                 proposed=default+scale*action;tracker.advance()
             elif coordinator is None and entry.phase in (EntryPhase.HANDOVER,EntryPhase.ACTIVE):
                 if len(history)!=10:raise ValueError('Incomplete actual preparation command history')
@@ -320,6 +334,7 @@ def main():
                 'max_tension_n':maximum_tension,'last_support_force':support_force.tolist(),
                 'actuator_effort_ratio':float(np.max(np.abs(d.actuator_force[motors])/np.max(np.abs(limits),axis=1))),
                 'non_floor_contact_forces_n':other_contacts,'non_floor_contacts':contact_details})
+            if trace is not None: rows[-1]['policy_trace']=trace
             previous_target=current_target.copy()
             if active_start is not None and now-active_start>=a.active_seconds:break
         except ValueError as exc:failure={'time_s':now,'phase':entry.phase.value,'reason':str(exc)};break
@@ -337,6 +352,10 @@ def main():
             'independent_coordinator_simulation':a.independent_coordinator,
             'diagnostic_reference_prepare':a.diagnostic_reference_prepare,
             'diagnostic_early_blend_s':a.diagnostic_early_blend,
+            'diagnostic_previous_action_scale':a.diagnostic_previous_action_scale,
+            'diagnostic_profile_armature':a.diagnostic_profile_armature,
+            'original_armature_range': [float(armature_before.min()),float(armature_before.max())],
+            'used_armature_range': [float(m.dof_armature[va].min()),float(m.dof_armature[va].max())],
             'diagnostic_early_scope':'Bypasses settle gate in simulation, history contains actual simulated frames; not authorized for hardware',
             'pelvis_inertia_counterfactual':inertia_diagnostic,
             'official_preparation_scope':'20 ms sampled approximation of SDK 1.5 s interpolation, followed by project handover gates; not an exact SDK controller replay',
