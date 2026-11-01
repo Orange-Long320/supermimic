@@ -94,12 +94,17 @@ def main():
                    help='Use actuator-free independent coordinator; automatically request handover when ready in this simulation')
     p.add_argument('--diagnostic-reference-prepare', action='store_true',
                    help='Counterfactual: start exactly at reference target with short settle; not an actual preparation')
+    p.add_argument('--diagnostic-early-blend',type=float,
+                   help='Simulation only: after 10 actual physics frames, blend immediately to policy over this many seconds')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
             or not 1<=a.handover_seconds<=10 or not 1<=a.unload_seconds<=10
             or (a.unload_at_handover and (not a.unload or a.unload_before_handover))
             or (a.orientation_assist and a.waist_orientation_assist)
+            or (a.diagnostic_early_blend is not None and (not .02<=a.diagnostic_early_blend<=2.
+                    or a.independent_coordinator or a.unload or a.load_compensation or a.orientation_assist
+                    or a.waist_orientation_assist))
             or (a.diagnostic_handover_tilt is not None and not .15<a.diagnostic_handover_tilt<=.35)):
         raise ValueError('Invalid scenario')
     a.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
@@ -163,6 +168,7 @@ def main():
     rest=2.-a.support_fraction*weight/a.spring;damping=100.
     active_start=None;failure=None;events=[];rows=[];last_phase=entry.phase;unload_start=None
     support_force=np.zeros(3)
+    early_started=None;early_start_target=None
     balance_bias=np.zeros(n)
     waist=names.index('waist_pitch_joint');waist_pendulum_jacobian=None
     if a.waist_orientation_assist:
@@ -191,10 +197,19 @@ def main():
                     and np.max(np.abs(qd))<thresholds.joint_speed and np.linalg.norm(omega)<thresholds.angular_speed
                     and rows and min(rows[-1]['normal_n'])>10.):
                 unload_start=now;events.append({'time_s':now,'phase':'support_transfer_started'})
-            if coordinator is None and entry.phase in (EntryPhase.HISTORY,EntryPhase.HANDOVER,EntryPhase.ACTIVE):
+            if a.diagnostic_early_blend is not None:
                 history.append((q-default,qd,omega,gravity,previous.copy()))
                 if tracker is None:tracker=SkillGoal(a.dataset,a.profile,d.qpos[:3].copy(),d.qpos[3:7].copy())
-            if coordinator is None and entry.phase in (EntryPhase.HANDOVER,EntryPhase.ACTIVE):
+            elif coordinator is None and entry.phase in (EntryPhase.HISTORY,EntryPhase.HANDOVER,EntryPhase.ACTIVE):
+                history.append((q-default,qd,omega,gravity,previous.copy()))
+                if tracker is None:tracker=SkillGoal(a.dataset,a.profile,d.qpos[:3].copy(),d.qpos[3:7].copy())
+            if a.diagnostic_early_blend is not None and len(history)==10:
+                goal=tracker.goal(d.qpos[:3].copy(),d.qpos[3:7].copy(),q,'stand')
+                obs=tuple(float(v) for term in range(5) for h in history for v in h[term])
+                action=np.asarray(policy.infer(obs,tuple(float(v) for v in goal)))
+                if action.shape!=(n,) or not np.isfinite(action).all():raise ValueError('Invalid policy action')
+                proposed=default+scale*action;tracker.advance()
+            elif coordinator is None and entry.phase in (EntryPhase.HANDOVER,EntryPhase.ACTIVE):
                 if len(history)!=10:raise ValueError('Incomplete actual preparation command history')
                 goal=tracker.goal(d.qpos[:3].copy(),d.qpos[3:7].copy(),q,'stand')
                 obs=tuple(float(v) for term in range(5) for h in history for v in h[term])
@@ -230,7 +245,19 @@ def main():
                 elif a.orientation_assist or a.waist_orientation_assist: bias=balance_bias.copy()
             support_ready=(not a.unload_before_handover or (unload_start is not None and now-unload_start>=5.
                            and np.linalg.norm(support_force)<.05*weight and rows and min(rows[-1]['normal_n'])>10.))
-            if coordinator is not None:
+            if a.diagnostic_early_blend is not None:
+                if proposed is None:
+                    current_target,target_v,_=path.sample(now);kp_now,kd_now=prep_kp,prep_kd
+                else:
+                    if early_started is None:
+                        early_started=now;early_start_target=previous_target.copy()
+                        entry.phase=EntryPhase.HANDOVER;entry.handover_started=now
+                    s=float(np.clip((now-early_started)/a.diagnostic_early_blend,0.,1.))
+                    blend=10*s**3-15*s**4+6*s**5
+                    current_target=(1-blend)*early_start_target+blend*proposed
+                    target_v=np.zeros(n);kp_now=(1-blend)*prep_kp+blend*kp;kd_now=(1-blend)*prep_kd+blend*kd
+                    if s>=1.:entry.phase=EntryPhase.ACTIVE
+            elif coordinator is not None:
                 if bias is not None: raise ValueError('Coordinator simulation does not implement preparation bias')
                 if entry.phase is EntryPhase.HISTORY and len(coordinator.history)==thresholds.history_frames:
                     coordinator.request_handover()
@@ -309,6 +336,8 @@ def main():
             'official_preparation_simulation':a.official_preparation,
             'independent_coordinator_simulation':a.independent_coordinator,
             'diagnostic_reference_prepare':a.diagnostic_reference_prepare,
+            'diagnostic_early_blend_s':a.diagnostic_early_blend,
+            'diagnostic_early_scope':'Bypasses settle gate in simulation, history contains actual simulated frames; not authorized for hardware',
             'pelvis_inertia_counterfactual':inertia_diagnostic,
             'official_preparation_scope':'20 ms sampled approximation of SDK 1.5 s interpolation, followed by project handover gates; not an exact SDK controller replay',
             'prep_gain_source':('device SDK example' if a.prep_gain_source=='sdk' else 'selected policy profile')+
