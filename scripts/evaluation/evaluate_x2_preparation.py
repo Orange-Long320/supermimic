@@ -18,6 +18,7 @@ import torch
 import yaml
 
 from supermimic.deploy.entry import EntryController, EntryPhase, EntryThresholds, QuinticPose, PreparationLoadCompensator
+from supermimic.deploy.independent_policy import IndependentPolicyCoordinator
 from supermimic.deploy.skill_goal import SkillGoal
 from supermimic.deploy.torch_policy import TorchScriptPolicy
 
@@ -89,6 +90,8 @@ def main():
                    help='Simulation only: 1.5 s linear interpolation to SDK default_joints with SDK gains')
     p.add_argument('--diagnostic-pelvis-urdf', type=Path,
                    help='Simulation-only counterfactual: use pelvis mass and inertia from this URDF')
+    p.add_argument('--independent-coordinator', action='store_true',
+                   help='Use actuator-free independent coordinator; automatically request handover when ready in this simulation')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
@@ -146,6 +149,9 @@ def main():
     compensator=PreparationLoadCompensator(prep_kp,prep_kd,np.max(np.abs(limits),axis=1),
                     integral_gain=.3,max_bias_speed=.08,effort_fraction=.5) if a.load_compensation else None
     policy=TorchScriptPolicy(a.policy);tracker=None;history=deque(maxlen=10)
+    coordinator=(IndependentPolicyCoordinator(entry,default,scale,policy,
+                 lambda position,quat: SkillGoal(a.dataset,a.profile,position,quat))
+                 if a.independent_coordinator else None)
     previous=(raw-default)/scale;previous_target=raw.copy();current_target=raw.copy()
     local_attach=np.array([a.attachment_x,0.,.15]);point=d.xpos[torso]+d.xmat[torso].reshape(3,3)@local_attach
     anchor=point+np.array([0.,0.,2.]);mass=float(m.body_mass.sum());weight=mass*abs(m.opt.gravity[2])
@@ -180,10 +186,10 @@ def main():
                     and np.max(np.abs(qd))<thresholds.joint_speed and np.linalg.norm(omega)<thresholds.angular_speed
                     and rows and min(rows[-1]['normal_n'])>10.):
                 unload_start=now;events.append({'time_s':now,'phase':'support_transfer_started'})
-            if entry.phase in (EntryPhase.HISTORY,EntryPhase.HANDOVER,EntryPhase.ACTIVE):
+            if coordinator is None and entry.phase in (EntryPhase.HISTORY,EntryPhase.HANDOVER,EntryPhase.ACTIVE):
                 history.append((q-default,qd,omega,gravity,previous.copy()))
                 if tracker is None:tracker=SkillGoal(a.dataset,a.profile,d.qpos[:3].copy(),d.qpos[3:7].copy())
-            if entry.phase in (EntryPhase.HANDOVER,EntryPhase.ACTIVE):
+            if coordinator is None and entry.phase in (EntryPhase.HANDOVER,EntryPhase.ACTIVE):
                 if len(history)!=10:raise ValueError('Incomplete actual preparation command history')
                 goal=tracker.goal(d.qpos[:3].copy(),d.qpos[3:7].copy(),q,'stand')
                 obs=tuple(float(v) for term in range(5) for h in history for v in h[term])
@@ -219,8 +225,15 @@ def main():
                 elif a.orientation_assist or a.waist_orientation_assist: bias=balance_bias.copy()
             support_ready=(not a.unload_before_handover or (unload_start is not None and now-unload_start>=5.
                            and np.linalg.norm(support_force)<.05*weight and rows and min(rows[-1]['normal_n'])>10.))
-            current_target,target_v,kp_now,kd_now=entry.step(now,q,qd,omega,gravity,policy_target=proposed,
-                                                         preparation_bias=bias,support_ready=bool(support_ready))
+            if coordinator is not None:
+                if bias is not None: raise ValueError('Coordinator simulation does not implement preparation bias')
+                if entry.phase is EntryPhase.HISTORY and len(coordinator.history)==thresholds.history_frames:
+                    coordinator.request_handover()
+                current_target,target_v,kp_now,kd_now=coordinator.step(now,d.qpos[:3],d.qpos[3:7],q,qd,omega,gravity,
+                                                                      support_ready=bool(support_ready))
+            else:
+                current_target,target_v,kp_now,kd_now=entry.step(now,q,qd,omega,gravity,policy_target=proposed,
+                                                             preparation_bias=bias,support_ready=bool(support_ready))
             if entry.phase!=last_phase:
                 events.append({'time_s':now,'phase':entry.phase.value})
                 if entry.phase in (EntryPhase.HISTORY,EntryPhase.SETTLE):history.clear()
@@ -289,6 +302,7 @@ def main():
                 'hardware_geometry_or_stiffness_validated':False},
             'initial_outside_file_envelope':initial_outside,'prep_duration_s':path.duration,'thresholds_sim_only':vars(thresholds),
             'official_preparation_simulation':a.official_preparation,
+            'independent_coordinator_simulation':a.independent_coordinator,
             'pelvis_inertia_counterfactual':inertia_diagnostic,
             'official_preparation_scope':'20 ms sampled approximation of SDK 1.5 s interpolation, followed by project handover gates; not an exact SDK controller replay',
             'prep_gain_source':('device SDK example' if a.prep_gain_source=='sdk' else 'selected policy profile')+

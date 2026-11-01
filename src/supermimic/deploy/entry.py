@@ -77,9 +77,11 @@ class EntryController:
         self.phase = EntryPhase.FAULT; self.reason = str(reason)
         raise ValueError(self.reason)
 
-    def step(self, now, q, velocity, omega, gravity, *, support_ready, policy_target=None, preparation_bias=None):
+    def step(self, now, q, velocity, omega, gravity, *, support_ready, policy_target=None, preparation_bias=None,
+             handover_requested=True):
         if self.phase == EntryPhase.FAULT: raise ValueError('Entry fault is latched: '+self.reason)
         if type(support_ready) is not bool: self.fault('Support state must be explicitly known')
+        if type(handover_requested) is not bool: self.fault('Handover request must be explicit boolean')
         q, velocity, omega, gravity = (np.asarray(x, dtype=float) for x in (q, velocity, omega, gravity))
         if (q.shape != self.path.start.shape or velocity.shape != q.shape or omega.shape != (3,)
                 or gravity.shape != (3,) or not np.isfinite(np.r_[now, q, velocity, omega, gravity]).all()):
@@ -116,7 +118,7 @@ class EntryController:
                 else:
                     if quiet:
                         self.history_samples += 1
-                        if self.history_samples >= self.thresholds.history_frames:
+                        if self.history_samples >= self.thresholds.history_frames and handover_requested:
                             # First handover frame is exactly the preparation command.
                             self.phase = EntryPhase.HANDOVER; self.handover_started = now
                     else:
