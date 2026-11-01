@@ -31,6 +31,7 @@ def main():
     parser.add_argument('--joint-retain-hz',type=int,choices=(0,100,200),default=0,
                         help='0 keeps native callbacks; otherwise retain original joint messages at this rate before Python deserialization')
     parser.add_argument('--joint-relay-session', help='Use this private diagnostic relay session instead of direct joint subscriptions')
+    parser.add_argument('--imu-relay-session', help='Use a private native IMU batch relay; diagnostic only')
     args = parser.parse_args(); args.out.mkdir(parents=True, exist_ok=False)
     if args.joint_relay_session and args.joint_retain_hz: raise ValueError('joint modes are mutually exclusive')
     import rclpy
@@ -44,6 +45,7 @@ def main():
     from aimdk_msgs.msg import JointStateArray
     from rclpy.serialization import deserialize_message
     from supermimic.deploy.joint_relay import JointRelayDecoder
+    from supermimic.deploy.imu_batch import ImuBatchDecoder
 
     spec = json.loads(args.profile.read_text()); names = spec['joint_names']
     if len(names) != 31 or spec['robot'] != 'x2_ultra': raise ValueError('Wrong robot profile')
@@ -59,7 +61,7 @@ def main():
     params = {'feature_extract_enable': False, 'point_filter_num': 2, 'max_iteration': 3,
               'filter_size_surf': .3, 'filter_size_map': .3, 'cube_side_length': 100.,
               'runtime_pos_log_enable': False,
-              'common': {'lid_topic': prefix+'/cloud', 'imu_topic': prefix+'/imu',
+              'common': {'lid_topic': prefix+'/cloud', 'imu_topic': '/supermimic/x2_imu_relay/imu' if args.imu_relay_session else prefix+'/imu',
                          'time_sync_en': False, 'time_offset_lidar_to_imu': 0.},
               'preprocess': {'lidar_type': 2, 'scan_line': 96, 'scan_rate': 10, 'timestamp_unit': 0, 'blind': .3},
               'mapping': {'acc_cov': .1, 'gyr_cov': .1, 'b_acc_cov': .0001, 'b_gyr_cov': .0001,
@@ -79,6 +81,7 @@ def main():
             self.groups = {g: deque(maxlen=128) for g in ('leg', 'waist', 'head', 'arm')}
             self.joint_retained_at = {}
             self.relay = JointRelayDecoder(args.joint_relay_session, names) if args.joint_relay_session else None
+            self.imu_relay = ImuBatchDecoder(args.imu_relay_session) if args.imu_relay_session else None
             self.propagation = CachedImuPropagation()
             self.last_emitted_ns = None
             self.counts = Counter(); self.rejects = Counter(); self.state = None
@@ -91,13 +94,17 @@ def main():
             best = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
             imu_qos = QoSProfile(depth=400, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
             self.cloud_pub = self.create_publisher(PointCloud2, prefix+'/cloud', best)
-            self.imu_pub = self.create_publisher(Imu, prefix+'/imu', 400)
+            self.imu_pub = None if self.imu_relay else self.create_publisher(Imu, prefix+'/imu', 400)
             self.pose_pub = self.create_publisher(Odometry, '/supermimic/pelvis/odometry', 5)
             self.status_pub = self.create_publisher(String, prefix+'/status', 5)
             self.policy_state_pub = self.create_publisher(String, prefix+'/policy_state', best)
-            self.subs = [self.create_subscription(Imu, '/aima/hal/sensor/lidar_chest_front/imu', self.on_imu, imu_qos),
-                         self.create_subscription(PointCloud2, '/aima/hal/sensor/lidar_chest_front/lidar_pointcloud', self.on_cloud, best),
+            self.subs = [self.create_subscription(PointCloud2, '/aima/hal/sensor/lidar_chest_front/lidar_pointcloud', self.on_cloud, best),
                          self.create_subscription(Float64MultiArray, prefix+'/filter_state', self.on_state, 20)]
+            if self.imu_relay:
+                relay_imu_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
+                self.subs.append(self.create_subscription(String, '/supermimic/x2_imu_relay/batch', self.on_imu_batch, relay_imu_qos))
+            else:
+                self.subs.append(self.create_subscription(Imu, '/aima/hal/sensor/lidar_chest_front/imu', self.on_imu, imu_qos))
             if self.relay:
                 # Absorb short executor stalls; decoder still rejects packets
                 # older than 50 ms, gaps, and original stale source samples.
@@ -118,10 +125,26 @@ def main():
         def stamp(msg): return msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
 
         def on_imu(self, msg):
+            w, a = msg.angular_velocity, msg.linear_acceleration
+            self.accept_imu(msg.header.stamp.sec*10**9+msg.header.stamp.nanosec,
+                            msg.header.frame_id, [w.x,w.y,w.z,a.x,a.y,a.z], msg)
+
+        def on_imu_batch(self, msg):
+            self.counts['imu_relay_callbacks'] += 1
+            try:
+                for stamp_ns, received_ns, *values in self.imu_relay.decode(msg.data, time.time_ns()):
+                    self.accept_imu(stamp_ns, 'lidar_imu_chest_front', values)
+            except (ValueError, TypeError, KeyError) as exc:
+                # Never splice integration across missing/invalid batches.
+                self.imu_rows.clear(); self.imu_stamps_ns.clear(); self.state = None
+                self.propagation = CachedImuPropagation()
+                self.rejects['imu relay: '+str(exc)] += 1
+
+        def accept_imu(self, sample_ns, frame, values, msg=None):
             self.counts['raw_imu'] += 1
-            stamp = self.stamp(msg); w, a = msg.angular_velocity, msg.linear_acceleration
-            row = [stamp, w.x, w.y, w.z, a.x, a.y, a.z]
-            reason = ('imu frame' if msg.header.frame_id != 'lidar_imu_chest_front' else
+            stamp = sample_ns*1e-9
+            row = [stamp, *values]
+            reason = ('imu frame' if frame != 'lidar_imu_chest_front' else
                       'imu nonfinite' if not np.isfinite(row).all() else
                       'imu future' if stamp > time.time() else
                       'imu stale at receive' if time.time()-stamp > .1 else
@@ -129,9 +152,9 @@ def main():
             if reason:
                 self.rejects[reason] += 1; return
             self.imu_rows.append(row)
-            sample_ns = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
             self.imu_stamps_ns.append(sample_ns)
-            self.imu_pub.publish(msg); self.counts['adapted_imu'] += 1
+            if msg is not None: self.imu_pub.publish(msg)
+            self.counts['adapted_imu'] += 1
             if args.state_clock == 'imu-grid' and grid_tick_pending(sample_ns, self.last_emitted_ns):
                 # Emit as soon as actual IMU data bracket the next grid time.
                 # Once that grid tick succeeded, repeated IMUs cannot produce
@@ -230,6 +253,7 @@ def main():
                 if self.process.poll() is not None: raise RuntimeError('Owned FAST-LIO process exited')
                 if self.mount_changed: raise ValueError('Native mount TF changed; restart and review')
                 if self.state is None: raise ValueError('waiting for LIO correction')
+                if not self.imu_stamps_ns: raise ValueError('waiting for received IMU')
                 now = time.time(); age = now-self.state.stamp
                 if not 0 <= age <= .2: raise ValueError('LIO correction stale')
                 ns = self.imu_stamps_ns[-1]
@@ -308,6 +332,7 @@ def main():
                       'state_clock': args.state_clock,
                       'joint_retention_hz':args.joint_retain_hz,
                       'joint_relay_session':args.joint_relay_session,
+                      'imu_relay_session':args.imu_relay_session,
                       'dynamic_accuracy_validated': False, 'covariance_validated': False,
                       'control_ready': False, 'motor_output_enabled': False}
             msg = String(); msg.data = json.dumps(result, allow_nan=False); self.status_pub.publish(msg)

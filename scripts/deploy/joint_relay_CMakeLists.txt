@@ -3,6 +3,7 @@ project(supermimic_joint_relay)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(aimdk_msgs REQUIRED)
 # This robot's ROS exports refer to a removed NumPy build path. Override the
 # imported target metadata in this private build only, never the ROS install.
@@ -16,3 +17,5 @@ foreach(target IN LISTS imported)
 endforeach()
 add_executable(joint_state_relay joint_state_relay.cpp)
 ament_target_dependencies(joint_state_relay rclcpp std_msgs aimdk_msgs)
+add_executable(imu_batch_relay imu_batch_relay.cpp)
+ament_target_dependencies(imu_batch_relay rclcpp std_msgs sensor_msgs)
