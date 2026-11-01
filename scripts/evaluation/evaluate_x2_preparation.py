@@ -9,6 +9,7 @@ from collections import deque
 import hashlib
 import json
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
@@ -38,6 +39,28 @@ class OfficialLinearPose:
         return self.start + progress * (self.target - self.start), zero, zero
 
 
+def diagnostic_urdf_pelvis_inertia(model, urdf):
+    """Override only a private simulation model, preserving full inertia tensor."""
+    link = next((e for e in ET.parse(urdf).getroot().findall('link') if e.get('name') == 'pelvis'), None)
+    if link is None or link.find('inertial') is None: raise ValueError('Missing pelvis inertia')
+    inertial = link.find('inertial'); origin = inertial.find('origin'); mass = float(inertial.find('mass').get('value'))
+    pos = np.fromstring(origin.get('xyz', '0 0 0'), sep=' ')
+    rpy = np.fromstring(origin.get('rpy', '0 0 0'), sep=' ')
+    it = inertial.find('inertia'); v = {k: float(it.get(k)) for k in ('ixx','iyy','izz','ixy','ixz','iyz')}
+    tensor=np.array([[v['ixx'],v['ixy'],v['ixz']],[v['ixy'],v['iyy'],v['iyz']],[v['ixz'],v['iyz'],v['izz']]])
+    rotation=Rotation.from_euler('xyz',rpy).as_matrix(); tensor=rotation@tensor@rotation.T
+    principal, axes=np.linalg.eigh(tensor)
+    if mass <= 0 or np.min(principal) <= 0 or pos.shape != (3,) or not np.isfinite(tensor).all():
+        raise ValueError('Invalid pelvis inertia')
+    if np.linalg.det(axes)<0: axes[:,0]*=-1
+    body=mujoco.mj_name2id(model,mujoco.mjtObj.mjOBJ_BODY,'pelvis')
+    if body<0: raise ValueError('Missing model pelvis')
+    old={'mass_kg':float(model.body_mass[body]),'ipos_m':model.body_ipos[body].tolist()}
+    model.body_mass[body]=mass; model.body_ipos[body]=pos; model.body_inertia[body]=principal
+    model.body_iquat[body]=Rotation.from_matrix(axes).as_quat()[[3,0,1,2]]
+    return {'original':old,'urdf_mass_kg':mass,'urdf_ipos_m':pos.tolist(),'urdf_sha256':sha(urdf)}
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('scene','profile','dataset','policy','snapshot','candidate','prep-gains','out'):
@@ -64,6 +87,8 @@ def main():
                    help='Counterfactual only: disable initially violated model limits until each joint reenters its original range')
     p.add_argument('--official-preparation', action='store_true',
                    help='Simulation only: 1.5 s linear interpolation to SDK default_joints with SDK gains')
+    p.add_argument('--diagnostic-pelvis-urdf', type=Path,
+                   help='Simulation-only counterfactual: use pelvis mass and inertia from this URDF')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
@@ -78,6 +103,10 @@ def main():
     if snapshot['joint_names']!=names or candidate['joint_names']!=names or n!=31: raise ValueError('Joint order mismatch')
     if sha(a.policy)!='4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c':raise ValueError('Wrong policy')
     m=mujoco.MjModel.from_xml_path(str(a.scene));d=mujoco.MjData(m)
+    inertia_diagnostic=None
+    if a.diagnostic_pelvis_urdf:
+        inertia_diagnostic=diagnostic_urdf_pelvis_inertia(m,a.diagnostic_pelvis_urdf)
+        mujoco.mj_setConst(m,d)
     if abs(round(.02/m.opt.timestep)*m.opt.timestep-.02)>1e-9:raise ValueError('Timestep mismatch')
     joint=[mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_JOINT,name) for name in names]
     if min(joint)<0:raise ValueError('Missing joint')
@@ -260,6 +289,7 @@ def main():
                 'hardware_geometry_or_stiffness_validated':False},
             'initial_outside_file_envelope':initial_outside,'prep_duration_s':path.duration,'thresholds_sim_only':vars(thresholds),
             'official_preparation_simulation':a.official_preparation,
+            'pelvis_inertia_counterfactual':inertia_diagnostic,
             'official_preparation_scope':'20 ms sampled approximation of SDK 1.5 s interpolation, followed by project handover gates; not an exact SDK controller replay',
             'prep_gain_source':('device SDK example' if a.prep_gain_source=='sdk' else 'selected policy profile')+
                                ', used only as a simulation candidate',
