@@ -324,6 +324,7 @@ def main():
                         'bodies':[mujoco.mj_id2name(m,mujoco.mjtObj.mjOBJ_BODY,int(m.geom_bodyid[g])) for g in geoms],
                         'normal_n':float(wrench[0]),'distance_m':float(c.dist)})
             rows.append({'time_s':now,'phase':entry.phase.value,'root':d.qpos[:3].tolist(),
+                'root_quat_after_wxyz':d.qpos[3:7].tolist(),'joint_position_after':d.qpos[qa].tolist(),
                 'joint_position':q.tolist(),'target':current_target.tolist(),'kp':kp_now.tolist(),'kd':kd_now.tolist(),
                 'max_target_step_rad':float(np.max(np.abs(current_target-previous_target))),
                 'max_joint_error_rad':float(np.max(np.abs(q-ref))), 'max_joint_speed_rad_s':float(np.max(np.abs(qd))),
