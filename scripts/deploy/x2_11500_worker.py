@@ -74,6 +74,14 @@ def main():
     for _ in range(20):fixture_output=policy.infer(fixture['obs'],fixture['goal'])
     if np.max(np.abs(fixture_output-np.asarray(fixture['expected'])))>1e-4:
         raise ValueError('Policy fixture mismatch')
+    # Load FK/reference assets and warm inference before subscribing. Doing this
+    # in the first callback leaves real sensor packets queued for seconds;
+    # they correctly fail the 50 ms age guard when dispatch resumes.
+    tracker=SkillGoal(dataset,profile,candidate['startup']['root_position'],candidate['startup']['root_quat_wxyz'])
+    for _ in range(10):
+        warm_goal=tracker.goal(candidate['startup']['root_position'],candidate['startup']['root_quat_wxyz'],
+                               candidate['startup']['position'],'stand')
+        policy.infer(np.zeros(990,dtype=np.float32),warm_goal)
     target_topic=(a.isolated_prefix+'/control_target' if a.isolated_prefix else '/supermimic/x2/control_target')
     state_topic=(a.isolated_prefix+'/policy_state' if a.isolated_prefix else '/supermimic/x2_online_lio/policy_state')
     deadline=time.monotonic()+2.
@@ -96,11 +104,6 @@ def main():
             session=row['session_id'];q=np.asarray(row['joint_position']);qd=row['joint_velocity'];quat=np.asarray(row['quat_wxyz'])
             w,x,y,z=quat;gravity=[2*(w*y-x*z),-2*(w*x+y*z),-1+2*(x*x+y*y)]
             if controller is None:
-                # Construct tracker before sending any command; this may take seconds.
-                tracker=SkillGoal(dataset,profile,row['position'],quat)
-                for _ in range(10):
-                    warm_goal=tracker.goal(row['position'],quat,q,'stand')
-                    policy.infer(np.zeros(990,dtype=np.float32),warm_goal)
                 def factory(position,orientation):
                     tracker.position=np.asarray(position).copy()
                     tracker.yaw=tracker.rotation(orientation).as_euler('xyz')[2]
