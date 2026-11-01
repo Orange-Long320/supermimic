@@ -19,6 +19,7 @@ import yaml
 
 from supermimic.deploy.entry import EntryController, EntryPhase, EntryThresholds, QuinticPose, PreparationLoadCompensator
 from supermimic.deploy.independent_policy import IndependentPolicyCoordinator
+from supermimic.deploy.early_handover import EarlyHandover,Phase as EarlyPhase
 from supermimic.deploy.skill_goal import SkillGoal
 from supermimic.deploy.torch_policy import TorchScriptPolicy
 
@@ -102,6 +103,10 @@ def main():
                    help='Simulation only: ablate previous-action input; changes policy observation semantics')
     p.add_argument('--diagnostic-profile-armature',action='store_true',
                    help='Simulation-only: replace official XML armature with training profile values')
+    p.add_argument('--diagnostic-early-controller',action='store_true',
+                   help='Run the actual early handover controller in the diagnostic simulation')
+    p.add_argument('--diagnostic-target-step',type=float,default=.3,
+                   help='Simulated per-frame command step fault threshold, not a validated hardware value')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
@@ -113,6 +118,8 @@ def main():
                     or a.waist_orientation_assist))
             or not 0.<=a.diagnostic_previous_action_scale<=1.
             or (a.diagnostic_previous_action_scale!=1. and a.diagnostic_early_blend is None)
+            or (a.diagnostic_early_controller and (a.diagnostic_early_blend is None or a.diagnostic_previous_action_scale!=1.
+                    or not 0<a.diagnostic_target_step<=2.))
             or (a.diagnostic_handover_tilt is not None and not .15<a.diagnostic_handover_tilt<=.35)):
         raise ValueError('Invalid scenario')
     a.out.mkdir(parents=True,exist_ok=False);torch.set_num_threads(1)
@@ -175,6 +182,19 @@ def main():
     coordinator=(IndependentPolicyCoordinator(entry,default,scale,policy,
                  lambda position,quat: SkillGoal(a.dataset,a.profile,position,quat))
                  if a.independent_coordinator else None)
+    early_controller=None
+    if a.diagnostic_early_controller:
+        # Widen only simulation measured bounds enough to admit the recorded
+        # out-of-range sample; this is explicitly NOT hardware calibration.
+        lower=np.asarray(candidate['measured_lower_candidate']);upper=np.asarray(candidate['measured_upper_candidate'])
+        if a.diagnostic_initial_limit_grace:
+            lower=np.minimum(lower,raw-.001);upper=np.maximum(upper,raw+.001)
+        early_controller=EarlyHandover(raw,ref,default,scale,prep_kp,prep_kd,kp,kd,lower,upper,
+            np.full(n,-10.),np.full(n,10.),np.full(n,a.diagnostic_target_step),
+            max_velocity=np.full(n,.35),max_acceleration=np.full(n,.4),
+            minimum_duration=.1 if a.diagnostic_reference_prepare else 8.,blend_seconds=a.diagnostic_early_blend,
+            max_tick_gap=.031,max_tilt=.78,max_angular_speed=10.,policy=policy,
+            tracker_factory=lambda position,quat:SkillGoal(a.dataset,a.profile,position,quat))
     previous=(raw-default)/scale;previous_target=raw.copy();current_target=raw.copy()
     local_attach=np.array([a.attachment_x,0.,.15]);point=d.xpos[torso]+d.xmat[torso].reshape(3,3)@local_attach
     anchor=point+np.array([0.,0.,2.]);mass=float(m.body_mass.sum());weight=mass*abs(m.opt.gravity[2])
@@ -210,20 +230,20 @@ def main():
                     and np.max(np.abs(qd))<thresholds.joint_speed and np.linalg.norm(omega)<thresholds.angular_speed
                     and rows and min(rows[-1]['normal_n'])>10.):
                 unload_start=now;events.append({'time_s':now,'phase':'support_transfer_started'})
-            if a.diagnostic_early_blend is not None:
+            if a.diagnostic_early_blend is not None and early_controller is None:
                 history.append((q-default,qd,omega,gravity,previous.copy()*a.diagnostic_previous_action_scale))
                 if tracker is None:tracker=SkillGoal(a.dataset,a.profile,d.qpos[:3].copy(),d.qpos[3:7].copy())
-            elif coordinator is None and entry.phase in (EntryPhase.HISTORY,EntryPhase.HANDOVER,EntryPhase.ACTIVE):
+            elif coordinator is None and early_controller is None and entry.phase in (EntryPhase.HISTORY,EntryPhase.HANDOVER,EntryPhase.ACTIVE):
                 history.append((q-default,qd,omega,gravity,previous.copy()))
                 if tracker is None:tracker=SkillGoal(a.dataset,a.profile,d.qpos[:3].copy(),d.qpos[3:7].copy())
-            if a.diagnostic_early_blend is not None and len(history)==10:
+            if a.diagnostic_early_blend is not None and early_controller is None and len(history)==10:
                 goal=tracker.goal(d.qpos[:3].copy(),d.qpos[3:7].copy(),q,'stand')
                 obs=tuple(float(v) for term in range(5) for h in history for v in h[term])
                 action=np.asarray(policy.infer(obs,tuple(float(v) for v in goal)))
                 if action.shape!=(n,) or not np.isfinite(action).all():raise ValueError('Invalid policy action')
                 if a.diagnostic_policy_trace:trace={'observation':list(obs),'goal':np.asarray(goal).tolist(),'action':action.tolist()}
                 proposed=default+scale*action;tracker.advance()
-            elif coordinator is None and entry.phase in (EntryPhase.HANDOVER,EntryPhase.ACTIVE):
+            elif coordinator is None and early_controller is None and entry.phase in (EntryPhase.HANDOVER,EntryPhase.ACTIVE):
                 if len(history)!=10:raise ValueError('Incomplete actual preparation command history')
                 goal=tracker.goal(d.qpos[:3].copy(),d.qpos[3:7].copy(),q,'stand')
                 obs=tuple(float(v) for term in range(5) for h in history for v in h[term])
@@ -259,7 +279,13 @@ def main():
                 elif a.orientation_assist or a.waist_orientation_assist: bias=balance_bias.copy()
             support_ready=(not a.unload_before_handover or (unload_start is not None and now-unload_start>=5.
                            and np.linalg.norm(support_force)<.05*weight and rows and min(rows[-1]['normal_n'])>10.))
-            if a.diagnostic_early_blend is not None:
+            if early_controller is not None:
+                if early_controller.phase is EarlyPhase.PREPARE and len(early_controller.history)==10:
+                    early_controller.request_handover()
+                output=early_controller.step(now,d.qpos[:3],d.qpos[3:7],q,qd,omega,gravity)
+                current_target,target_v,kp_now,kd_now=(output[k] for k in ('position','velocity','stiffness','damping'))
+                entry.phase=EntryPhase(output['phase'])
+            elif a.diagnostic_early_blend is not None:
                 if proposed is None:
                     current_target,target_v,_=path.sample(now);kp_now,kd_now=prep_kp,prep_kd
                 else:
@@ -353,6 +379,9 @@ def main():
             'independent_coordinator_simulation':a.independent_coordinator,
             'diagnostic_reference_prepare':a.diagnostic_reference_prepare,
             'diagnostic_early_blend_s':a.diagnostic_early_blend,
+            'diagnostic_early_controller':a.diagnostic_early_controller,
+            'diagnostic_target_step_rad':a.diagnostic_target_step if a.diagnostic_early_controller else None,
+            'diagnostic_target_bounds':'[-10,10] rad and widened measured bounds if grace; simulated diagnostic only',
             'diagnostic_previous_action_scale':a.diagnostic_previous_action_scale,
             'diagnostic_profile_armature':a.diagnostic_profile_armature,
             'original_armature_range': [float(armature_before.min()),float(armature_before.max())],
