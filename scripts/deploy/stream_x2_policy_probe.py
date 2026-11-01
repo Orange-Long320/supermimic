@@ -22,7 +22,7 @@ def main():
     p.add_argument('--numpy-sha256')
     p.add_argument('--diagnostic-only', action='store_true', required=True)
     a = p.parse_args()
-    if not 10 <= a.seconds <= 180: raise ValueError('Expected bounded diagnostic duration')
+    if not 10 <= a.seconds <= 300: raise ValueError('Expected bounded diagnostic duration')
     r = a.release.resolve()
     digest = hashlib.sha256((r/'policy.pt').read_bytes()).hexdigest()
     if digest != '4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c':
@@ -80,7 +80,10 @@ def main():
             elif recv_gap > .03:
                 gap_attribution['receive gap without acquisition gap'] += 1
         last_arrival = arrival
-    qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
+    # Match the worker's bounded queue: the observer must not manufacture a
+    # history gap by discarding a real sample during a short dispatch delay.
+    # validate_policy_packet still enforces the unchanged 50 ms age bound.
+    qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
     sub = node.create_subscription(String, '/supermimic/x2_online_lio/policy_state', receive, qos)
     executor = SingleThreadedExecutor(); executor.add_node(node)
     history = deque(maxlen=10); previous = np.zeros(31); session = None; last_stamp = None
