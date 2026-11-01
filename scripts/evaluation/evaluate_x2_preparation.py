@@ -92,6 +92,8 @@ def main():
                    help='Simulation-only counterfactual: use pelvis mass and inertia from this URDF')
     p.add_argument('--independent-coordinator', action='store_true',
                    help='Use actuator-free independent coordinator; automatically request handover when ready in this simulation')
+    p.add_argument('--diagnostic-reference-prepare', action='store_true',
+                   help='Counterfactual: start exactly at reference target with short settle; not an actual preparation')
     a=p.parse_args()
     if (not 0 <= a.support_fraction <= 1. or not abs(a.attachment_x)<=.1
             or not 500<=a.spring<=10000 or not 5<=a.active_seconds<=120
@@ -143,8 +145,11 @@ def main():
         ref=np.asarray([special.get(name,{}).get('position',0.) for name in names],dtype=float)
         path=OfficialLinearPose(raw,ref)
     else:
-        path=QuinticPose(raw,ref,np.full(n,.35),np.full(n,.4),minimum_duration=8.)
-    thresholds=EntryThresholds(.08,.12,.20,a.diagnostic_handover_tilt or .15,.5,12.,.031,10,a.handover_seconds)
+        if a.diagnostic_reference_prepare and np.max(np.abs(raw-ref))>1e-8:
+            raise ValueError('Reference diagnostic requires the exact target pose')
+        path=QuinticPose(raw,ref,np.full(n,.35),np.full(n,.4),minimum_duration=.1 if a.diagnostic_reference_prepare else 8.)
+    thresholds=EntryThresholds(.08,.12,.20,a.diagnostic_handover_tilt or .15,
+                               .1 if a.diagnostic_reference_prepare else .5,12.,.031,10,a.handover_seconds)
     entry=EntryController(path,thresholds,prep_kp,prep_kd,kp,kd)
     compensator=PreparationLoadCompensator(prep_kp,prep_kd,np.max(np.abs(limits),axis=1),
                     integral_gain=.3,max_bias_speed=.08,effort_fraction=.5) if a.load_compensation else None
@@ -303,6 +308,7 @@ def main():
             'initial_outside_file_envelope':initial_outside,'prep_duration_s':path.duration,'thresholds_sim_only':vars(thresholds),
             'official_preparation_simulation':a.official_preparation,
             'independent_coordinator_simulation':a.independent_coordinator,
+            'diagnostic_reference_prepare':a.diagnostic_reference_prepare,
             'pelvis_inertia_counterfactual':inertia_diagnostic,
             'official_preparation_scope':'20 ms sampled approximation of SDK 1.5 s interpolation, followed by project handover gates; not an exact SDK controller replay',
             'prep_gain_source':('device SDK example' if a.prep_gain_source=='sdk' else 'selected policy profile')+
