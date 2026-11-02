@@ -61,12 +61,18 @@ class SimFootSupport:
     def observe(self, stamp, rwp, omega_body, position, velocity):
         candidates = self.candidates(rwp, omega_body, position, velocity)
         side = min(candidates, key=lambda s: candidates[s][0]); other = 'right' if side == 'left' else 'left'
+        near = candidates[other][0] - candidates[side][0] < .01
+        consistent = np.linalg.norm(candidates[other][1] - candidates[side][1]) <= .2
         if self.side != side:
-            self.side, self.side_since = side, stamp
+            # If both feet produce the same support hypothesis, a change in
+            # which one is microscopically lower is not a support transition.
+            # Otherwise restart the existing hold, without relaxing its limit.
+            if self.side is None or not (near and consistent):
+                self.side_since = stamp
+            self.side = side
         if stamp - self.side_since < .04:
             return None, 'hold'
-        if (candidates[other][0] - candidates[side][0] < .01 and
-                np.linalg.norm(candidates[other][1] - candidates[side][1]) > .2):
+        if near and not consistent:
             return None, 'disagree'
         self.accepted_relative_height = -candidates[side][0]
         return candidates[side][1], 'accepted'
