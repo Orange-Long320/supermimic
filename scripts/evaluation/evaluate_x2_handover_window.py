@@ -15,6 +15,7 @@ import mujoco
 import numpy as np
 import torch
 import yaml
+from scipy.optimize import lsq_linear
 
 from supermimic.deploy.early_handover import EarlyHandover, Phase
 from supermimic.deploy.skill_goal import SkillGoal
@@ -22,6 +23,32 @@ from supermimic.deploy.torch_policy import TorchScriptPolicy
 
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def static_support_effort(model, data, foot_geoms, motor_dofs):
+    """Model-only vertical support equilibrium, without moving the free root.
+
+    Only sphere bottoms near the lowest foot are eligible. A nonnegative
+    normal-force solution must balance all six unactuated coordinates. This
+    is a diagnostic inverse-statics assumption, not measured contact forces.
+    """
+    state=mujoco.MjData(model);state.qpos[:]=data.qpos
+    mujoco.mj_forward(model,state)  # zero velocity: gravity, no velocity bias
+    bottoms=[float(state.geom_xpos[g,2]-model.geom_size[g,0]) for gs in foot_geoms for g in gs]
+    lowest=min(bottoms);jacobians=[]
+    for gs in foot_geoms:
+        for g in gs:
+            if state.geom_xpos[g,2]-model.geom_size[g,0]>lowest+.0005:continue
+            point=state.geom_xpos[g].copy();point[2]-=model.geom_size[g,0]
+            jac=np.zeros((3,model.nv));mujoco.mj_jac(model,state,jac,None,point,int(model.geom_bodyid[g]))
+            jacobians.append(jac[2].copy())
+    columns=np.asarray(jacobians).T
+    result=lsq_linear(columns[:6],state.qfrc_bias[:6],bounds=(0.,np.inf),tol=1e-12,max_iter=200)
+    residual=float(np.max(np.abs(columns[:6]@result.x-state.qfrc_bias[:6])))
+    if not result.success or residual>1e-5:
+        raise ValueError('Model vertical support equilibrium infeasible: '+str(residual))
+    return (state.qfrc_bias-columns@result.x)[motor_dofs],dict(
+        equilibrium_residual=residual,total_normal_n=float(result.x.sum()),points=len(jacobians))
 
 
 def main():
@@ -38,9 +65,14 @@ def main():
                    help='Model-only preparation target margin, separate from the policy goal margin')
     p.add_argument('--waist-pitch-sdk-gains',action='store_true',
                    help='Model-only active waist-pitch gain comparison; never a hardware gain approval')
+    p.add_argument('--preparation-gravity-compensation',action='store_true',
+                   help='Model-only inverse-statics support torque, faded out during handover')
+    p.add_argument('--preparation-only-seconds',type=float,default=0.,
+                   help='Diagnostic preparation window without requesting policy handover (0 uses normal test)')
     a=p.parse_args()
     if (a.out.exists() or not .1<=a.blend_seconds<=2 or not 5<=a.active_seconds<=30
-            or not 0<=a.stand_elbow_margin<=.25 or not 0<=a.preparation_elbow_margin<=.25):
+            or not 0<=a.stand_elbow_margin<=.25 or not 0<=a.preparation_elbow_margin<=.25
+            or not (a.preparation_only_seconds==0 or .2<=a.preparation_only_seconds<=8.)):
         raise ValueError('New output and bounded diagnostic duration required')
     a.out.mkdir(parents=True)
     if sha(a.policy)!='4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c':
@@ -114,16 +146,23 @@ def main():
         policy=policy,tracker_factory=lambda position,orientation:tracker,history_source='policy')
     substeps=round(.02/m.opt.timestep)
     if abs(substeps*m.opt.timestep-.02)>1e-9:raise ValueError('Unexpected simulation timestep')
-    rows=[];failure=None;active_start=None;clipped=0;total=0;peak_other=0.
-    max_sim_seconds=8.+a.blend_seconds+a.active_seconds
+    rows=[];failure=None;active_start=None;clipped=0;total=0;peak_other=0.;support_diagnostic=None
+    max_sim_seconds=a.preparation_only_seconds or (8.+a.blend_seconds+a.active_seconds)
     for i in range(round(max_sim_seconds/.02)):
         now=i*.02
         q=d.qpos[qa].copy();qd=d.qvel[va].copy();quat=d.xquat[pelvis].copy();w,x,y,z=quat
         gravity=np.array([2*(w*y-x*z),-2*(w*x+y*z),-1+2*(x*x+y*y)])
         velocity=np.zeros(6);mujoco.mj_objectVelocity(m,d,mujoco.mjtObj.mjOBJ_XBODY,pelvis,velocity,1)
         try:
-            if controller.phase is Phase.PREPARE and len(controller.history)==10:controller.request_handover()
+            if not a.preparation_only_seconds and controller.phase is Phase.PREPARE and len(controller.history)==10:
+                controller.request_handover()
             out=controller.step(now,d.qpos[:3].copy(),quat,q,qd,velocity[:3],gravity)
+            feedforward=np.zeros(n)
+            if a.preparation_gravity_compensation and controller.phase is not Phase.ACTIVE:
+                feedforward,support_diagnostic=static_support_effort(m,d,foot_geoms,va)
+                if controller.phase is Phase.HANDOVER:
+                    s=float(np.clip((now-controller.blend_started)/controller.blend_seconds,0.,1.))
+                    feedforward*=1-(10*s**3-15*s**4+6*s**5)
         except ValueError as exc:
             context=controller.fault_context
             if context is not None and 'indices' in context:
@@ -132,7 +171,7 @@ def main():
         if controller.phase is Phase.ACTIVE and active_start is None:active_start=now
         normal=np.zeros(2);other=0.;effort_ratio=0.
         for _ in range(substeps):
-            effort=out['stiffness']*(out['position']-d.qpos[qa])-out['damping']*d.qvel[va]
+            effort=out['stiffness']*(out['position']-d.qpos[qa])-out['damping']*d.qvel[va]+feedforward
             clipped+=int(np.any((effort<limits[:,0]) | (effort>limits[:,1])));total+=1
             d.ctrl[motors]=np.clip(effort,limits[:,0],limits[:,1])
             effort_ratio=max(effort_ratio,float(np.max(np.abs(effort)/np.max(np.abs(limits),axis=1))))
@@ -149,6 +188,7 @@ def main():
         peak_other=max(peak_other,other)
         rows.append(dict(time_s=now,phase=controller.phase.value,root=d.qpos[:7].tolist(),
             q=q.tolist(),qd=qd.tolist(),target=out['position'].tolist(),normal_n=normal.tolist(),
+            feedforward_model_only=feedforward.tolist(),support_diagnostic=support_diagnostic,
             unclipped_effort_ratio=effort_ratio,nonfoot_contact_n=other))
         if d.qpos[2]<.4:
             failure=dict(time_s=now,reason='Root height below .4 m',phase=controller.phase.value);break
@@ -166,11 +206,13 @@ def main():
         stand_goal_override_model_only=goal_override,
         preparation_override_model_only=preparation_override,
         policy_gain_override_model_only=gain_override,
+        preparation_gravity_compensation_model_only=a.preparation_gravity_compensation,
+        preparation_only_seconds=a.preparation_only_seconds,
         simulation_only_guard=dict(target_step_rad=.3,max_tilt_rad=.35,max_angular_speed_rad_s=2.),
         failure=failure,frames=len(rows),active_seconds=active_s,
         saturated_substep_fraction=fraction,maximum_nonfoot_contact_n=peak_other,
         both_feet_loaded_fraction_after_active_1s=loaded,
-        passed_model_window=bool(failure is None and active_s>=a.active_seconds-.001 and fraction<.01 and peak_other<=10. and loaded>=.95),
+        passed_model_window=bool(not a.preparation_only_seconds and failure is None and active_s>=a.active_seconds-.001 and fraction<.01 and peak_other<=10. and loaded>=.95),
         motor_commands_sent=0,ready_for_hardware_trial=False)
     (a.out/'frames.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
     (a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
