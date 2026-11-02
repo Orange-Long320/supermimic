@@ -100,7 +100,11 @@ def main():
             self.static_ready = False; self.mount_changed = False; self.last_pose = None
             self.live_tf_seen = set(); self.last_reason = 'initializing'; self.state_received = None
             self.cloud_times = deque(maxlen=128)
-            self.stage_wall_max = Counter(); self.stage_cpu_max = Counter(); self.slow_stages = deque(maxlen=12)
+            self.stage_wall_max = Counter(); self.stage_cpu_max = Counter()
+            # Cumulative per-stage cost, so the CPU share of each stage can be
+            # read directly instead of inferred from maxima. Diagnostics only.
+            self.stage_wall_total = Counter(); self.stage_cpu_total = Counter()
+            self.stage_count = Counter(); self.slow_stages = deque(maxlen=12)
             self.stage_slowest = {}
             self.gc_started = None
             self.gc_frozen_objects = 0
@@ -150,6 +154,7 @@ def main():
             if wall>self.stage_wall_max[name]:
                 self.stage_wall_max[name]=wall;self.stage_slowest[name]=event
             self.stage_cpu_max[name]=max(self.stage_cpu_max[name],cpu)
+            self.stage_wall_total[name]+=wall;self.stage_cpu_total[name]+=cpu;self.stage_count[name]+=1
             if wall>10:self.slow_stages.append(event)
 
         def on_imu(self, msg):
@@ -377,6 +382,9 @@ def main():
                       'running': self.running,
                       'counts': dict(self.counts), 'rejected_ticks': dict(self.rejects), 'status': self.last_reason,
                       'floor': self.floor, 'latest_pose': self.last_pose, 'live_mount_tf_seen': sorted(self.live_tf_seen),
+                      'stage_wall_total_ms': {k: round(v, 1) for k, v in self.stage_wall_total.items()},
+                      'stage_cpu_total_ms': {k: round(v, 1) for k, v in self.stage_cpu_total.items()},
+                      'stage_count': dict(self.stage_count),
                       'cloud_callback_ms_p50_max': [float(np.median(self.cloud_times)), float(max(self.cloud_times))] if self.cloud_times else None,
                       'header_mode': 'native_'+args.native_stamp_source+'_unchanged', 'hardware_sampling_time_verified': False,
                       'state_clock': args.state_clock,

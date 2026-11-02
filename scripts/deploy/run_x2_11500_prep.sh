@@ -18,6 +18,11 @@ export PYTHONPATH_RELEASE="$trial/src:$base/python-cpu:$base/vendor-mjlab-math:$
 export PYTHONPATH_LIO="$lio/code/src:$base/python-cpu:$base/vendor-mjlab-math:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="$lio/install/lib:${LD_LIBRARY_PATH:-}"
 export SM_ROBOT=x2_ultra SM_ROBOT_SPEC="$release/fk-only/profile.json"
+# The native sensor stack is pinned to cores 1-3 (perception on 4). Without a
+# pin our processes contend there and lose 50 Hz grid ticks; cores 5-7 measured
+# a 20 ms worst gap and zero stale packets.
+TRIAL_CPUS=${TRIAL_CPUS:-5,6,7}
+run=()
 
 mkdir "$trial"
 mkdir "$trial/src"
@@ -43,7 +48,7 @@ plan=$trial/contract/plan.json
 consent=$trial/contract/consent.json
 
 echo "== start diagnostic state producer =="
-nohup flock -n -F "$base/online-pelvis.lock" env PYTHONPATH="$PYTHONPATH_LIO" /usr/bin/python3 "$lio/code/scripts/online_x2_lio.py" \
+nohup flock -n -F "$base/online-pelvis.lock" taskset -c "$TRIAL_CPUS" env PYTHONPATH="$PYTHONPATH_LIO" /usr/bin/python3 "$lio/code/scripts/online_x2_lio.py" \
   --binary "$lio/install/lib/fast_lio/fastlio_mapping" \
   --urdf "$lio/assets/robot-pc2.urdf" --profile "$lio/assets/fk-only/profile.json" \
   --extrinsics "$lio/extrinsics.json" --out "$trial/state" \
@@ -53,18 +58,18 @@ state_pid=$!
 sleep 22
 
 echo "== start hardware publisher =="
-nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/x2_hardware_publisher.py" --plan "$plan" --consent "$consent" \
+nohup taskset -c "$TRIAL_CPUS" env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/x2_hardware_publisher.py" --plan "$plan" --consent "$consent" \
   > "$trial/publisher.log" 2>&1 &
 publisher_pid=$!
 sleep 3
 
 echo "== record joint states (read only) =="
-nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/record_x2_joint_states.py" --seconds 26 --startup "$trial/contract/startup.json" \
+nohup taskset -c "$TRIAL_CPUS" env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/record_x2_joint_states.py" --seconds 26 --startup "$trial/contract/startup.json" \
   --out "$trial/joint-recording.json" > "$trial/joints.log" 2>&1 &
 monitor_pid=$!
 
 echo "== start policy worker (preparation only) =="
-nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/x2_11500_worker.py" --plan "$plan" --consent "$consent" \
+nohup taskset -c "$TRIAL_CPUS" env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/x2_11500_worker.py" --plan "$plan" --consent "$consent" \
   > "$trial/worker.log" 2>&1 &
 worker_pid=$!
 
