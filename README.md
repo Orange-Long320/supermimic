@@ -6,6 +6,7 @@
 
 - LAFAN1 数据准备、训练和完整片段评测已经运行；具体配置与结果见 [实验记录](docs/LOCAL_EXPERIMENT.md)。
 - Webster 视频动作和其他动作已进行参考数据处理、训练及评测。各实验的结果和限制见 `docs/` 下对应记录；参考动作通过检查不等于策略完成动作。
+- X2 当前采用 **500 Hz IMU 积分与状态估计路线**；点云和 FAST-LIO 定位路线已放弃，其文档保留为历史记录。实现、测量及四元数顺序勘误见 [IMU 状态估计记录](docs/X2_SHADOW_CONTACT_FUSION_20261102.md)。现有结果主要为静止只读验证，运动精度和完整状态链尚未验收。
 - X2 11500 策略的实机准备、只读观测和仿真接管测试见 [部署准备记录](docs/X2_READINESS_OFFLINE_20261102.md)。记录中的接管动力学测试未通过，不能据此认定实机部署已通过验收。
 
 实验记录反映当时的测量和进度；运行状态、GPU 占用及设备状态应在使用前重新核验。
@@ -14,7 +15,7 @@
 
 - [使用与训练](docs/USAGE.md) · [数据](docs/DATA.md) · [架构](docs/ARCHITECTURE.md)
 - [本项目实验记录](docs/LOCAL_EXPERIMENT.md) · [历史仿真实验](docs/EXPERIMENTS.md)
-- [X2 部署基础](docs/X2_DEPLOYMENT.md) · [PC2 容器准备](docs/X2_LXH_PC2_PREPARATION_20261031.md)
+- [X2 部署基础与当前路线](docs/X2_DEPLOYMENT.md) · [500 Hz IMU 状态估计](docs/X2_SHADOW_CONTACT_FUSION_20261102.md) · [PC2 容器准备](docs/X2_LXH_PC2_PREPARATION_20261031.md)
 - [Git 回档](docs/GIT_RECOVERY.md) · [上游来源](UPSTREAM.md)
 - [项目操作约束](AGENTS.md)
 
