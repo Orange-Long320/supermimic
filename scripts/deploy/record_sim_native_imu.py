@@ -37,9 +37,10 @@ def main():
     out = os.path.abspath(a.out)
     os.makedirs(out, exist_ok=False)
     imu_file = open(os.path.join(out, 'imu.jsonl'), 'x')
+    chest_file = open(os.path.join(out, 'imu-chest.jsonl'), 'x')
     odom_file = open(os.path.join(out, 'odom.jsonl'), 'x')
     joint_file = open(os.path.join(out, 'joints.jsonl'), 'x')
-    counts = {'imu': 0, 'odom': 0, 'joints': 0}
+    counts = {'imu': 0, 'chest': 0, 'odom': 0, 'joints': 0}
 
     def emit(handle, key, record):
         handle.write(json.dumps(record, allow_nan=False) + '\n')
@@ -56,6 +57,7 @@ def main():
                              durability=DurabilityPolicy.VOLATILE)
             self.subs = [
                 self.create_subscription(Imu, '/aima/hal/imu/torso/state', self.on_imu, qos),
+                self.create_subscription(Imu, '/aima/hal/imu/chest/state', self.on_chest, qos),
                 self.create_subscription(Odometry, '/aima/hal/odom/state', self.on_odom, qos),
             ]
             self.subs += [self.create_subscription(JointStateArray, f'/aima/hal/joint/{g}/state',
@@ -63,8 +65,14 @@ def main():
                           for g in ('leg', 'waist', 'head', 'arm')]
 
         def on_imu(self, msg):
+            self.record_imu(msg, imu_file, 'imu')
+
+        def on_chest(self, msg):
+            self.record_imu(msg, chest_file, 'chest')
+
+        def record_imu(self, msg, handle, key):
             q, w, acc = msg.orientation, msg.angular_velocity, msg.linear_acceleration
-            emit(imu_file, 'imu', {
+            emit(handle, key, {
                 'stamp': [msg.header.stamp.sec, msg.header.stamp.nanosec],
                 'recv': time.monotonic(),
                 'frame_id': msg.header.frame_id,
@@ -83,6 +91,8 @@ def main():
                 'position': [p.x, p.y, p.z],
                 'q_xyzw': [q.x, q.y, q.z, q.w],
                 'linear': [tw.linear.x, tw.linear.y, tw.linear.z],
+                'angular': [tw.angular.x, tw.angular.y, tw.angular.z],
+                'frame_id': msg.header.frame_id, 'child_frame_id': msg.child_frame_id,
             })
 
         def on_joint(self, group, msg):
@@ -102,7 +112,7 @@ def main():
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        for handle in (imu_file, odom_file, joint_file):
+        for handle in (imu_file, chest_file, odom_file, joint_file):
             handle.flush()
             handle.close()
         node.destroy_node()
