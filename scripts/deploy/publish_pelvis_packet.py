@@ -26,15 +26,21 @@ def main():
     p.add_argument('--seconds', type=float, default=120.)
     p.add_argument('--publish-rate', type=float, default=50.)
     p.add_argument('--topic', default='/supermimic/x2_online_lio/policy_state')
-    p.add_argument('--fix-deg-x', type=float, default=13.11)
-    p.add_argument('--fix-deg-y', type=float, default=-1.04)
-    p.add_argument('--fix-deg-z', type=float, default=-0.12)
+    p.add_argument('--fix-deg-x', type=float, default=0.)
+    p.add_argument('--fix-deg-y', type=float, default=0.)
+    p.add_argument('--fix-deg-z', type=float, default=0.)
+    p.add_argument('--auto-mount', action='store_true',
+                   help='fit the world attitude correction from the static settle window')
     p.add_argument('--init-bias-seconds', type=float, default=3.)
     p.add_argument('--velocity-sigma', type=float, default=.02)
     p.add_argument('--still-accel-tol', type=float, default=.5)
     p.add_argument('--still-gyro-tol', type=float, default=.08)
     p.add_argument('--still-hold', type=float, default=.2)
     p.add_argument('--max-age', type=float, default=.05)
+    p.add_argument('--model', type=Path, default=None,
+                   help='FK-only model used to estimate pelvis height above the feet')
+    p.add_argument('--sole-offset', type=float, default=.05,
+                   help='ankle-body-origin to sole distance; declared, not measured')
     p.add_argument('--src', type=Path, default=None,
                    help='source root containing supermimic/deploy/policy_packet.py; '
                         'falls back to $SM_SRC. Validation must not be skipped.')
@@ -60,9 +66,25 @@ def main():
     from supermimic.deploy.policy_packet import validate_policy_packet
 
     names = json.loads(a.profile.read_text())['joint_names']
+    fk = None
+    if a.model is not None:
+        import mujoco
+        fk_model = mujoco.MjModel.from_xml_path(str(a.model))
+        fk_data = mujoco.MjData(fk_model)
+        fk_ids = [mujoco.mj_name2id(fk_model, mujoco.mjtObj.mjOBJ_JOINT, n) for n in names]
+        fk_feet = [mujoco.mj_name2id(fk_model, mujoco.mjtObj.mjOBJ_BODY, s + '_ankle_roll_link')
+                   for s in ('left', 'right')]
+        if min(*fk_ids, *fk_feet) < 0:
+            raise SystemExit('Missing FK joint or foot body')
+        fk = {'model': fk_model, 'data': fk_data,
+              'qpos_addr': [fk_model.jnt_qposadr[i] for i in fk_ids], 'feet': fk_feet}
     a.out.mkdir(parents=True, exist_ok=False)
     session = 'imu-kalman-500hz-' + uuid.uuid4().hex[:12]
     mount = Rotation.from_euler('xyz', [a.fix_deg_x, a.fix_deg_y, a.fix_deg_z], degrees=True).as_matrix()
+
+    def rot_of(wxyz):
+        """The device publishes w,x,y,z; scipy expects x,y,z,w."""
+        return Rotation.from_quat([wxyz[1], wxyz[2], wxyz[3], wxyz[0]])
     state = {'last': None, 'still_since': None, 'integrate': False,
              'x': np.zeros(6), 'P': np.diag([.01, .01, .1, .1, .1, .1])}
     H = np.zeros((2, 6))
@@ -70,7 +92,8 @@ def main():
     Rm = np.eye(2) * (a.velocity_sigma ** 2)
     Q = np.diag([1e-8, 1e-8, 4e-5, 4e-5, 1e-8, 1e-8])
     identity = np.eye(6)
-    counters = {'imu': 0, 'packets': 0, 'invalid': 0, 'skipped_age': 0, 'zupt': 0}
+    counters = {'imu': 0, 'packets': 0, 'invalid': 0, 'skipped_age': 0, 'skipped_skew': 0,
+                'skipped_joints_missing': 0, 'zupt': 0}
     timing = {'age_max': 0., 'publish_ms_max': 0.}
 
     class Producer(Node):
@@ -112,7 +135,7 @@ def main():
         dt = float(min(max(dt, 1e-4), .05))
         acc_body = np.array(sample['a'])
         gyro = np.array(sample['w'])
-        world = mount @ (-Rotation.from_quat(sample['q']).apply(acc_body))
+        world = mount @ rot_of(sample['q']).apply(acc_body)
         u = world[:2]
         F = np.eye(6)
         F[0, 2] = F[1, 3] = dt
@@ -146,10 +169,20 @@ def main():
         while time.monotonic() < end:
             rclpy.spin_once(node, timeout_sec=.01)
             if node.imu is not None:
-                window.append(mount @ (-Rotation.from_quat(node.imu['q']).apply(np.array(node.imu['a']))))
+                window.append(mount @ rot_of(node.imu['q']).apply(np.array(node.imu['a'])))
         if len(window) < 100:
             raise SystemExit('Static window produced too few samples')
-        state['x'][4:6] = np.array(window).mean(axis=0)[:2]
+        window = np.array(window)
+        if a.auto_mount:
+            mean = window.mean(axis=0)
+            mount = Rotation.align_vectors([[0., 0., 1.]], [mean])[0].as_matrix()
+            fitted = Rotation.from_matrix(mount).as_euler('xyz', degrees=True)
+            print('fitted world correction x=%.2f y=%.2f z=%.2f deg residual %.4f'
+                  % (fitted[0], fitted[1], fitted[2],
+                     float(np.linalg.norm(mount @ mean - np.array([0., 0., np.linalg.norm(mean)])))),
+                  flush=True)
+            window = np.array([mount @ v for v in window])
+        state['x'][4:6] = window.mean(axis=0)[:2]
         print('initial bias %s' % np.round(state['x'][4:6], 5), flush=True)
 
     frames = (a.out / 'packets.jsonl').open('x')
@@ -178,7 +211,7 @@ def main():
                     position_by_name.update(group['position'])
                     velocity_by_name.update(group['velocity'])
                 if any(n not in position_by_name for n in names):
-                    counters['skipped_age'] += 1
+                    counters['skipped_joints_missing'] += 1
                     continue
                 q = [position_by_name[n] for n in names]
                 qd = [velocity_by_name[n] for n in names]
@@ -186,19 +219,33 @@ def main():
                 counters['skipped_age'] += 1
                 continue
             x = state['x']
-            gravity = (Rotation.from_quat(node.imu['q']).as_matrix().T @ np.array([0., 0., -1.]))
+            height = 0.
+            if fk is not None:
+                data = fk['data']
+                data.qpos[:] = 0.
+                data.qpos[:7] = np.r_[[0., 0., 0.],
+                                      (Rotation.from_matrix(mount) * rot_of(node.imu['q'])).as_quat()[[3, 0, 1, 2]]]
+                data.qpos[fk['qpos_addr']] = q
+                mujoco.mj_kinematics(fk['model'], data)
+                height = float(-min(data.xpos[b][2] for b in fk['feet'])) + a.sole_offset
+            gravity = (rot_of(node.imu['q']).as_matrix().T @ np.array([0., 0., -1.]))
             group_stamps = [node.groups[g]['stamp_ns'] for g in ('leg', 'waist', 'head', 'arm')]
             group_recv = [node.groups[g]['recv'] for g in ('leg', 'waist', 'head', 'arm')]
             # The observation is complete only once every stream has been acquired, so
             # the packet timestamp is the newest of the five. Joints must never appear
             # to be acquired after the state they belong to.
             state_stamp_ns = max([int(node.imu['stamp_ns']), *[int(t) for t in group_stamps]])
+            # The consumer rejects a set of acquisitions spread over more than 30 ms.
+            # Skipping here keeps the publish slot for a coherent observation.
+            if state_stamp_ns - min([int(t) for t in group_stamps]) > 25_000_000:
+                counters['skipped_skew'] += 1
+                continue
             packet = {
                 'schema': 2, 'joint_names': list(names), 'session_id': session,
                 'motor_output_enabled': False,
-                'position': [float(x[0]), float(x[1]), 0.],
+                'position': [float(x[0]), float(x[1]), float(height)],
                 'quat_wxyz': [float(v) for v in (Rotation.from_matrix(mount) *
-                                                 Rotation.from_quat(node.imu['q'])).as_quat()[[3, 0, 1, 2]]],
+                                                 rot_of(node.imu['q'])).as_quat()[[3, 0, 1, 2]]],
                 'angular_velocity_body': [float(v) for v in node.imu['w']],
                 'gravity_body': [float(v) for v in gravity],
                 'joint_position': [float(v) for v in q],
@@ -223,7 +270,7 @@ def main():
             node.pub.publish(msg)
             counters['packets'] += 1
             timing['publish_ms_max'] = max(timing['publish_ms_max'], (time.monotonic() - publish_start) * 1e3)
-            frames.write(json.dumps({'t': now - started, 'position': packet['position'][:2],
+            frames.write(json.dumps({'t': now - started, 'position': packet['position'],
                                      'velocity': [float(x[2]), float(x[3])],
                                      'bias': [float(x[4]), float(x[5])],
                                      'age': age}, allow_nan=False) + '\n')
@@ -241,9 +288,10 @@ def main():
                    'extrinsic_deg': [a.fix_deg_x, a.fix_deg_y, a.fix_deg_z],
                    'motor_output_enabled': False, 'control_ready': False,
                    'reason': 'state producer only; no policy targets, no actuator path',
-                   'limitations': ('Horizontal position only; height field is zero because no height is '
-                                   'estimated. Motion accuracy untested; the zero-velocity update only '
-                                   'applies while the IMU reports a still robot.')}
+                   'limitations': ('Height comes from forward kinematics of the lowest ankle plus a '
+                                   'declared sole offset, not from a measured contact or ground; horizontal '
+                                   'motion accuracy is untested and the zero-velocity update only applies '
+                                   'while the IMU reports a still robot.')}
         (a.out / 'summary.json').write_text(json.dumps(summary, allow_nan=False) + '\n')
         print(json.dumps(summary, allow_nan=False), flush=True)
 
