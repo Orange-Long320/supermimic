@@ -51,6 +51,8 @@ class EarlyHandoverTests(unittest.TestCase):
         for i in range(10):self.tick(c,i*.02)
         c.request_handover();self.tick(c,.2);c.policy.infer=lambda obs,goal:np.array([99.])
         with self.assertRaisesRegex(ValueError,'command contract'):self.tick(c,.22)
+        self.assertEqual(c.fault_context['indices'],[0])
+        self.assertEqual(c.fault_context['raw_policy_desired'],[99.])
 
     def test_policy_history_uses_clean_output_during_blending(self):
         c=self.make(history_source='policy')

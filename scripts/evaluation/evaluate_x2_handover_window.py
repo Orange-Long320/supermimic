@@ -95,7 +95,9 @@ def main():
             if controller.phase is Phase.PREPARE and len(controller.history)==10:controller.request_handover()
             out=controller.step(now,d.qpos[:3].copy(),quat,q,qd,velocity[:3],gravity)
         except ValueError as exc:
-            failure=dict(time_s=now,reason=str(exc),phase=controller.phase.value);break
+            context=controller.fault_context
+            if context is not None:context=dict(context,joint_names=[names[j] for j in context['indices']])
+            failure=dict(time_s=now,reason=str(exc),phase=controller.phase.value,context=context);break
         if controller.phase is Phase.ACTIVE and active_start is None:active_start=now
         normal=np.zeros(2);other=0.;effort_ratio=0.
         for _ in range(substeps):

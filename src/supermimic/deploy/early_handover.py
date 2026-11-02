@@ -41,7 +41,7 @@ class EarlyHandover:
         self.path=QuinticPose(start,target,vmax,amax,minimum_duration=minimum_duration)
         self.blend_seconds=blend_seconds;self.max_gap=max_tick_gap;self.max_tilt=max_tilt;self.max_omega=max_angular_speed
         self.policy=policy;self.tracker_factory=tracker_factory;self.tracker=None
-        self.phase=Phase.PREPARE;self.reason=None;self.history=deque(maxlen=10)
+        self.phase=Phase.PREPARE;self.reason=None;self.fault_context=None;self.history=deque(maxlen=10)
         self.history_source=history_source
         # No policy action has yet been generated. The policy-history mode
         # matches the training reset convention of zero previous action.
@@ -49,8 +49,8 @@ class EarlyHandover:
         self.last_target=start.copy();self.last_tick=None;self.started=None
         self.requested=False;self.blend_started=None;self.blend_start=None
 
-    def fault(self,reason):
-        self.phase=Phase.FAULT;self.reason=str(reason);raise ValueError(self.reason)
+    def fault(self,reason,context=None):
+        self.phase=Phase.FAULT;self.reason=str(reason);self.fault_context=context;raise ValueError(self.reason)
 
     def request_handover(self):
         if self.phase is not Phase.PREPARE or len(self.history)!=10:raise ValueError('Ten fresh observations required')
@@ -89,8 +89,13 @@ class EarlyHandover:
             target=(1-blend)*self.blend_start+blend*desired;velocity=np.zeros_like(q)
             kp=(1-blend)*self.prep_kp+blend*self.policy_kp;kd=(1-blend)*self.prep_kd+blend*self.policy_kd
             if s>=1.:self.phase=Phase.ACTIVE
-        if np.any(target<self.command_lower) or np.any(target>self.command_upper):self.fault('Target outside command contract')
-        if np.any(np.abs(target-self.last_target)>self.max_step):self.fault('Target step exceeds command contract')
+        bad=np.flatnonzero((target<self.command_lower)|(target>self.command_upper))
+        if len(bad):self.fault('Target outside command contract',dict(indices=bad.tolist(),
+            target=target[bad].tolist(),lower=self.command_lower[bad].tolist(),upper=self.command_upper[bad].tolist(),
+            raw_policy_desired=None if action is None else (self.default+self.scale*action)[bad].tolist()))
+        delta=target-self.last_target;bad=np.flatnonzero(np.abs(delta)>self.max_step)
+        if len(bad):self.fault('Target step exceeds command contract',dict(indices=bad.tolist(),
+            delta=delta[bad].tolist(),allowed=self.max_step[bad].tolist()))
         self.last_target=target.copy()
         if self.history_source=='policy':
             if action is not None:self.previous=action.copy()
