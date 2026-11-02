@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<!-- Simulation-only geometry transcribed from official x2.xml; not a hardware calibration. -->
+<robot name="x2_sim_chest_mount">
+  <link name="pelvis"/><link name="waist_yaw_link"/><link name="waist_pitch_link"/><link name="torso_link"/>
+  <joint name="waist_yaw_joint" type="revolute">
+    <parent link="pelvis"/><child link="waist_yaw_link"/><origin xyz="0 0 0.06706"/><axis xyz="0 0 1"/>
+  </joint>
+  <joint name="waist_pitch_joint" type="revolute">
+    <parent link="waist_yaw_link"/><child link="waist_pitch_link"/><origin xyz="0 0 0.0880106"/><axis xyz="0 1 0"/>
+  </joint>
+  <joint name="waist_roll_joint" type="revolute">
+    <parent link="waist_pitch_link"/><child link="torso_link"/><axis xyz="1 0 0"/>
+  </joint>
+</robot>

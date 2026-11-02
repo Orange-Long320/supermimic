@@ -5,16 +5,18 @@ import numpy as np
 import mujoco
 from scipy.spatial.transform import Rotation
 from supermimic.deploy.mujoco_imu_mount import MujocoImuMount
-from supermimic.deploy.pelvis_state import pelvis_angular_velocity, pelvis_from_imu, pelvis_velocity_from_imu
+from supermimic.deploy.pelvis_state import UrdfPelvisMount, pelvis_angular_velocity, pelvis_from_imu, pelvis_velocity_from_imu
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--model', required=True)
     ap.add_argument('--out', required=True)
+    ap.add_argument('--mount-urdf', required=True)
     a = ap.parse_args()
     names = ('waist_yaw_joint', 'waist_pitch_joint', 'waist_roll_joint')
     mount = MujocoImuMount(a.model, 'imu_1', names)
+    urdf_mount = UrdfPelvisMount(a.mount_urdf, names, [-.0248787, .00198528, .105938], np.eye(3))
     m, d = mount.model, mujoco.MjData(mount.model)
     body, site = mount.pelvis, mount.site
     jp, jr, bp, br = (np.zeros((3, m.nv)) for _ in range(4))
@@ -38,6 +40,9 @@ def main():
             mujoco.mj_jacBody(m, d, bp, br, body)
             rwi, rwp = d.site_xmat[site].reshape(3, 3), d.xmat[body].reshape(3, 3)
             ppi, rpi, wm, vm = mount.mount_with_velocity(q, d.qvel[mount.dadr])
+            up, ur, uw, uv = urdf_mount.mount_with_velocity(q, d.qvel[mount.dadr])
+            if max(np.linalg.norm(x-y) for x, y in ((ppi, up), (rpi, ur), (wm, uw), (vm, uv))) > 1e-10:
+                raise ValueError('URDF mount disagrees with simulator')
             p, r = pelvis_from_imu(d.site_xpos[site], rwi, ppi, rpi)
             omega = pelvis_angular_velocity(rwi.T @ (jr @ d.qvel), rpi, wm)
             v = pelvis_velocity_from_imu(jp @ d.qvel, r, ppi, omega, vm)
