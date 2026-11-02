@@ -20,6 +20,8 @@ class RelayTest(unittest.TestCase):
     def test_original_times_survive(self):
         row = self.decode(self.packet)[0][1]
         self.assertEqual((row['header_ns'], row['received_ns']), (900, 950))
+        self.assertEqual(row['joints'], tuple(tuple(j) for j in self.packet['samples'][0]['joints']))
+        with self.assertRaises(TypeError): row['joints'][0][1] = 2.
 
     def test_duplicate_group_joint_and_future_rejected(self):
         for change in ('duplicate', 'wrong_group', 'future', 'nonfinite'):

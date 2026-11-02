@@ -63,7 +63,11 @@ class JointRelayDecoder:
                 found.add(j[0])
             if found != GROUP_NAMES[group]: raise ValueError('relay group joint set')
             updates[group] = (h, count)
-            result.append((group, {'header_ns': h, 'received_ns': r, 'domain': domain, 'joints': joints}))
+            # Retained measurements are immutable scalar tuples. Lists from
+            # json.loads would keep thousands of acyclic joint containers in
+            # the cyclic collector's old-generation scan on the live bridge.
+            result.append((group, {'header_ns': h, 'received_ns': r, 'domain': domain,
+                                   'joints': tuple(tuple(j) for j in joints)}))
         self.seq = seq
         self.last.update(updates)
         return result

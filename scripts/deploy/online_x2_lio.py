@@ -102,6 +102,8 @@ def main():
             self.stage_slowest = {}
             self.gc_started = None
             self.gc_frozen_objects = 0
+            self.gc_last_events = {}
+            self.startup_gc_event = None
             self.diagnostic_log = AsyncDiagnosticLog(args.out)
             best = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
             imu_qos = QoSProfile(depth=400, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
@@ -387,6 +389,7 @@ def main():
                     'slowest_by_stage':self.stage_slowest.copy()}
                 result['timing_diagnostics'].update(gc_stats=gc.get_stats(),
                     startup_frozen_objects=self.gc_frozen_objects,
+                    startup_gc_event=self.startup_gc_event, gc_last_events=self.gc_last_events.copy(),
                     max_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
             msg = String(); msg.data = json.dumps(result, allow_nan=False); self.status_pub.publish(msg)
             t=self.timing_start()
@@ -398,6 +401,9 @@ def main():
     def gc_timing(phase, info):
         if phase == 'start': node.gc_started=node.timing_start()
         elif node.gc_started is not None:
+            node.gc_last_events[info['generation']] = dict(info, wall=time.time(),
+                wall_ms=(time.monotonic_ns()-node.gc_started[0])*1e-6,
+                thread_cpu_ms=(time.thread_time_ns()-node.gc_started[1])*1e-6)
             node.timing_end('gc_generation_'+str(info['generation']),node.gc_started)
             node.gc_started=None
     if args.timing_diagnostics: gc.callbacks.append(gc_timing)
@@ -420,6 +426,8 @@ def main():
             gc.collect()
             gc.freeze()
             node.gc_frozen_objects = gc.get_freeze_count()
+            node.startup_gc_event = node.gc_last_events.get(2)
+            node.stage_wall_max.clear(); node.stage_cpu_max.clear(); node.stage_slowest.clear(); node.slow_stages.clear()
         while rclpy.ok() and (args.seconds == 0 or time.monotonic()-node.started < args.seconds):
             node.diagnostic_log.check()
             timing=node.timing_start()
