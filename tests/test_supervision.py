@@ -51,5 +51,17 @@ class SupervisionTests(unittest.TestCase):
             if child.is_alive():child.terminate();child.join()
             messages.close()
 
+    def test_manual_trial_expires_even_with_fresh_targets_and_stays_latched(self):
+        s=TargetLeaseSupervisor(['a'],[3.],max_state_age=.05,max_target_age=.05,max_active_seconds=.1)
+        for i in range(6):
+            now=1.+i*.02
+            packet={'names':['a'],'position':[.2],'velocity':[0.],'effort':[0.],
+                'stiffness':[20.],'damping':[2.],'generated':now,'state_sampled':now,'sequence':i}
+            self.assertTrue(s.accept(packet));out=s.tick(now)
+            self.assertEqual(out['fallback'],i==5)
+        self.assertIn('trial ended',out['reason'])
+        packet.update(generated=1.12,state_sampled=1.12,sequence=6)
+        self.assertFalse(s.accept(packet));self.assertTrue(s.tick(1.12)['fallback'])
+
 
 if __name__=='__main__':unittest.main()

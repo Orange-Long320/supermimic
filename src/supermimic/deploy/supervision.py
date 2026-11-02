@@ -28,13 +28,17 @@ class TargetLeaseSupervisor:
     freestanding balance controller. Its gains/support conditions need separate
     hardware validation. Faults latch even if fresh policy targets later arrive.
     """
-    def __init__(self, names, fallback_damping, *, max_state_age, max_target_age):
+    def __init__(self, names, fallback_damping, *, max_state_age, max_target_age, max_active_seconds=None):
         self.names = tuple(names); self.damping = tuple(fallback_damping)
         if (not self.names or len(set(self.names)) != len(self.names) or len(self.damping) != len(self.names)
                 or not all(math.isfinite(v) and v>=0 for v in self.damping)
                 or not all(math.isfinite(v) and v>0 for v in (max_state_age,max_target_age))):
             raise ValueError('Invalid lease supervisor contract')
+        if max_active_seconds is not None and (type(max_active_seconds) not in (int,float)
+                or not math.isfinite(max_active_seconds) or not 0<max_active_seconds<=30):
+            raise ValueError('Invalid bounded active duration')
         self.max_state_age, self.max_target_age = max_state_age, max_target_age
+        self.max_active_seconds=max_active_seconds;self.first_output_at=None
         self.last_sequence = -1; self.latest = None; self.fault_reason = None
 
     def accept(self, packet):
@@ -59,6 +63,10 @@ class TargetLeaseSupervisor:
         if self.latest is not None and self.fault_reason is None:
             if not 0<=now-self.latest['generated']<=self.max_target_age:self.fault_reason='Policy target lease expired'
             elif not 0<=now-self.latest['state_sampled']<=self.max_state_age:self.fault_reason='Source state lease expired'
+            elif self.first_output_at is None:self.first_output_at=now
+            if (self.fault_reason is None and self.max_active_seconds is not None
+                    and now-self.first_output_at>=self.max_active_seconds):
+                self.fault_reason='Bounded manually supervised trial ended'
         if self.latest is None and self.fault_reason is None:
             return None  # Never emits an invented startup pose before any target.
         if self.fault_reason is not None:

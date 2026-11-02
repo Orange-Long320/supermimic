@@ -124,9 +124,11 @@ def main():
     if any(node.count_publishers(t) for t in topics.values()):raise ValueError('Another motor command publisher exists')
     validated_contract(a.plan,a.consent,time.time(),isolated=bool(a.isolated_prefix))
     supervisor=TargetLeaseSupervisor(plan['joint_names'],plan['fallback_damping'],
-                                      max_state_age=plan['max_state_age'],max_target_age=plan['max_target_age'])
+        max_state_age=plan['max_state_age'],max_target_age=plan['max_target_age'],
+        max_active_seconds=(plan['manual_supervision']['max_trial_seconds']
+                            if plan.get('safety_mode')=='manual_supervised_trial' else None))
     publishers={g:node.create_publisher(JointCommandArray,t,qos) for g,t in topics.items()}
-    previous=None;sent=False;trial_started=None
+    previous=None;sent=False
     def receive(msg):
         nonlocal previous
         try:
@@ -135,14 +137,10 @@ def main():
         except (KeyError,TypeError,ValueError) as exc:supervisor.fault_reason='Invalid command: '+str(exc)
     node.create_subscription(String,target_topic,receive,qos)
     def tick():
-        nonlocal sent,trial_started
+        nonlocal sent
         now=time.monotonic()
-        if (plan.get('safety_mode')=='manual_supervised_trial' and trial_started is not None
-                and now-trial_started>=plan['manual_supervision']['max_trial_seconds']):
-            supervisor.fault_reason=supervisor.fault_reason or 'Bounded manually supervised trial ended'
         packet=supervisor.tick(now)
         if packet is None or (packet['fallback'] and not sent):return
-        if trial_started is None:trial_started=now
         for group,rows in group_command(packet).items():
             msg=JointCommandArray()
             for row in rows:
