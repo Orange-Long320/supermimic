@@ -29,6 +29,7 @@ def main():
     import rclpy
     from rclpy.node import Node
     from rclpy.executors import ExternalShutdownException
+    from rclpy.impl.implementation_singleton import rclpy_implementation
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
     from aimdk_msgs.msg import JointStateArray
     from sensor_msgs.msg import Imu
@@ -111,6 +112,9 @@ def main():
             rclpy.spin_once(node, timeout_sec=.2)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except rclpy_implementation.RCLError:
+        if rclpy.ok():
+            raise
     finally:
         for handle in (imu_file, chest_file, odom_file, joint_file):
             handle.flush()

@@ -63,6 +63,7 @@ def main():
     import rclpy
     from rclpy.node import Node
     from rclpy.executors import ExternalShutdownException
+    from rclpy.impl.implementation_singleton import rclpy_implementation
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
     from std_msgs.msg import String
     from aimdk_msgs.msg import JointStateArray
@@ -368,6 +369,9 @@ def main():
                                      'age': age}, allow_nan=False) + '\n')
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except rclpy_implementation.RCLError:
+        if rclpy.ok():
+            raise
     finally:
         frames.flush()
         frames.close()
