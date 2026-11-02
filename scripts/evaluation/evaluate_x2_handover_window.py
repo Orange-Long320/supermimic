@@ -6,6 +6,7 @@ orientation uses the recorded base_link IMU as an explicit uncalibrated model
 assumption; height is derived from model foot geometry, not measured position.
 """
 import argparse
+from collections import deque
 import hashlib
 import json
 from pathlib import Path
@@ -31,8 +32,11 @@ def main():
     p.add_argument('--prep-gain-source',choices=('sdk','policy'),required=True)
     p.add_argument('--blend-seconds',type=float,required=True)
     p.add_argument('--active-seconds',type=float,default=5.)
+    p.add_argument('--stand-elbow-margin',type=float,default=0.,
+                   help='Model-only standing-goal elbow margin; does not alter source references or weights')
     a=p.parse_args()
-    if a.out.exists() or not .1<=a.blend_seconds<=2 or not 5<=a.active_seconds<=30:
+    if (a.out.exists() or not .1<=a.blend_seconds<=2 or not 5<=a.active_seconds<=30
+            or not 0<=a.stand_elbow_margin<=.25):
         raise ValueError('New output and bounded diagnostic duration required')
     a.out.mkdir(parents=True)
     if sha(a.policy)!='4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c':
@@ -78,6 +82,16 @@ def main():
         pd=np.array([special.get(x,{}).get('kd',gains['default_kd']) for x in names])
     policy=TorchScriptPolicy(a.policy)
     tracker=SkillGoal(a.dataset,a.profile,d.qpos[:3].copy(),d.qpos[3:7].copy())
+    goal_override={}
+    if a.stand_elbow_margin:
+        for name in ('left_elbow_joint','right_elbow_joint'):
+            j=names.index(name);desired=lower[j]+a.stand_elbow_margin
+            if not lower[j]<desired<upper[j]:raise ValueError('Invalid model standing margin')
+            goal_override[name]=dict(original=float(tracker.scheduler.stand[j]+default[j]),candidate=float(desired))
+            tracker.scheduler.stand[j]=desired-default[j]
+        # Before any goal has been exposed, seed the committed future window
+        # from this explicit candidate. No received observation is rewritten.
+        tracker.scheduler.queue=deque(tracker.scheduler.stand.copy() for _ in range(tracker.scheduler.horizon))
     controller=EarlyHandover(start,target,default,scale,pk,pd,kp,kd,lower,upper,lower,upper,np.full(n,.3),
         max_velocity=np.full(n,.35),max_acceleration=np.full(n,.4),minimum_duration=8.,
         blend_seconds=a.blend_seconds,max_tick_gap=.031,max_tilt=.35,max_angular_speed=2.,
@@ -96,7 +110,8 @@ def main():
             out=controller.step(now,d.qpos[:3].copy(),quat,q,qd,velocity[:3],gravity)
         except ValueError as exc:
             context=controller.fault_context
-            if context is not None:context=dict(context,joint_names=[names[j] for j in context['indices']])
+            if context is not None and 'indices' in context:
+                context=dict(context,joint_names=[names[j] for j in context['indices']])
             failure=dict(time_s=now,reason=str(exc),phase=controller.phase.value,context=context);break
         if controller.phase is Phase.ACTIVE and active_start is None:active_start=now
         normal=np.zeros(2);other=0.;effort_ratio=0.
@@ -132,6 +147,7 @@ def main():
         calibration_validated=False,payload_model='No additional payload; not a measured load model',
         support_model='Ground contacts only; fall-arrest harness supplies no balance force',root_fixed=False,
         prep_gain_source=a.prep_gain_source,blend_seconds=a.blend_seconds,
+        stand_goal_override_model_only=goal_override,
         simulation_only_guard=dict(target_step_rad=.3,max_tilt_rad=.35,max_angular_speed_rad_s=2.),
         failure=failure,frames=len(rows),active_seconds=active_s,
         saturated_substep_fraction=fraction,maximum_nonfoot_contact_n=peak_other,

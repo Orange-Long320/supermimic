@@ -64,9 +64,13 @@ class EarlyHandover:
             or abs(np.linalg.norm(quat)-1.)>.01 or np.linalg.norm(gravity)<1e-8):self.fault('Invalid state')
         if self.last_tick is not None and not 0<now-self.last_tick<=self.max_gap:
             self.fault(f'State timing gap: {now-self.last_tick:.6f}s at {now:.6f}')
-        if np.any(q<self.measured_lower) or np.any(q>self.measured_upper):self.fault('Measured joint outside contract')
+        bad=np.flatnonzero((q<self.measured_lower)|(q>self.measured_upper))
+        if len(bad):self.fault('Measured joint outside contract',dict(indices=bad.tolist(),
+            measured=q[bad].tolist(),lower=self.measured_lower[bad].tolist(),upper=self.measured_upper[bad].tolist()))
         tilt=math.acos(float(np.clip(-gravity[2]/np.linalg.norm(gravity),-1.,1.)))
-        if tilt>self.max_tilt or np.linalg.norm(omega)>self.max_omega:self.fault('Tilt or angular speed outside contract')
+        if tilt>self.max_tilt or np.linalg.norm(omega)>self.max_omega:self.fault('Tilt or angular speed outside contract',
+            dict(tilt_rad=tilt,max_tilt_rad=self.max_tilt,angular_speed_rad_s=float(np.linalg.norm(omega)),
+                 max_angular_speed_rad_s=self.max_omega))
         self.last_tick=now
         if self.started is None:self.started=now
         self.history.append((q-self.default,qd,omega,gravity,self.previous.copy()))
