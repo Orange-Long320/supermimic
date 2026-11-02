@@ -106,7 +106,7 @@ def main():
     if src is None:
         raise SystemExit('A source root is required to import the state-packet validator')
     sys.path.insert(0, str(src))
-    from supermimic.deploy.async_diagnostic_log import AsyncDiagnosticLog
+    from supermimic.deploy.async_sim_diagnostic_log import AsyncDiagnosticLog
     from supermimic.deploy.imu_calibration import check_static_window, body_bias_at_declared_rest
     from supermimic.deploy.sim_foot_support import SimFootSupport
     from supermimic.deploy.policy_packet import validate_policy_packet
