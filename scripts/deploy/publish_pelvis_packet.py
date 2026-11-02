@@ -37,6 +37,11 @@ def main():
     p.add_argument('--init-bias-seconds', type=float, default=0.)
     p.add_argument('--assume-initial-rest', action='store_true',
                    help='declare the calibration window stationary with trusted attitude')
+    p.add_argument('--allow-unobserved-initial-velocity', action='store_true',
+                   help='diagnostic only: explicitly assume zero velocity without observing rest')
+    p.add_argument('--integration-method', choices=('right', 'trapezoid'), default='right')
+    p.add_argument('--sim-only', action='store_true', help='declare isolated simulation')
+    p.add_argument('--sim-support-xml', type=Path, help='experimental X2 simulation collision-sphere support')
     p.add_argument('--imu-only-zupt', action='store_true',
                    help='experimental horizontal ZUPT; IMU thresholds do not prove rest')
     p.add_argument('--velocity-sigma', type=float, default=.02)
@@ -58,10 +63,24 @@ def main():
     p.add_argument('--mount-rpy', type=float, nargs=3, default=[0., 0., 0.], help='Radians, torso-to-IMU')
     p.add_argument('--max-joint-extrapolation', type=float, default=.005)
     a = p.parse_args()
+    if a.sim_support_xml and (not a.sim_only or a.mount_urdf is None or
+            a.imu_topic != '/aima/hal/imu/torso/state' or
+            not np.allclose(a.mount_xyz, [.0239465, -.000228682, .04171]) or
+            not np.allclose(a.mount_rpy, [0., 0., 0.])):
+        raise SystemExit('Sim support requires --sim-only and the explicit X2 pelvis IMU mount')
+    sim_domain = os.environ.get('ROS_DOMAIN_ID', '')
+    if a.sim_support_xml and (os.environ.get('ROS_LOCALHOST_ONLY') != '1' or
+            not sim_domain.isdigit() or not 128 <= int(sim_domain) <= 232 or
+            not os.environ.get('SM_SIM_STATE_PORT')):
+        raise SystemExit('Sim support requires localhost-only ROS, a domain, and an isolated simulator state port')
+    if a.sim_support_xml and (a.init_bias_seconds > 0. or a.imu_only_zupt):
+        raise SystemExit('Sim support cannot be combined with rest calibration or IMU-only ZUPT')
     if a.auto_mount and a.init_bias_seconds <= 0.:
         raise SystemExit('--auto-mount requires a declared-rest calibration window')
     if a.init_bias_seconds > 0. and not a.assume_initial_rest:
         raise SystemExit('Calibration requires --assume-initial-rest; motion tests cannot prove rest')
+    if a.init_bias_seconds <= 0. and not a.allow_unobserved_initial_velocity and not a.sim_support_xml:
+        raise SystemExit('Initial velocity is unobserved; provide a declared-rest calibration or use the diagnostic override')
     if not 1. <= a.seconds <= 600.:
         raise ValueError('Bounded duration required')
     if not 0. < a.max_joint_extrapolation <= .01:
@@ -83,6 +102,8 @@ def main():
     if src is None:
         raise SystemExit('A source root is required to import the state-packet validator')
     sys.path.insert(0, str(src))
+    from supermimic.deploy.imu_calibration import check_static_window, body_bias_at_declared_rest
+    from supermimic.deploy.sim_foot_support import SimFootSupport
     from supermimic.deploy.policy_packet import validate_policy_packet
     from supermimic.deploy.pelvis_state import (UrdfPelvisMount, pelvis_from_imu,
         pelvis_angular_velocity, pelvis_velocity_from_imu)
@@ -91,6 +112,11 @@ def main():
     waist_names = ('waist_yaw_joint', 'waist_pitch_joint', 'waist_roll_joint')
     moving_mount = (UrdfPelvisMount(a.mount_urdf, waist_names, a.mount_xyz,
                     Rotation.from_euler('xyz', a.mount_rpy).as_matrix()) if a.mount_urdf else None)
+    support = SimFootSupport(a.sim_support_xml) if a.sim_support_xml else None
+    if support is not None:
+        ppi, rpi, _ = moving_mount.mount([0., 0., 0.])
+        if not np.allclose(ppi, a.mount_xyz, atol=1e-9) or not np.allclose(rpi, np.eye(3), atol=1e-9):
+            raise SystemExit('Sim support requires the fixed pelvis mount')
     fk = None
     if a.model is not None:
         import mujoco
@@ -112,7 +138,8 @@ def main():
         return Rotation.from_quat([wxyz[1], wxyz[2], wxyz[3], wxyz[0]])
     state = {'last': None, 'last_world_accel': None, 'still_since': None, 'integrate': False, 'calibration': None,
              'z': 0., 'vz': 0., 'origin_offset': None, 'bias_body': np.zeros(3),
-             'last_published_stamp': 0,
+             'last_published_stamp': 0, 'support_initialized': support is None,
+             'support_last_try': None, 'support_last_accept': None,
              'x': np.zeros(4), 'P': np.diag([.01, .01, .1, .1])}
     H = np.zeros((2, 4))
     H[0, 2] = H[1, 3] = 1.
@@ -120,10 +147,13 @@ def main():
     Q = np.diag([1e-8, 1e-8, 4e-5, 4e-5])
     identity = np.eye(4)
     counters = {'imu': 0, 'packets': 0, 'invalid': 0, 'skipped_age': 0, 'skipped_skew': 0,
-                'skipped_joints_missing': 0, 'zupt': 0}
+                'skipped_joints_missing': 0, 'zupt': 0, 'support_accepted': 0,
+                'support_hold': 0, 'support_disagree': 0, 'support_missing': 0,
+                'support_stale': 0, 'support_waiting': 0}
     timing = {'age_max': 0., 'publish_ms_max': 0.}
     diagnostics = {'imu_callback_ms': [], 'joint_callback_ms': [], 'publish_work_ms': [],
-                   'imu_header_gaps_ms': [], 'imu_receive_age_ms': []}
+                   'imu_header_gaps_ms': [], 'imu_receive_age_ms': [], 'support_joint_lag_ms': [],
+                   'support_innovation_m_s': []}
     last_imu_stamp = None
 
     class Producer(Node):
@@ -133,6 +163,7 @@ def main():
                              durability=DurabilityPolicy.VOLATILE)
             self.imu = None
             self.imu_history = deque(maxlen=128)
+            self.pending_imu = deque()
             self.groups = {}
             self.history = {g: deque(maxlen=128) for g in ('leg', 'waist', 'head', 'arm')}
             self.pub = self.create_publisher(String, a.topic, qos)
@@ -157,10 +188,31 @@ def main():
             if state['calibration'] is not None:
                 state['calibration'].append(self.imu)
             if state['integrate']:
-                propagate(self.imu)
-                if moving_mount is not None:
-                    self.imu_history.append((self.imu, state['x'].copy(), state['z'], state['vz']))
+                if support is None:
+                    self.process_imu(self.imu)
+                else:
+                    if len(self.pending_imu) >= 128:
+                        raise ValueError('IMU support synchronization queue overflow')
+                    self.pending_imu.append(self.imu)
+                    self.drain_pending()
             diagnostics['imu_callback_ms'].append((time.perf_counter() - callback_start) * 1e3)
+
+        def process_imu(self, sample):
+            propagate(sample)
+            if support is not None:
+                initialized = state['support_initialized']
+                apply_support(sample, self.history['leg'])
+                if not initialized and state['support_initialized']:
+                    self.imu_history.clear()
+            if moving_mount is not None:
+                self.imu_history.append((sample, state['x'].copy(), state['z'], state['vz'],
+                                         state['support_last_accept']))
+
+        def drain_pending(self):
+            history = self.history['leg']
+            while (self.pending_imu and history and
+                   history[-1]['stamp_ns'] >= self.pending_imu[0]['stamp_ns']):
+                self.process_imu(self.pending_imu.popleft())
 
         def on_joint(self, group, msg):
             callback_start = time.perf_counter()
@@ -175,6 +227,8 @@ def main():
                 'position': {j.name: j.position for j in msg.joints},
                 'velocity': {j.name: j.velocity for j in msg.joints}}
             self.history[group].append(self.groups[group])
+            if support is not None and group == 'leg' and state['integrate']:
+                self.drain_pending()
             diagnostics['joint_callback_ms'].append((time.perf_counter() - callback_start) * 1e3)
 
     def propagate(sample):
@@ -194,8 +248,9 @@ def main():
         state['last'] = now
         previous = state['last_world_accel']
         state['last_world_accel'] = world
-        average = .5 * (previous + world)
-        position_accel = (2. * previous + world) / 6.
+        average = .5 * (previous + world) if a.integration_method == 'trapezoid' else world
+        position_accel = ((2. * previous + world) / 6. if a.integration_method == 'trapezoid'
+                          else .5 * world)
         state['z'] += state['vz'] * dt + position_accel[2] * dt * dt
         state['vz'] += average[2] * dt
         F = np.eye(4)
@@ -216,11 +271,45 @@ def main():
             counters['zupt'] += 1
         state['x'], state['P'] = x, P
 
+    def apply_support(sample, history):
+        now = sample['stamp_ns'] * 1e-9
+        if state['support_last_try'] is not None and now-state['support_last_try'] < .02:
+            return
+        state['support_last_try'] = now
+        row = next((j for j in reversed(history) if j['stamp_ns'] <= sample['stamp_ns']), None)
+        if row is None:
+            counters['support_missing'] += 1
+            return
+        lag = (sample['stamp_ns']-row['stamp_ns'])*1e-9
+        diagnostics['support_joint_lag_ms'].append(lag*1000.)
+        if lag > a.max_joint_extrapolation:
+            counters['support_stale'] += 1
+            return
+        position = {n: q + lag*row['velocity'][n] for n, q in row['position'].items()}
+        rwp = mount @ rot_of(sample['q']).as_matrix()
+        pelvis_v, reason = support.observe(now, rwp, sample['w'], position, row['velocity'])
+        if pelvis_v is None:
+            counters['support_' + reason] += 1
+            return
+        site_v = pelvis_v + rwp @ np.cross(sample['w'], np.asarray(a.mount_xyz))
+        if state['support_initialized']:
+            old = np.r_[state['x'][2:4], state['vz']]
+            diagnostics['support_innovation_m_s'].append(float(np.linalg.norm(site_v-old)))
+        else:
+            # Discard propagation before the first observed support hypothesis.
+            state['x'][:2] = 0.
+            state['z'] = 0.
+            state['support_initialized'] = True
+        state['x'][2:4] = site_v[:2]
+        state['vz'] = float(site_v[2])
+        state['support_last_accept'] = now
+        counters['support_accepted'] += 1
+
     rclpy.init()
     node = Producer()
 
-    # Static settle: bias is not fitted here, the extrinsic fixes the model, so a
-    # short window only removes any residual offset.
+    # A threshold-passing window does not prove rest: the caller must declare it.
+    # The estimated bias is conditional on that declaration and trusted attitude.
     if a.init_bias_seconds > 0.:
         state['calibration'] = []
         end = time.monotonic() + a.init_bias_seconds
@@ -228,17 +317,14 @@ def main():
             rclpy.spin_once(node, timeout_sec=.01)
         samples = state['calibration']
         state['calibration'] = None
-        if len(samples) < 100:
-            raise SystemExit('Static window produced too few samples')
         stamps = np.array([s['stamp_ns'] for s in samples], dtype=np.int64)
         acc = np.array([s['a'] for s in samples])
         gyro = np.array([s['w'] for s in samples])
-        if (stamps[-1] - stamps[0] < (a.init_bias_seconds - .1) * 1e9
-                or np.any(np.diff(stamps) <= 0) or np.any(np.diff(stamps) > 30_000_000)
-                or not np.isfinite(acc).all() or not np.isfinite(gyro).all()
-                or np.any(abs(np.linalg.norm(acc, axis=1)-9.81) > a.still_accel_tol)
-                or np.any(np.linalg.norm(gyro, axis=1) > a.still_gyro_tol)):
-            raise SystemExit('Calibration window is moving, invalid, or has an IMU timestamp gap')
+        try:
+            check_static_window(stamps, acc, gyro, a.init_bias_seconds,
+                                a.still_accel_tol, a.still_gyro_tol)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         window = np.array([mount @ rot_of(s['q']).apply(np.array(s['a'])) for s in samples])
         if a.auto_mount:
             mean = window.mean(axis=0)
@@ -252,9 +338,8 @@ def main():
             window = np.array([correction @ v for v in window])
         # Bias is observable here only conditional on rest, known gravity, and
         # trusted attitude. Express it in the sensor frame so it rotates with it.
-        gravity_world = np.array([0., 0., 9.81])
-        state['bias_body'] = np.mean([np.asarray(s['a']) -
-            rot_of(s['q']).as_matrix().T @ mount.T @ gravity_world for s in samples], axis=0)
+        sensor_to_world = [mount @ rot_of(s['q']).as_matrix() for s in samples]
+        state['bias_body'] = body_bias_at_declared_rest(acc, sensor_to_world)
         print('initial body bias (conditional on rest and attitude) %s' %
               np.round(state['bias_body'], 5), flush=True)
 
@@ -270,6 +355,9 @@ def main():
             if now - last_publish < publish_period:
                 continue
             last_publish = now
+            if not state['support_initialized']:
+                counters['support_waiting'] += 1
+                continue
             if node.imu is None or len(node.groups) < 4:
                 counters['skipped_age'] += 1
                 continue
@@ -277,8 +365,9 @@ def main():
             imu = node.imu
             x, z, vz = state['x'], state['z'], state['vz']
             chosen = None
+            selected_support_stamp = state['support_last_accept']
             if moving_mount is not None:
-                for candidate, cx, cz, cvz in reversed(node.imu_history):
+                for candidate, cx, cz, cvz, support_stamp in reversed(node.imu_history):
                     target = candidate['stamp_ns']
                     if target <= state['last_published_stamp'] or time.time()-candidate['recv'] > a.max_age:
                         break
@@ -293,7 +382,7 @@ def main():
                         selected[g] = dict(row, position={n: v + delta*row['velocity'][n]
                                                            for n, v in row['position'].items()})
                     if len(selected) == 4:
-                        imu, x, z, vz, chosen = candidate, cx, cz, cvz, selected
+                        imu, x, z, vz, chosen, selected_support_stamp = candidate, cx, cz, cvz, selected, support_stamp
                         break
                 if chosen is None:
                     counters['skipped_skew'] += 1
@@ -395,6 +484,8 @@ def main():
                                      'angular_velocity_body': packet['angular_velocity_body'],
                                      'velocity': packet.get('linear_velocity_world', [float(x[2]), float(x[3])]),
                                      'bias_body': state['bias_body'].tolist(),
+                                     'support_age': (None if selected_support_stamp is None else
+                                         imu['stamp_ns']*1e-9-selected_support_stamp),
                                      'age': age}, allow_nan=False) + '\n')
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
@@ -412,9 +503,13 @@ def main():
                    'counters': counters, 'timing': {k: float(v) for k, v in timing.items()},
                    'extrinsic_deg': [a.fix_deg_x, a.fix_deg_y, a.fix_deg_z],
                    'motor_output_enabled': False, 'control_ready': False,
-                   'initial_velocity_assumed_zero': True,
+                   'initial_velocity_assumed_zero': support is None,
+                   'simulation_support': support is not None,
+                   'support_observation': ('lowest sphere, flat ground and stationary contact assumed; 3D hard replacement'
+                                           if support is not None else None),
+                   'support_last_observation_age_s': (None if state['support_last_accept'] is None or state['last'] is None else state['last']-state['support_last_accept']),
                    'initial_rest_declared': bool(a.init_bias_seconds > 0. and a.assume_initial_rest),
-                   'imu_only_zupt': a.imu_only_zupt,
+                   'imu_only_zupt': a.imu_only_zupt, 'integration_method': a.integration_method,
                    'bias_body': state['bias_body'].tolist(),
                    'reason': 'state producer only; no policy targets, no actuator path',
                    'limitations': ('Experimental moving-mount position is relative to the first output; '

@@ -30,7 +30,7 @@ def integrate(t, acceleration):
 
 
 def kalman(clock, acc, gyro, world, bias):
-    # Matches publish_pelvis_packet.py: px,py,vx,vy,bx,by; no foot updates.
+    # Matches the legacy producer at ded494a: px,py,vx,vy,bx,by; no foot updates.
     x = np.r_[np.zeros(4), bias]
     P = np.diag([.01, .01, .1, .1, .1, .1])
     H = np.zeros((2, 6)); H[0, 2] = H[1, 3] = 1.
