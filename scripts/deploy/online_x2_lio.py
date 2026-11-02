@@ -34,6 +34,8 @@ def main():
     parser.add_argument('--imu-relay-session', help='Use a private native IMU batch relay; diagnostic only')
     parser.add_argument('--native-stamp-source', choices=('host', 'lidar'), default='host',
                         help='Declared verified driver setting; records provenance, never rewrites a header')
+    parser.add_argument('--timing-diagnostics', action='store_true',
+                        help='Bounded wall/thread-CPU stage timings; no additional capture-time files')
     args = parser.parse_args(); args.out.mkdir(parents=True, exist_ok=False)
     if args.joint_relay_session and args.joint_retain_hz: raise ValueError('joint modes are mutually exclusive')
     import rclpy
@@ -91,6 +93,7 @@ def main():
             self.static_ready = False; self.mount_changed = False; self.last_pose = None
             self.live_tf_seen = set(); self.last_reason = 'initializing'; self.state_received = None
             self.cloud_times = deque(maxlen=128)
+            self.stage_wall_max = Counter(); self.stage_cpu_max = Counter(); self.slow_stages = deque(maxlen=12)
             self.frames = (args.out/'pelvis-frames.jsonl').open('x')
             self.status_log = (args.out/'status.jsonl').open('x')
             best = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
@@ -126,12 +129,23 @@ def main():
         @staticmethod
         def stamp(msg): return msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
 
+        def timing_start(self):
+            return (time.monotonic_ns(),time.thread_time_ns()) if args.timing_diagnostics else None
+
+        def timing_end(self,name,start):
+            if start is None:return
+            wall=(time.monotonic_ns()-start[0])*1e-6;cpu=(time.thread_time_ns()-start[1])*1e-6
+            self.stage_wall_max[name]=max(self.stage_wall_max[name],wall)
+            self.stage_cpu_max[name]=max(self.stage_cpu_max[name],cpu)
+            if wall>10:self.slow_stages.append(dict(stage=name,wall=time.time(),wall_ms=wall,thread_cpu_ms=cpu))
+
         def on_imu(self, msg):
             w, a = msg.angular_velocity, msg.linear_acceleration
             self.accept_imu(msg.header.stamp.sec*10**9+msg.header.stamp.nanosec,
                             msg.header.frame_id, [w.x,w.y,w.z,a.x,a.y,a.z], msg)
 
         def on_imu_batch(self, msg):
+            timing=self.timing_start()
             self.counts['imu_relay_callbacks'] += 1
             try:
                 for stamp_ns, received_ns, *values in self.imu_relay.decode(msg.data, time.time_ns()):
@@ -142,6 +156,7 @@ def main():
                 self.imu_rows.clear(); self.imu_stamps_ns.clear(); self.state = None
                 self.propagation = CachedImuPropagation()
                 self.rejects['imu relay: '+str(exc)] += 1
+            finally:self.timing_end('imu_batch',timing)
 
         def accept_imu(self, sample_ns, frame, values, msg=None):
             self.counts['raw_imu'] += 1
@@ -191,6 +206,7 @@ def main():
             finally: self.cloud_times.append((time.monotonic()-before)*1000)
 
         def on_relay(self, msg):
+            timing=self.timing_start()
             self.counts['relay_callbacks'] += 1
             try:
                 rows = self.relay.decode(msg.data, time.time_ns())
@@ -199,6 +215,7 @@ def main():
             except (ValueError, TypeError, KeyError) as exc:
                 for rows in self.groups.values(): rows.clear()
                 self.rejects['relay: '+str(exc)] += 1
+            finally:self.timing_end('joint_batch',timing)
 
         def on_raw_joints(self, raw, group):
             self.counts['raw_joint_callbacks_'+group] += 1
@@ -252,6 +269,7 @@ def main():
             except ValueError as exc: self.rejects[str(exc)] += 1
 
         def publish_pose(self):
+            timing=self.timing_start()
             try:
                 if self.process.poll() is not None: raise RuntimeError('Owned FAST-LIO process exited')
                 if self.mount_changed: raise ValueError('Native mount TF changed; restart and review')
@@ -301,6 +319,7 @@ def main():
                 out.pose.pose.orientation.x, out.pose.pose.orientation.y, out.pose.pose.orientation.z, out.pose.pose.orientation.w = map(float, quat)
                 out.twist.twist.linear.x, out.twist.twist.linear.y, out.twist.twist.linear.z = map(float, rotation.T@velocity)
                 out.twist.twist.angular.x, out.twist.twist.angular.y, out.twist.twist.angular.z = map(float, omega)
+                output_timing=self.timing_start()
                 self.pose_pub.publish(out); self.counts['pelvis_published'] += 1
                 self.last_pose = {'published_wall': now, 'state_stamp': propagated.stamp, 'lio_stamp': self.state.stamp,
                                  'imu_age_s': imu_age, 'lio_age_s': age, 'joint_age_s': joint_ages,
@@ -319,13 +338,18 @@ def main():
                                   imu_support_stamps_ns=support)
                 state_msg = String(); state_msg.data = json.dumps(packet, allow_nan=False)
                 self.policy_state_pub.publish(state_msg); self.counts['policy_state_published'] += 1
+                self.timing_end('ros_output',output_timing)
                 self.last_emitted_ns = ns
+                log_timing=self.timing_start()
                 self.frames.write(json.dumps(self.last_pose, allow_nan=False)+'\n')
+                self.timing_end('frame_log_write',log_timing)
                 self.last_reason = 'publishing diagnostic pelvis state'
             except ValueError as exc:
                 self.last_reason = str(exc); self.rejects[self.last_reason] += 1
+            finally:self.timing_end('pose',timing)
 
         def publish_status(self):
+            timing=self.timing_start()
             result = {'session_id': self.session, 'elapsed_s': time.monotonic()-self.started,
                       'running': self.running,
                       'counts': dict(self.counts), 'rejected_ticks': dict(self.rejects), 'status': self.last_reason,
@@ -338,9 +362,16 @@ def main():
                       'imu_relay_session':args.imu_relay_session,
                       'dynamic_accuracy_validated': False, 'covariance_validated': False,
                       'control_ready': False, 'motor_output_enabled': False}
+            if args.timing_diagnostics:
+                result['timing_diagnostics']={'wall_max_ms':dict(self.stage_wall_max),
+                    'thread_cpu_max_ms':dict(self.stage_cpu_max),'recent_slow_stages':list(self.slow_stages)}
             msg = String(); msg.data = json.dumps(result, allow_nan=False); self.status_pub.publish(msg)
-            self.frames.flush(); self.status_log.write(msg.data+'\n'); self.status_log.flush()
+            t=self.timing_start();self.frames.flush();self.timing_end('frame_log_flush',t)
+            t=self.timing_start();self.status_log.write(msg.data+'\n');self.status_log.flush();self.timing_end('status_log_flush',t)
+            t=self.timing_start()
             temporary = args.out/'status-latest.tmp'; temporary.write_text(msg.data+'\n'); temporary.replace(args.out/'status-latest.json')
+            self.timing_end('status_latest_replace',t)
+            self.timing_end('status',timing)
 
     rclpy.init(); node = Bridge()
     executor = SingleThreadedExecutor(); executor.add_node(node)
@@ -357,7 +388,9 @@ def main():
     (args.out/'bridge.pid').write_text(str(os.getpid())+'\n')
     try:
         while rclpy.ok() and (args.seconds == 0 or time.monotonic()-node.started < args.seconds):
+            timing=node.timing_start()
             executor.spin_once(timeout_sec=.02)
+            node.timing_end('executor_spin',timing)
     except (KeyboardInterrupt, ExternalShutdownException): pass
     finally:
         node.running = False
