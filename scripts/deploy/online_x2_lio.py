@@ -7,6 +7,7 @@ import argparse
 from bisect import bisect_left
 from collections import Counter, deque
 import json
+import gc
 from pathlib import Path
 import subprocess
 import time
@@ -95,6 +96,7 @@ def main():
             self.cloud_times = deque(maxlen=128)
             self.stage_wall_max = Counter(); self.stage_cpu_max = Counter(); self.slow_stages = deque(maxlen=12)
             self.stage_slowest = {}
+            self.gc_started = None
             self.frames = (args.out/'pelvis-frames.jsonl').open('x')
             self.status_log = (args.out/'status.jsonl').open('x')
             best = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
@@ -151,8 +153,13 @@ def main():
             timing=self.timing_start()
             self.counts['imu_relay_callbacks'] += 1
             try:
-                for stamp_ns, received_ns, *values in self.imu_relay.decode(msg.data, time.time_ns()):
+                decode_timing=self.timing_start()
+                rows=self.imu_relay.decode(msg.data, time.time_ns())
+                self.timing_end('imu_decode',decode_timing)
+                for stamp_ns, received_ns, *values in rows:
+                    accept_timing=self.timing_start()
                     self.accept_imu(stamp_ns, 'lidar_imu_chest_front', values)
+                    self.timing_end('imu_accept',accept_timing)
                 self.counts['imu_relay_recovered_packets'] = self.imu_relay.recovered_packets
             except (ValueError, TypeError, KeyError) as exc:
                 # Never splice integration across missing/invalid batches.
@@ -383,6 +390,12 @@ def main():
             self.timing_end('status',timing)
 
     rclpy.init(); node = Bridge()
+    def gc_timing(phase, info):
+        if phase == 'start': node.gc_started=node.timing_start()
+        elif node.gc_started is not None:
+            node.timing_end('gc_generation_'+str(info['generation']),node.gc_started)
+            node.gc_started=None
+    if args.timing_diagnostics: gc.callbacks.append(gc_timing)
     executor = SingleThreadedExecutor(); executor.add_node(node)
     command = ['nice', '-n', '10', str(args.binary.resolve()), '--ros-args', '--params-file', str(config.resolve()),
                '-r', '__node:=supermimic_fastlio_online', '-r', '__ns:='+prefix,
@@ -402,6 +415,7 @@ def main():
             node.timing_end('executor_spin',timing)
     except (KeyboardInterrupt, ExternalShutdownException): pass
     finally:
+        if args.timing_diagnostics: gc.callbacks.remove(gc_timing)
         node.running = False
         try: node.publish_status()
         except Exception: pass  # ROS may already be shut down; child cleanup still must run.
