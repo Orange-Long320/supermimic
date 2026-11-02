@@ -13,10 +13,11 @@ class Tracker:
 
 
 class EarlyHandoverTests(unittest.TestCase):
-    def make(self,max_step=.5,history_source='executed'):
+    def make(self,max_step=.5,history_source='executed',max_tilt=.5,max_tilt_delta=None):
         return EarlyHandover([0.],[.1],[0.],[1.],[20.],[2.],[40.],[4.],[-1.],[1.],[-2.],[2.],[max_step],
             max_velocity=[1.],max_acceleration=[1.],minimum_duration=.2,blend_seconds=.1,max_tick_gap=.031,
-            max_tilt=.5,max_angular_speed=1.,policy=Policy(),tracker_factory=lambda p,q:Tracker(),history_source=history_source)
+            max_tilt=max_tilt,max_angular_speed=1.,policy=Policy(),tracker_factory=lambda p,q:Tracker(),
+            history_source=history_source,max_tilt_delta=max_tilt_delta)
 
     def tick(self,c,t,q=0.,w=(0.,0.,0.),gravity=(0.,0.,-1.)):
         return c.step(t,[0,0,.6],[1,0,0,0],[q],[0],w,gravity)
@@ -30,6 +31,18 @@ class EarlyHandoverTests(unittest.TestCase):
         np.testing.assert_allclose(command['position'],prev)
         for i in range(11,17):command=self.tick(c,i*.02,q=.3)
         self.assertEqual(c.phase,Phase.ACTIVE);np.testing.assert_allclose(command['position'],[.2])
+
+    def test_relative_tilt_guard_tolerates_static_mount_tilt(self):
+        def gravity(tilt):return (0.,float(np.sin(tilt)),float(-np.cos(tilt)))
+        c=self.make(max_tilt=.7,max_tilt_delta=.2)
+        self.tick(c,0.,gravity=gravity(.36))
+        self.assertEqual(c.phase,Phase.PREPARE)
+        self.tick(c,.02,gravity=gravity(.40))
+        self.assertEqual(c.phase,Phase.PREPARE)
+        self.assertAlmostEqual(c.tilt_reference,.36,places=6)
+        with self.assertRaisesRegex(ValueError,'Tilt'):self.tick(c,.04,gravity=gravity(.60))
+        absolute=self.make(max_tilt=.35)
+        with self.assertRaisesRegex(ValueError,'Tilt'):self.tick(absolute,0.,gravity=gravity(.36))
 
     def test_timing_and_limits_latch(self):
         c=self.make();self.tick(c,0.)

@@ -78,6 +78,41 @@ class HardwareContractTests(unittest.TestCase):
             plan['manual_supervision']['max_trial_seconds']=31.;pp.write_text(json.dumps(plan))
             consent['plan_sha256']=mod.digest(pp);cp.write_text(json.dumps(consent))
             with self.assertRaisesRegex(ValueError,'bounded manual'):mod.validated_contract(pp,cp,101.)
+    def test_explicitly_unvalidated_trial_cannot_be_relabelled_as_validated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            pp,cp,ep,plan=self.make(Path(folder))
+            items=['preparation and handover dynamics','command range contract','state pipeline']
+            plan.update(safety_mode='manual_supervised_unvalidated_trial',
+                manual_supervision=dict(max_trial_seconds=10.,support_condition='feet_loaded_fall_arrest',
+                                        automatic_host_loss_protection=False))
+            evidence={'policy_sha256':mod.POLICY_SHA,'verified_wall':100.,
+                      'explicitly_unvalidated_trial':True,'safety_mode':'manual_supervised_unvalidated_trial',
+                      'unvalidated_items':items,
+                      **{k:False for k in ('ready_for_hardware_trial','preparation_and_handover_validated',
+                          'command_limits_validated','state_pipeline_validated',
+                          'independent_hardware_failsafe_validated','manual_supervised_trial_validated')},
+                      'native_mc_stopped_verified':True}
+            ep.write_text(json.dumps(evidence));plan['readiness_sha256']=mod.digest(ep);pp.write_text(json.dumps(plan))
+            consent={'user_confirmed_motor_power':True,'plan_sha256':mod.digest(pp),'confirmed_wall':100.,
+                     'user_confirmed_manual_supervision':True,'operator_at_estop':True,
+                     'manual_estop_function_checked':True,'acknowledges_no_automatic_host_loss_protection':True,
+                     'acknowledges_unvalidated_software':True}
+            cp.write_text(json.dumps(consent))
+            self.assertEqual(mod.validated_contract(pp,cp,101.),plan)
+            consent['acknowledges_unvalidated_software']=False;cp.write_text(json.dumps(consent))
+            with self.assertRaisesRegex(ValueError,'acknowledges_unvalidated_software'):
+                mod.validated_contract(pp,cp,101.)
+            consent['acknowledges_unvalidated_software']=True;cp.write_text(json.dumps(consent))
+            evidence['command_limits_validated']=True
+            ep.write_text(json.dumps(evidence));plan['readiness_sha256']=mod.digest(ep);pp.write_text(json.dumps(plan))
+            consent['plan_sha256']=mod.digest(pp);cp.write_text(json.dumps(consent))
+            with self.assertRaisesRegex(ValueError,'every validation as failed'):
+                mod.validated_contract(pp,cp,101.)
+            evidence['command_limits_validated']=False;evidence['unvalidated_items']=[]
+            ep.write_text(json.dumps(evidence));plan['readiness_sha256']=mod.digest(ep);pp.write_text(json.dumps(plan))
+            consent['plan_sha256']=mod.digest(pp);cp.write_text(json.dumps(consent))
+            with self.assertRaisesRegex(ValueError,'list the unvalidated items'):
+                mod.validated_contract(pp,cp,101.)
 
 
 if __name__=='__main__':unittest.main()

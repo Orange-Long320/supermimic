@@ -87,8 +87,10 @@ def main():
     deadline=time.monotonic()+2.
     while time.monotonic()<deadline:rclpy.spin_once(node,timeout_sec=.05)
     if node.count_publishers(target_topic):raise ValueError('Another policy worker exists')
-    if node.count_publishers(state_topic)!=1 or node.count_subscribers(target_topic)!=1:
-        raise ValueError('Expected one state producer and one motor publisher')
+    state_publishers=node.count_publishers(state_topic);target_subscribers=node.count_subscribers(target_topic)
+    if state_publishers!=1 or target_subscribers!=1:
+        raise ValueError(f'Expected one state producer and one motor publisher; '
+                         f'got state publishers {state_publishers} and target subscribers {target_subscribers}')
     pub=node.create_publisher(String,target_topic,qos);controller=None;session=None;seq=0;last_receipt=None
     def request(msg):
         if controller is not None and msg.data==plan_hash:
@@ -114,7 +116,7 @@ def main():
                     max_acceleration=plan['max_acceleration'],minimum_duration=plan['minimum_duration'],
                     blend_seconds=plan['blend_seconds'],max_tick_gap=plan['max_tick_gap'],max_tilt=plan['max_tilt'],
                     max_angular_speed=plan['max_angular_speed'],policy=policy,tracker_factory=factory,
-                    history_source=plan['history_source'])
+                    history_source=plan['history_source'],max_tilt_delta=plan.get('max_tilt_delta'))
                 return  # Reacquire fresh input after setup; no command sent yet.
             out=controller.step(row['state_stamp'],row['position'],quat,q,qd,row['angular_velocity_body'],gravity)
             generated=time.monotonic();state_sampled=generated-(time.time()-row['state_stamp'])

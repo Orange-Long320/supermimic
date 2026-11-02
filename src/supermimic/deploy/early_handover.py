@@ -23,7 +23,7 @@ class EarlyHandover:
                  measured_lower, measured_upper, command_lower, command_upper, max_step,
                  *, max_velocity, max_acceleration, minimum_duration, blend_seconds,
                  max_tick_gap, max_tilt, max_angular_speed, policy, tracker_factory,
-                 history_source='executed'):
+                 history_source='executed', max_tilt_delta=None):
         vectors=[np.asarray(x,dtype=float) for x in (start,target,default,scale,prep_kp,prep_kd,policy_kp,policy_kd,
                  measured_lower,measured_upper,command_lower,command_upper,max_step,max_velocity,max_acceleration)]
         n=len(vectors[0]);
@@ -39,7 +39,13 @@ class EarlyHandover:
             or not all(math.isfinite(v) and v>0 for v in (blend_seconds,max_tick_gap,max_tilt,max_angular_speed))
             or max_tilt>=math.pi or history_source not in ('executed','policy')):raise ValueError('Invalid explicit control contract')
         self.path=QuinticPose(start,target,vmax,amax,minimum_duration=minimum_duration)
+        if max_tilt_delta is not None and not (math.isfinite(max_tilt_delta) and 0<max_tilt_delta<math.pi):
+            raise ValueError('Invalid explicit control contract')
         self.blend_seconds=blend_seconds;self.max_gap=max_tick_gap;self.max_tilt=max_tilt;self.max_omega=max_angular_speed
+        # Optional support-referenced attitude guard: the first sample defines the
+        # reference attitude, so a statically tilted mount (for example a hanging
+        # harness) does not fault every tick. max_tilt stays a hard ceiling.
+        self.max_tilt_delta=max_tilt_delta;self.tilt_reference=None
         self.policy=policy;self.tracker_factory=tracker_factory;self.tracker=None
         self.phase=Phase.PREPARE;self.reason=None;self.fault_context=None;self.history=deque(maxlen=10)
         self.history_source=history_source
@@ -68,8 +74,12 @@ class EarlyHandover:
         if len(bad):self.fault('Measured joint outside contract',dict(indices=bad.tolist(),
             measured=q[bad].tolist(),lower=self.measured_lower[bad].tolist(),upper=self.measured_upper[bad].tolist()))
         tilt=math.acos(float(np.clip(-gravity[2]/np.linalg.norm(gravity),-1.,1.)))
-        if tilt>self.max_tilt or np.linalg.norm(omega)>self.max_omega:self.fault('Tilt or angular speed outside contract',
-            dict(tilt_rad=tilt,max_tilt_rad=self.max_tilt,angular_speed_rad_s=float(np.linalg.norm(omega)),
+        if self.max_tilt_delta is not None and self.tilt_reference is None:self.tilt_reference=tilt
+        deviation=0. if self.tilt_reference is None else abs(tilt-self.tilt_reference)
+        if (tilt>self.max_tilt or deviation>(self.max_tilt_delta if self.max_tilt_delta is not None else 0.)
+                or np.linalg.norm(omega)>self.max_omega):self.fault('Tilt or angular speed outside contract',
+            dict(tilt_rad=tilt,max_tilt_rad=self.max_tilt,tilt_deviation_rad=deviation,
+                 max_tilt_delta_rad=self.max_tilt_delta,angular_speed_rad_s=float(np.linalg.norm(omega)),
                  max_angular_speed_rad_s=self.max_omega))
         self.last_tick=now
         if self.started is None:self.started=now

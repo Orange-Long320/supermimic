@@ -35,11 +35,35 @@ def validated_contract(plan_path,consent_path,now,*,isolated=False):
     if digest(evidence_path)!=plan.get('readiness_sha256') or evidence.get('policy_sha256')!=POLICY_SHA:
         raise ValueError('Readiness evidence mismatch')
     safety_mode=plan.get('safety_mode','independent_hardware')
-    if safety_mode not in ('independent_hardware','manual_supervised_trial'):
+    if safety_mode not in ('independent_hardware','manual_supervised_trial',
+                           'manual_supervised_unvalidated_trial'):
         raise ValueError('Unknown explicit safety mode')
     required=('ready_for_hardware_trial','preparation_and_handover_validated','command_limits_validated',
               'state_pipeline_validated','native_mc_stopped_verified')
-    if any(evidence.get(k) is not True for k in required):raise ValueError('Hardware readiness not passed')
+    unvalidated_required=('ready_for_hardware_trial','preparation_and_handover_validated',
+                          'command_limits_validated','state_pipeline_validated')
+    unvalidated=safety_mode=='manual_supervised_unvalidated_trial'
+    if unvalidated:
+        # An explicitly disclosed trial of software whose preparation/handover
+        # dynamics, command limits and state pipeline did NOT pass validation.
+        # The evidence must record that failure; a `true` claim is rejected so
+        # this transport can never be relabelled as a validated deployment.
+        if evidence.get('explicitly_unvalidated_trial') is not True:
+            raise ValueError('Unvalidated trial requires explicit disclosure')
+        if evidence.get('safety_mode')!=safety_mode:
+            raise ValueError('Unvalidated trial evidence mode mismatch')
+        if any(evidence.get(k) is not False for k in unvalidated_required):
+            raise ValueError('Unvalidated trial must record every validation as failed')
+        if evidence.get('native_mc_stopped_verified') not in (True,False):
+            raise ValueError('Unvalidated trial must record the native MC check')
+        if evidence.get('independent_hardware_failsafe_validated') is not False:
+            raise ValueError('Unvalidated trial cannot claim a hardware failsafe')
+        if evidence.get('manual_supervised_trial_validated') is not False:
+            raise ValueError('Unvalidated trial cannot claim validated supervision')
+        items=evidence.get('unvalidated_items')
+        if not isinstance(items,list) or not items or not all(isinstance(x,str) and x for x in items):
+            raise ValueError('Unvalidated trial must list the unvalidated items')
+    elif any(evidence.get(k) is not True for k in required):raise ValueError('Hardware readiness not passed')
     if safety_mode=='independent_hardware':
         if evidence.get('independent_hardware_failsafe_validated') is not True:
             raise ValueError('Hardware readiness not passed: independent failsafe')
@@ -52,13 +76,16 @@ def validated_contract(plan_path,consent_path,now,*,isolated=False):
                 or supervision.get('support_condition')!='feet_loaded_fall_arrest'
                 or supervision.get('automatic_host_loss_protection') is not False):
             raise ValueError('Invalid bounded manual-supervision plan')
-        if (evidence.get('safety_mode')!='manual_supervised_trial'
-                or evidence.get('manual_supervised_trial_validated') is not True
+        expected_validated=False if unvalidated else True
+        if (evidence.get('safety_mode')!=safety_mode
+                or evidence.get('manual_supervised_trial_validated') is not expected_validated
                 or evidence.get('independent_hardware_failsafe_validated') is not False):
             raise ValueError('Manual trial readiness must be explicit and separate from hardware failsafe')
         for key in ('user_confirmed_manual_supervision','operator_at_estop',
                     'manual_estop_function_checked','acknowledges_no_automatic_host_loss_protection'):
             if consent.get(key) is not True:raise ValueError('Fresh manual trial confirmation missing: '+key)
+        if unvalidated and consent.get('acknowledges_unvalidated_software') is not True:
+            raise ValueError('Fresh manual trial confirmation missing: acknowledges_unvalidated_software')
     if not 0<=now-evidence.get('verified_wall',float('nan'))<=120:raise ValueError('Readiness evidence stale')
     names=plan['joint_names']; n=len(names)
     if n!=31 or set(names)!={name for group in JOINT_GROUPS.values() for name in group} or len(set(names))!=n:
@@ -108,6 +135,10 @@ def main():
             raise ValueError('Isolated testing requires domain 197 and isolated prefix')
     elif os.environ.get('ROS_DOMAIN_ID')=='197':raise ValueError('Hardware transport is prohibited in test domain')
     plan=validated_contract(a.plan,a.consent,time.time(),isolated=bool(a.isolated_prefix))
+    if plan.get('safety_mode')=='manual_supervised_unvalidated_trial':
+        print('WARNING: explicitly unvalidated manual trial. Preparation/handover dynamics, '
+              'command limits and the state pipeline did NOT pass validation, and there is no '
+              'automatic host-loss protection. Operator must hold the emergency stop.',flush=True)
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile,ReliabilityPolicy,DurabilityPolicy
@@ -126,7 +157,8 @@ def main():
     supervisor=TargetLeaseSupervisor(plan['joint_names'],plan['fallback_damping'],
         max_state_age=plan['max_state_age'],max_target_age=plan['max_target_age'],
         max_active_seconds=(plan['manual_supervision']['max_trial_seconds']
-                            if plan.get('safety_mode')=='manual_supervised_trial' else None))
+                            if plan.get('safety_mode') in ('manual_supervised_trial',
+                                                           'manual_supervised_unvalidated_trial') else None))
     publishers={g:node.create_publisher(JointCommandArray,t,qos) for g,t in topics.items()}
     previous=None;sent=False
     def receive(msg):
