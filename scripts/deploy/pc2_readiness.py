@@ -92,7 +92,18 @@ def main():
                   'motor_output_enabled': False, 'control_transferred': False,
                   'blocking_conditions': ['Live pelvis pose is not validated',
                       'Startup motion/handover has not passed dynamics validation',
-                      'Encoder calibration, hardware command contract and independent watchdog remain unvalidated']}
+                      'Encoder calibration and hardware command contract remain unvalidated']}
+        safety_mode = release.get('user_selected_safety_mode', 'independent_hardware')
+        if safety_mode not in ('independent_hardware', 'manual_supervised_trial'):
+            raise ValueError('Unknown selected safety mode')
+        report['selected_safety_mode'] = safety_mode
+        report['independent_hardware_failsafe_validated'] = False
+        report['deferred_requirements'] = []
+        if safety_mode == 'manual_supervised_trial':
+            report['deferred_requirements'].append('Automatic independent host-loss protection deferred by user')
+            report['blocking_conditions'].append('Manual supervised trial preparation and on-site checks remain unvalidated')
+        else:
+            report['blocking_conditions'].append('Independent hardware watchdog remains unvalidated')
         if not matched: report['blocking_conditions'].append('Missing or duplicate joint states')
         if outside: report['blocking_conditions'].append('Measured joints disagree with model/device file envelope')
         if faults: report['blocking_conditions'].append('Joint error codes present')

@@ -41,7 +41,8 @@ report=dict(selected_checkpoint=11500,verified_wall=time.time(),policy_sha256=in
  native_mc_stopped_verified=inventory['native_mc'].get('status')=='Idel',
  motor_output_enabled=False,control_transferred=False,persistent_policy_process_started=False,
  motor_command_publishers=inventory['motor_command_publishers'],
- blocking_conditions=readiness['blocking_conditions'])
+ deferred_requirements=readiness.get('deferred_requirements',[]),
+ blocking_conditions=list(readiness['blocking_conditions']))
 if any(inventory['motor_command_publishers'].values()):
  report['blocking_conditions'].append('Existing motor command publishers require ownership coordination')
 (out/'deployment-status.json').write_text(json.dumps(report,indent=2)+'\n')
