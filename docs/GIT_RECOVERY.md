@@ -29,8 +29,8 @@ git clone /备份位置/已校验的文件.bundle supermimic-recovered
 git -C supermimic-recovered log --oneline -10
 ```
 
-这里的恢复命令是操作说明，不代表已执行回档。自动检查只创建提交和备份，不执行清理、重置、强推或启动/停止 GPU 任务。已有暂存内容、Git 锁或最近仍在编辑的文件由原操作继续管理，不抢占。
+已有暂存内容、Git 锁或正在编辑的文件由原操作继续管理。
 
 首次回档点为 `ef72095`，标签为 `checkpoint-2026-10-28-before-support-redesign`。初始完整 bundle 为 `supermimic-initial-20261028.bundle`。服务器另保存 `server-deployment-ef72095.json` 与 `server-overlay-ef72095.tar.gz`，记录部署目录相对本地快照的差异和仅服务器存在的源码，避免把两处状态误当成完全一致。
 
-已创建每小时检查任务“SuperMimic Git 回档检查”（`supermimic-git`）。有稳定改动时提交并备份；无变更时跳过。该任务需要本地文件，因此应保持电脑和应用运行，见[官方定时任务说明](https://learn.chatgpt.com/docs/automations?surface=app)。工作阶段完成后的即时提交仍照常进行。
+曾创建每小时检查任务“SuperMimic Git 回档检查”（`supermimic-git`）；使用前请核实其当前状态。

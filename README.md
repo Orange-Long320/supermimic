@@ -13,7 +13,7 @@
 ## 文档入口
 
 - [使用与训练](docs/USAGE.md) · [数据](docs/DATA.md) · [架构](docs/ARCHITECTURE.md)
-- [本项目实验记录](docs/LOCAL_EXPERIMENT.md) · [实验索引](docs/EXPERIMENTS.md)
+- [本项目实验记录](docs/LOCAL_EXPERIMENT.md) · [历史仿真实验](docs/EXPERIMENTS.md)
 - [X2 部署基础](docs/X2_DEPLOYMENT.md) · [PC2 容器准备](docs/X2_LXH_PC2_PREPARATION_20261031.md)
 - [Git 回档](docs/GIT_RECOVERY.md) · [上游来源](UPSTREAM.md)
 - [项目操作约束](AGENTS.md)

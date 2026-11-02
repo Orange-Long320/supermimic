@@ -1,6 +1,6 @@
 # Architecture and entry points
 
-本次整理将外围工程代码归位，保留 SuperMimic 核心算法的模块粒度。核心逻辑仍可沿着一个训练循环阅读。
+SuperMimic 的核心逻辑围绕训练循环组织。
 
 ## 核心训练从一个循环展开
 
@@ -21,8 +21,6 @@
 | `envs/` | mjlab 物理环境、任务配置、状态与参考动作接口 |
 | `kinematics/` | 可微正向运动学与旋转计算 |
 | `data/replay_buffer.py`、`recorder.py`、`sampling.py` | 在线训练数据与采样 |
-
-没有把优化步骤拆成新的服务、注册框架或大量小模块。网络结构、奖励、终止条件和检查点字段沿用原实现。
 
 ## 机器人适配集中在 robots
 
@@ -69,6 +67,6 @@ bash scripts/run_local.sh -m pytest tests -m "not slow" -q
 bash scripts/run_local.sh scripts/training/train.py --robot g1 --preset smoke
 ```
 
-测试覆盖本地模型与原模型的一致性、配置选择、入口导入无执行副作用、spawn worker 与串行转换的逐数组一致性、G1 的 SOMA/BONES CSV 格式，以及数据、FK、环境和有限训练更新。worker 测试使用临时生成的动作，不依赖本机旧 NPZ。需要数据或 GPU 的测试分别标为 `dataset`、`gpu`；世界模型长时间拟合测试使用 `slow` 标记。运行说明见 [tests/README.md](../tests/README.md)。
+测试覆盖本地模型与原模型的一致性、配置选择、入口导入无执行副作用、spawn worker 与串行转换的逐数组一致性、G1 的 SOMA/BONES CSV 格式，以及数据、FK、环境和有限训练更新。worker 测试使用临时生成的动作，不依赖本机旧 NPZ。需要数据或 GPU 的测试分别标为 `dataset`、`gpu`；世界模型长时间拟合测试使用 `slow` 标记。测试标记见 [pyproject.toml](../pyproject.toml)。
 
 `scripts/dev/check_source_distribution.py` 从 Git 索引导出干净源码，重新准备 G1 资产并验证导入、入口和基础测试。提交前需先把新增源码加入索引。数据、机器人资产和历史检查点继续由本地目录管理。
