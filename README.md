@@ -18,6 +18,26 @@
 - [Git 回档](docs/GIT_RECOVERY.md) · [上游来源](UPSTREAM.md)
 - [项目操作约束](AGENTS.md)
 
+## 项目目录与入口
+
+| 目录或文件 | 用途 |
+| --- | --- |
+| `src/supermimic/` | 训练、世界模型、策略、环境和机器人适配源码 |
+| `scripts/training/`、`scripts/evaluation/` | 训练和评测入口；使用方法见[使用文档](docs/USAGE.md) |
+| `scripts/data/`、`scripts/setup/` | 数据处理、重定向与环境资产准备 |
+| `scripts/deploy/`、`scripts/experiments/` | 部署工具与实验专用入口 |
+| `scripts/dev/`、`tests/` | 开发检查与测试 |
+| `configs/`、`manifests/` | 项目配置与数据清单 |
+| `docs/` | 使用说明、部署准备和按主题/日期保存的实验记录 |
+| `media/` | 纳入版本管理的项目演示素材 |
+| `素材/` | 本地原始视频素材，文件不纳入 Git |
+| `outputs/` | 本地实验产物及预览，文件不纳入 Git |
+| `vendor/` | 本地外部依赖，文件不纳入 Git |
+| `pyproject.toml`、`uv.lock`、`requirements/` | Python 项目、依赖锁和环境配置 |
+| `AGENTS.md`、`UPSTREAM.md`、`LICENSE` | 操作约束、上游来源和许可证 |
+
+`sm-train` 和 `scripts/training/train.py` 对应同一训练入口。脚本按用途归类；实验脚本的具体参数和运行位置以对应记录为准。
+
 ## 运行位置
 
 | 用途 | 主机 / 路径 |
