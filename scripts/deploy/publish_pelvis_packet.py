@@ -42,6 +42,8 @@ def main():
     p.add_argument('--integration-method', choices=('right', 'trapezoid'), default='right')
     p.add_argument('--sim-only', action='store_true', help='declare isolated simulation')
     p.add_argument('--sim-support-xml', type=Path, help='experimental X2 simulation collision-sphere support')
+    p.add_argument('--sim-flat-ground-height', action='store_true',
+                   help='experimental flat-ground height constraint when support is accepted')
     p.add_argument('--imu-only-zupt', action='store_true',
                    help='experimental horizontal ZUPT; IMU thresholds do not prove rest')
     p.add_argument('--velocity-sigma', type=float, default=.02)
@@ -63,6 +65,8 @@ def main():
     p.add_argument('--mount-rpy', type=float, nargs=3, default=[0., 0., 0.], help='Radians, torso-to-IMU')
     p.add_argument('--max-joint-extrapolation', type=float, default=.005)
     a = p.parse_args()
+    if a.sim_flat_ground_height and not a.sim_support_xml:
+        raise SystemExit('Flat-ground height requires sim-only support')
     if a.sim_support_xml and (not a.sim_only or a.mount_urdf is None or
             a.imu_topic != '/aima/hal/imu/torso/state' or
             not np.allclose(a.mount_xyz, [.0239465, -.000228682, .04171]) or
@@ -139,7 +143,7 @@ def main():
     state = {'last': None, 'last_world_accel': None, 'still_since': None, 'integrate': False, 'calibration': None,
              'z': 0., 'vz': 0., 'origin_offset': None, 'bias_body': np.zeros(3),
              'last_published_stamp': 0, 'support_initialized': support is None,
-             'support_last_try': None, 'support_last_accept': None,
+             'support_last_try': None, 'support_last_accept': None, 'support_height_origin': None,
              'x': np.zeros(4), 'P': np.diag([.01, .01, .1, .1])}
     H = np.zeros((2, 4))
     H[0, 2] = H[1, 3] = 1.
@@ -154,7 +158,7 @@ def main():
     timing = {'age_max': 0., 'publish_ms_max': 0.}
     diagnostics = {'imu_callback_ms': [], 'joint_callback_ms': [], 'publish_work_ms': [],
                    'imu_header_gaps_ms': [], 'imu_receive_age_ms': [], 'support_joint_lag_ms': [],
-                   'support_innovation_m_s': [], 'support_queue_wait_ms': []}
+                   'support_innovation_m_s': [], 'support_queue_wait_ms': [], 'support_height_correction_m': []}
     last_imu_stamp = None
 
     class Producer(Node):
@@ -290,19 +294,23 @@ def main():
         row = next((j for j in reversed(history) if j['stamp_ns'] <= sample['stamp_ns']), None)
         if row is None:
             counters['support_missing'] += 1
+            support_events.write(json.dumps({'stamp_ns':sample['stamp_ns'],'reason':'missing'})+'\n')
             return
         lag = (sample['stamp_ns']-row['stamp_ns'])*1e-9
         diagnostics['support_joint_lag_ms'].append(lag*1000.)
         if lag > a.max_joint_extrapolation:
             counters['support_stale'] += 1
+            support_events.write(json.dumps({'stamp_ns':sample['stamp_ns'],'reason':'stale','lag_s':lag})+'\n')
             return
         position = {n: q + lag*row['velocity'][n] for n, q in row['position'].items()}
         rwp = mount @ rot_of(sample['q']).as_matrix()
         pelvis_v, reason = support.observe(now, rwp, sample['w'], position, row['velocity'])
         if pelvis_v is None:
             counters['support_' + reason] += 1
+            support_events.write(json.dumps({'stamp_ns':sample['stamp_ns'],'reason':reason,'lag_s':lag})+'\n')
             return
         site_v = pelvis_v + rwp @ np.cross(sample['w'], np.asarray(a.mount_xyz))
+        height_site = support.accepted_relative_height + (rwp @ np.asarray(a.mount_xyz))[2]
         if state['support_initialized']:
             old = np.r_[state['x'][2:4], state['vz']]
             diagnostics['support_innovation_m_s'].append(float(np.linalg.norm(site_v-old)))
@@ -311,6 +319,13 @@ def main():
             state['x'][:2] = 0.
             state['z'] = 0.
             state['support_initialized'] = True
+            state['support_height_origin'] = height_site
+        if a.sim_flat_ground_height:
+            corrected_z = float(height_site - state['support_height_origin'])
+            diagnostics['support_height_correction_m'].append(corrected_z - state['z'])
+            state['z'] = corrected_z
+        support_events.write(json.dumps({'stamp_ns':sample['stamp_ns'],'reason':'accepted',
+            'lag_s':lag,'height_site_m':float(height_site),'site_velocity_m_s':site_v.tolist()})+'\n')
         state['x'][2:4] = site_v[:2]
         state['vz'] = float(site_v[2])
         state['support_last_accept'] = now
@@ -355,6 +370,7 @@ def main():
               np.round(state['bias_body'], 5), flush=True)
 
     frames = (a.out / 'packets.jsonl').open('x')
+    support_events = (a.out / 'support-events.jsonl').open('x') if support is not None else None
     started = time.monotonic()
     state['integrate'] = True
     last_publish = 0.
@@ -514,6 +530,8 @@ def main():
     finally:
         frames.flush()
         frames.close()
+        if support_events is not None:
+            support_events.close()
         node.destroy_node()
         rclpy.try_shutdown()
         elapsed = time.monotonic() - started
@@ -524,6 +542,7 @@ def main():
                    'motor_output_enabled': False, 'control_ready': False,
                    'initial_velocity_assumed_zero': support is None,
                    'simulation_support': support is not None,
+                   'sim_flat_ground_height': a.sim_flat_ground_height,
                    'support_observation': ('lowest sphere, flat ground and stationary contact assumed; 3D hard replacement'
                                            ' and output stops after 100 ms without a support update'
                                            if support is not None else None),

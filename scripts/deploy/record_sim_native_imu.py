@@ -9,8 +9,31 @@ direct comparison. Read-only: it subscribes and writes files only.
 """
 import argparse
 import json
+import multiprocessing as mp
 import os
+import queue
 import time
+
+
+def write_records(out, records):
+    """Serialize on a separate process so callbacks never wait for JSON or disk."""
+    names = {"imu": "imu.jsonl", "chest": "imu-chest.jsonl",
+             "odom": "odom.jsonl", "joints": "joints.jsonl"}
+    handles = {key: open(os.path.join(out, name), "x") for key, name in names.items()}
+    counts = {key: 0 for key in names}
+    try:
+        while True:
+            item = records.get()
+            if item is None:
+                break
+            key, record = item
+            handles[key].write(json.dumps(record, allow_nan=False) + "\n")
+            counts[key] += 1
+    finally:
+        for handle in handles.values():
+            handle.close()
+    with open(os.path.join(out, "writer-summary.json"), "x") as handle:
+        json.dump(counts, handle, indent=2)
 
 
 def main():
@@ -37,17 +60,18 @@ def main():
 
     out = os.path.abspath(a.out)
     os.makedirs(out, exist_ok=False)
-    imu_file = open(os.path.join(out, 'imu.jsonl'), 'x')
-    chest_file = open(os.path.join(out, 'imu-chest.jsonl'), 'x')
-    odom_file = open(os.path.join(out, 'odom.jsonl'), 'x')
-    joint_file = open(os.path.join(out, 'joints.jsonl'), 'x')
-    counts = {'imu': 0, 'chest': 0, 'odom': 0, 'joints': 0}
+    records = mp.Queue(maxsize=8192)
+    writer = mp.Process(target=write_records, args=(out, records), name='native-json-writer')
+    writer.start()
+    counts = {key: 0 for key in ('imu', 'chest', 'odom', 'joints')}
+    overflow = {key: 0 for key in counts}
 
-    def emit(handle, key, record):
-        handle.write(json.dumps(record, allow_nan=False) + '\n')
+    def emit(key, record):
         counts[key] += 1
-        if counts[key] % 200 == 0:
-            handle.flush()
+        try:
+            records.put_nowait((key, record))
+        except queue.Full:
+            overflow[key] += 1
 
     class Recorder(Node):
         def __init__(self):
@@ -66,14 +90,14 @@ def main():
                           for g in ('leg', 'waist', 'head', 'arm')]
 
         def on_imu(self, msg):
-            self.record_imu(msg, imu_file, 'imu')
+            self.record_imu(msg, 'imu')
 
         def on_chest(self, msg):
-            self.record_imu(msg, chest_file, 'chest')
+            self.record_imu(msg, 'chest')
 
-        def record_imu(self, msg, handle, key):
+        def record_imu(self, msg, key):
             q, w, acc = msg.orientation, msg.angular_velocity, msg.linear_acceleration
-            emit(handle, key, {
+            emit(key, {
                 'stamp': [msg.header.stamp.sec, msg.header.stamp.nanosec],
                 'recv': time.monotonic(),
                 'frame_id': msg.header.frame_id,
@@ -86,7 +110,7 @@ def main():
             pose = msg.pose.pose
             p, q = pose.position, pose.orientation
             tw = msg.twist.twist
-            emit(odom_file, 'odom', {
+            emit('odom', {
                 'stamp': [msg.header.stamp.sec, msg.header.stamp.nanosec],
                 'recv': time.monotonic(),
                 'position': [p.x, p.y, p.z],
@@ -97,7 +121,7 @@ def main():
             })
 
         def on_joint(self, group, msg):
-            emit(joint_file, 'joints', {
+            emit('joints', {
                 'stamp': [msg.header.stamp.sec, msg.header.stamp.nanosec],
                 'recv': time.monotonic(),
                 'group': group,
@@ -116,15 +140,24 @@ def main():
         if rclpy.ok():
             raise
     finally:
-        for handle in (imu_file, chest_file, odom_file, joint_file):
-            handle.flush()
-            handle.close()
         node.destroy_node()
         rclpy.try_shutdown()
-    summary = {'counts': counts, 'seconds': float(time.monotonic() - started)}
+        while writer.is_alive():
+            try:
+                records.put(None, timeout=.5)
+                break
+            except queue.Full:
+                pass
+        writer.join()
+        records.close()
+        records.join_thread()
+    summary = {'counts': counts, 'received_counts': counts, 'queue_overflow': overflow,
+               'writer_exit_code': writer.exitcode, 'seconds': float(time.monotonic() - started)}
     with open(os.path.join(out, 'summary.json'), 'x') as handle:
         json.dump(summary, handle, indent=2)
     print(json.dumps(summary), flush=True)
+    if writer.exitcode != 0 or any(overflow.values()):
+        raise SystemExit('Recorder lost data to queue overflow or writer failure')
 
 
 if __name__ == '__main__':

@@ -38,6 +38,7 @@ class SimFootSupport:
             self.chains[side] = (chain, spheres)
         self.side = None
         self.side_since = None
+        self.accepted_relative_height = None
 
     def candidates(self, rwp, omega_body, position, velocity):
         result = {}
@@ -67,4 +68,5 @@ class SimFootSupport:
         if (candidates[other][0] - candidates[side][0] < .01 and
                 np.linalg.norm(candidates[other][1] - candidates[side][1]) > .2):
             return None, 'disagree'
+        self.accepted_relative_height = -candidates[side][0]
         return candidates[side][1], 'accepted'
