@@ -8,6 +8,7 @@ import heapq
 import json
 import multiprocessing as mp
 import os
+import signal
 import time
 from pathlib import Path
 
@@ -128,8 +129,10 @@ def main():
     for worker in workers.values():
         worker.start()
     started = time.monotonic(); failure = None
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
     try:
-        while time.monotonic() - started < a.seconds:
+        while not stop.is_set() and time.monotonic() - started < a.seconds:
             if any(not worker.is_alive() for worker in workers.values()):
                 failure = 'subscriber process exited early'
                 break
