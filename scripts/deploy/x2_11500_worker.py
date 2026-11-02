@@ -126,6 +126,12 @@ def main():
                     **{k:out[k].tolist() for k in ('position','velocity','effort','stiffness','damping')}}
             m=String();m.data=json.dumps(packet,allow_nan=False);pub.publish(m);seq+=1;last_receipt=now_mono
         except Exception as exc:
+            # No target has been sent yet, so a stale startup packet carries no
+            # control history: wait for a fresh one instead of latching a fault
+            # on the producer's startup transient. Once publishing, a stale
+            # packet is a real gap and still latches.
+            if seq==0 and 'stale or future' in str(exc):
+                print('dropped stale startup packet: '+str(exc),flush=True);return
             if controller is not None:controller.phase=Phase.FAULT;controller.reason=str(exc)
             print('policy worker fault: '+str(exc),flush=True)
             # The independent publisher lease detects the absence of fresh targets.
