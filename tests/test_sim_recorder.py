@@ -20,15 +20,12 @@ def never_reads():
 
 
 def test_dead_writer_does_not_block():
-    q = mp.Queue(maxsize=1)
     p = mp.Process(target=exits_immediately); p.start(); p.join(2)
-    q.put(b'queued')
-    start = time.monotonic(); ok, timeout = recorder.finish_writer(p, q, .2)
+    start = time.monotonic(); ok, timeout = recorder.finish_worker(p, .2)
     assert not ok and not timeout and time.monotonic()-start < 2
 
 
 def test_stalled_writer_is_bounded():
-    q = mp.Queue(maxsize=1)
-    p = mp.Process(target=never_reads); p.start(); q.put(b'queued')
-    start = time.monotonic(); ok, timeout = recorder.finish_writer(p, q, .2)
+    p = mp.Process(target=never_reads); p.start()
+    start = time.monotonic(); ok, timeout = recorder.finish_worker(p, .2)
     assert not ok and timeout and not p.is_alive() and time.monotonic()-start < 3
