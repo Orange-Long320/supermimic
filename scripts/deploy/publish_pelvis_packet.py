@@ -1,9 +1,10 @@
 """Publish diagnostic pelvis/joint state packets from the 500 Hz Kalman estimator.
 
-Replaces the lidar/FAST-LIO producer for the policy state topic. The estimator is
-the one validated on the robot: callback-rate strapdown, Kalman with a world-frame
-acceleration-bias state, still-detected zero-velocity updates, and a fixed attitude
-extrinsic.
+Diagnostic only: callback-rate strapdown, a horizontal world-frame bias state,
+and still-detected zero-velocity updates. The optional moving-mount output is
+experimental and requires explicitly supplied geometry. It is not deployment
+validated. Its three-dimensional position is relative to the first output;
+vertical acceleration bias and ZUPT are not estimated.
 
 Physics safety: this process publishes STATE ONLY. It never publishes joint
 commands, never creates a motor publisher, and every packet carries
@@ -379,10 +380,12 @@ def main():
                    'extrinsic_deg': [a.fix_deg_x, a.fix_deg_y, a.fix_deg_z],
                    'motor_output_enabled': False, 'control_ready': False,
                    'reason': 'state producer only; no policy targets, no actuator path',
-                   'limitations': ('Height comes from forward kinematics of the lowest ankle plus a '
-                                   'declared sole offset, not from a measured contact or ground; horizontal '
-                                   'motion accuracy is untested and the zero-velocity update only applies '
-                                   'while the IMU reports a still robot.')}
+                   'limitations': ('Experimental moving-mount position is relative to the first output; '
+                                   'vertical bias is not estimated or corrected. The stationary detector '
+                                   'does not prove absolute rest. No output is validated for control.'
+                                   if moving_mount is not None else
+                                   'Legacy output uses IMU pose as pelvis pose; height uses the lowest ankle '
+                                   'and a declared sole offset. No output is validated for control.')}
         (a.out / 'summary.json').write_text(json.dumps(summary, allow_nan=False) + '\n')
         print(json.dumps(summary, allow_nan=False), flush=True)
 
