@@ -1,10 +1,11 @@
 """Publish diagnostic pelvis/joint state packets from the 500 Hz Kalman estimator.
 
-Diagnostic only: callback-rate strapdown, a horizontal world-frame bias state,
-and still-detected zero-velocity updates. The optional moving-mount output is
+Diagnostic only: callback-rate strapdown and optional IMU-only horizontal
+zero-velocity updates. The optional moving-mount output is
 experimental and requires explicitly supplied geometry. It is not deployment
 validated. Its three-dimensional position is relative to the first output;
-vertical acceleration bias and ZUPT are not estimated.
+The three-axis body-frame bias is calibrated only under an explicit rest and
+trusted-attitude assumption. Vertical ZUPT is not implemented.
 
 Physics safety: this process publishes STATE ONLY. It never publishes joint
 commands, never creates a motor publisher, and every packet carries
@@ -33,7 +34,11 @@ def main():
     p.add_argument('--fix-deg-z', type=float, default=0.)
     p.add_argument('--auto-mount', action='store_true',
                    help='fit the world attitude correction from the static settle window')
-    p.add_argument('--init-bias-seconds', type=float, default=3.)
+    p.add_argument('--init-bias-seconds', type=float, default=0.)
+    p.add_argument('--assume-initial-rest', action='store_true',
+                   help='declare the calibration window stationary with trusted attitude')
+    p.add_argument('--imu-only-zupt', action='store_true',
+                   help='experimental horizontal ZUPT; IMU thresholds do not prove rest')
     p.add_argument('--velocity-sigma', type=float, default=.02)
     p.add_argument('--still-accel-tol', type=float, default=.5)
     p.add_argument('--still-gyro-tol', type=float, default=.08)
@@ -53,6 +58,10 @@ def main():
     p.add_argument('--mount-rpy', type=float, nargs=3, default=[0., 0., 0.], help='Radians, torso-to-IMU')
     p.add_argument('--max-joint-extrapolation', type=float, default=.005)
     a = p.parse_args()
+    if a.auto_mount and a.init_bias_seconds <= 0.:
+        raise SystemExit('--auto-mount requires a declared-rest calibration window')
+    if a.init_bias_seconds > 0. and not a.assume_initial_rest:
+        raise SystemExit('Calibration requires --assume-initial-rest; motion tests cannot prove rest')
     if not 1. <= a.seconds <= 600.:
         raise ValueError('Bounded duration required')
     if not 0. < a.max_joint_extrapolation <= .01:
@@ -101,15 +110,15 @@ def main():
     def rot_of(wxyz):
         """The device publishes w,x,y,z; scipy expects x,y,z,w."""
         return Rotation.from_quat([wxyz[1], wxyz[2], wxyz[3], wxyz[0]])
-    state = {'last': None, 'still_since': None, 'integrate': False, 'calibration': None,
-             'z': 0., 'vz': 0., 'origin_offset': None,
+    state = {'last': None, 'last_world_accel': None, 'still_since': None, 'integrate': False, 'calibration': None,
+             'z': 0., 'vz': 0., 'origin_offset': None, 'bias_body': np.zeros(3),
              'last_published_stamp': 0,
-             'x': np.zeros(6), 'P': np.diag([.01, .01, .1, .1, .1, .1])}
-    H = np.zeros((2, 6))
+             'x': np.zeros(4), 'P': np.diag([.01, .01, .1, .1])}
+    H = np.zeros((2, 4))
     H[0, 2] = H[1, 3] = 1.
     Rm = np.eye(2) * (a.velocity_sigma ** 2)
-    Q = np.diag([1e-8, 1e-8, 4e-5, 4e-5, 1e-8, 1e-8])
-    identity = np.eye(6)
+    Q = np.diag([1e-8, 1e-8, 4e-5, 4e-5])
+    identity = np.eye(4)
     counters = {'imu': 0, 'packets': 0, 'invalid': 0, 'skipped_age': 0, 'skipped_skew': 0,
                 'skipped_joints_missing': 0, 'zupt': 0}
     timing = {'age_max': 0., 'publish_ms_max': 0.}
@@ -171,33 +180,34 @@ def main():
     def propagate(sample):
         x, P = state['x'], state['P']
         now = sample['stamp_ns'] * 1e-9
+        acc_body = np.array(sample['a'])
+        gyro = np.array(sample['w'])
+        world = mount @ rot_of(sample['q']).apply(acc_body - state['bias_body'])
+        world -= np.array([0., 0., 9.81])
         if state['last'] is None:
             state['last'] = now
+            state['last_world_accel'] = world
             return
         dt = now - state['last']
         if not 0. < dt <= .03:
             raise ValueError('IMU acquisition timestamp rollback or gap')
         state['last'] = now
-        acc_body = np.array(sample['a'])
-        gyro = np.array(sample['w'])
-        world = mount @ rot_of(sample['q']).apply(acc_body)
-        u = world[:2]
-        az = float(world[2] - 9.81)
-        state['z'] += state['vz'] * dt + .5 * az * dt * dt
-        state['vz'] += az * dt
-        F = np.eye(6)
+        previous = state['last_world_accel']
+        state['last_world_accel'] = world
+        average = .5 * (previous + world)
+        position_accel = (2. * previous + world) / 6.
+        state['z'] += state['vz'] * dt + position_accel[2] * dt * dt
+        state['vz'] += average[2] * dt
+        F = np.eye(4)
         F[0, 2] = F[1, 3] = dt
-        F[0, 4] = F[1, 5] = -.5 * dt ** 2
-        F[2, 4] = F[3, 5] = -dt
-        B = np.zeros((6, 2))
-        B[0, 0] = B[1, 1] = .5 * dt ** 2
-        B[2, 0] = B[3, 1] = dt
-        x = F @ x + B @ u
+        x = F @ x
+        x[:2] += position_accel[:2] * dt ** 2
+        x[2:4] += average[:2] * dt
         P = F @ P @ F.T + Q * (dt / .02)
         still = (abs(np.linalg.norm(acc_body) - 9.81) <= a.still_accel_tol
                  and np.linalg.norm(gyro) <= a.still_gyro_tol)
         state['still_since'] = (state['still_since'] if state['still_since'] is not None else now) if still else None
-        if still and now - state['still_since'] >= a.still_hold:
+        if a.imu_only_zupt and still and now - state['still_since'] >= a.still_hold:
             innovation = np.zeros(2) - H @ x
             S = H @ P @ H.T + Rm
             K = np.linalg.solve(S, (P @ H.T).T).T
@@ -232,15 +242,21 @@ def main():
         window = np.array([mount @ rot_of(s['q']).apply(np.array(s['a'])) for s in samples])
         if a.auto_mount:
             mean = window.mean(axis=0)
-            mount = Rotation.align_vectors([[0., 0., 1.]], [mean])[0].as_matrix()
+            correction = Rotation.align_vectors([[0., 0., 1.]], [mean])[0].as_matrix()
+            mount = correction @ mount
             fitted = Rotation.from_matrix(mount).as_euler('xyz', degrees=True)
             print('fitted world correction x=%.2f y=%.2f z=%.2f deg residual %.4f'
                   % (fitted[0], fitted[1], fitted[2],
-                     float(np.linalg.norm(mount @ mean - np.array([0., 0., np.linalg.norm(mean)])))),
+                     float(np.linalg.norm(correction @ mean - np.array([0., 0., np.linalg.norm(mean)])))),
                   flush=True)
-            window = np.array([mount @ v for v in window])
-        state['x'][4:6] = window.mean(axis=0)[:2]
-        print('initial bias %s' % np.round(state['x'][4:6], 5), flush=True)
+            window = np.array([correction @ v for v in window])
+        # Bias is observable here only conditional on rest, known gravity, and
+        # trusted attitude. Express it in the sensor frame so it rotates with it.
+        gravity_world = np.array([0., 0., 9.81])
+        state['bias_body'] = np.mean([np.asarray(s['a']) -
+            rot_of(s['q']).as_matrix().T @ mount.T @ gravity_world for s in samples], axis=0)
+        print('initial body bias (conditional on rest and attitude) %s' %
+              np.round(state['bias_body'], 5), flush=True)
 
     frames = (a.out / 'packets.jsonl').open('x')
     started = time.monotonic()
@@ -378,7 +394,7 @@ def main():
                                      'stamp_ns': state_stamp_ns, 'quat_wxyz': packet['quat_wxyz'],
                                      'angular_velocity_body': packet['angular_velocity_body'],
                                      'velocity': packet.get('linear_velocity_world', [float(x[2]), float(x[3])]),
-                                     'bias': [float(x[4]), float(x[5])],
+                                     'bias_body': state['bias_body'].tolist(),
                                      'age': age}, allow_nan=False) + '\n')
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
@@ -396,9 +412,13 @@ def main():
                    'counters': counters, 'timing': {k: float(v) for k, v in timing.items()},
                    'extrinsic_deg': [a.fix_deg_x, a.fix_deg_y, a.fix_deg_z],
                    'motor_output_enabled': False, 'control_ready': False,
+                   'initial_velocity_assumed_zero': True,
+                   'initial_rest_declared': bool(a.init_bias_seconds > 0. and a.assume_initial_rest),
+                   'imu_only_zupt': a.imu_only_zupt,
+                   'bias_body': state['bias_body'].tolist(),
                    'reason': 'state producer only; no policy targets, no actuator path',
                    'limitations': ('Experimental moving-mount position is relative to the first output; '
-                                   'vertical bias is not estimated or corrected. The stationary detector '
+                                   'Bias calibration depends on declared rest and trusted attitude. The stationary detector '
                                    'does not prove absolute rest. No output is validated for control.'
                                    if moving_mount is not None else
                                    'Legacy output uses IMU pose as pelvis pose; height uses the lowest ankle '
