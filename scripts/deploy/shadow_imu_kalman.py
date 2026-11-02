@@ -31,6 +31,11 @@ def main():
                    help='seconds of continuously still IMU before a velocity update')
     p.add_argument('--timer', action='store_true',
                    help='integrate on a fixed-rate loop instead of on every IMU callback')
+    p.add_argument('--auto-mount', action='store_true',
+                   help='fit the world-frame attitude correction from the init window')
+    p.add_argument('--fix-deg-x', type=float, default=0.)
+    p.add_argument('--fix-deg-y', type=float, default=0.)
+    p.add_argument('--fix-deg-z', type=float, default=0.)
     p.add_argument('--init-bias-seconds', type=float, default=0.,
                    help='initialise the bias state from this many still seconds (0 = zero start)')
     p.add_argument('--velocity-sigma', type=float, default=.02,
@@ -80,17 +85,34 @@ def main():
     R = np.eye(2) * (a.velocity_sigma ** 2)
     Q = np.diag([1e-8, 1e-8, 4e-5, 4e-5, 1e-8, 1e-8])
     identity = np.eye(6)
-    if a.init_bias_seconds > 0.:
-        window = []
-        end = time.monotonic() + a.init_bias_seconds
+    # World-frame attitude correction: the published quaternion and the accelerometer
+    # do not share a frame, so the estimated gravity direction is tilted. Fit the
+    # rotation that maps the measured direction onto +z and expose manual overrides.
+    mount = np.eye(3)
+    window = []
+    settle = max(a.init_bias_seconds, 3. if a.auto_mount else 0.)
+    if settle > 0.:
+        end = time.monotonic() + settle
         while time.monotonic() < end:
             rclpy.spin_once(node, timeout_sec=.01)
             if node.latest is not None:
-                window.append(-Rotation.from_quat(node.latest['q']).apply(np.array(node.latest['a']))[:2])
+                window.append(-Rotation.from_quat(node.latest['q']).apply(np.array(node.latest['a'])))
         if len(window) < 100:
-            raise SystemExit('Bias initialisation window produced too few samples')
-        x[4:6] = np.array(window).mean(axis=0)
-        print('initial bias %s' % np.round(x[4:6], 4), flush=True)
+            raise SystemExit('Static window produced too few samples')
+        window = np.array(window)
+        if a.auto_mount:
+            mean = window.mean(axis=0)
+            mount = Rotation.align_vectors([[0., 0., 1.]], [mean])[0].as_matrix()
+            fitted = Rotation.from_matrix(mount).as_euler('xyz', degrees=True)
+            print('fitted world correction x=%.2f y=%.2f z=%.2f deg, residual %.4f m/s^2'
+                  % (fitted[0], fitted[1], fitted[2],
+                     float(np.linalg.norm(mount @ mean - np.array([0., 0., np.linalg.norm(mean)])))),
+                  flush=True)
+        else:
+            mount = Rotation.from_euler('xyz', [a.fix_deg_x, a.fix_deg_y, a.fix_deg_z],
+                                        degrees=True).as_matrix()
+        x[4:6] = (mount @ window.T).T.mean(axis=0)[:2]
+        print('initial bias after mount %s' % np.round(x[4:6], 4), flush=True)
     tick = 1. / a.rate
     def step(sample):
         nonlocal x, P
@@ -107,7 +129,7 @@ def main():
             counts['dt_over_10ms'] += 1
         acc_body = np.array(sample['a'])
         gyro = np.array(sample['w'])
-        world = -Rotation.from_quat(sample['q']).apply(acc_body)   # measured convention
+        world = mount @ (-Rotation.from_quat(sample['q']).apply(acc_body))   # measured convention
         u = world[:2]
         F = np.eye(6)
         F[0, 2] = F[1, 3] = dt
@@ -135,6 +157,7 @@ def main():
                                  'velocity': [float(x[2]), float(x[3])],
                                  'bias': [float(x[4]), float(x[5])]}, allow_nan=False) + '\n')
 
+    started = time.monotonic()
     state['integrate'] = True
     try:
         while time.monotonic() - started < a.seconds:
@@ -161,6 +184,7 @@ def main():
                                   'hold_s': a.still_hold},
                    'velocity_sigma': a.velocity_sigma,
                    'init_bias_seconds': a.init_bias_seconds,
+                   'mount_euler_deg': [float(v) for v in Rotation.from_matrix(mount).as_euler('xyz', degrees=True)],
                    'final_position_xy': [float(x[0]), float(x[1])],
                    'final_velocity_xy': [float(x[2]), float(x[3])],
                    'final_bias_xy': [float(x[4]), float(x[5])],
