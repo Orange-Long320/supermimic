@@ -149,11 +149,12 @@ def main():
     counters = {'imu': 0, 'packets': 0, 'invalid': 0, 'skipped_age': 0, 'skipped_skew': 0,
                 'skipped_joints_missing': 0, 'zupt': 0, 'support_accepted': 0,
                 'support_hold': 0, 'support_disagree': 0, 'support_missing': 0,
-                'support_stale': 0, 'support_waiting': 0}
+                'support_stale': 0, 'support_waiting': 0, 'support_output_stale': 0,
+                'support_queue_timeout': 0, 'support_queue_overflow': 0}
     timing = {'age_max': 0., 'publish_ms_max': 0.}
     diagnostics = {'imu_callback_ms': [], 'joint_callback_ms': [], 'publish_work_ms': [],
                    'imu_header_gaps_ms': [], 'imu_receive_age_ms': [], 'support_joint_lag_ms': [],
-                   'support_innovation_m_s': []}
+                   'support_innovation_m_s': [], 'support_queue_wait_ms': []}
     last_imu_stamp = None
 
     class Producer(Node):
@@ -191,7 +192,11 @@ def main():
                 if support is None:
                     self.process_imu(self.imu)
                 else:
+                    if self.pending_imu and time.time() - self.pending_imu[0]['recv'] > a.max_age:
+                        counters['support_queue_timeout'] += 1
+                        raise ValueError('IMU support synchronization timed out')
                     if len(self.pending_imu) >= 128:
+                        counters['support_queue_overflow'] += 1
                         raise ValueError('IMU support synchronization queue overflow')
                     self.pending_imu.append(self.imu)
                     self.drain_pending()
@@ -212,7 +217,13 @@ def main():
             history = self.history['leg']
             while (self.pending_imu and history and
                    history[-1]['stamp_ns'] >= self.pending_imu[0]['stamp_ns']):
-                self.process_imu(self.pending_imu.popleft())
+                sample = self.pending_imu.popleft()
+                wait = time.time() - sample['recv']
+                diagnostics['support_queue_wait_ms'].append(wait*1000.)
+                if wait > a.max_age:
+                    counters['support_queue_timeout'] += 1
+                    raise ValueError('IMU support synchronization timed out')
+                self.process_imu(sample)
 
         def on_joint(self, group, msg):
             callback_start = time.perf_counter()
@@ -387,6 +398,10 @@ def main():
                 if chosen is None:
                     counters['skipped_skew'] += 1
                     continue
+            if (support is not None and (selected_support_stamp is None or
+                    imu['stamp_ns']*1e-9 - selected_support_stamp > .1)):
+                counters['support_output_stale'] += 1
+                continue
             age = time.time() - imu['recv']
             timing['age_max'] = max(timing['age_max'], age)
             if age > a.max_age:
@@ -506,6 +521,7 @@ def main():
                    'initial_velocity_assumed_zero': support is None,
                    'simulation_support': support is not None,
                    'support_observation': ('lowest sphere, flat ground and stationary contact assumed; 3D hard replacement'
+                                           ' and output stops after 100 ms without a support update'
                                            if support is not None else None),
                    'support_last_observation_age_s': (None if state['support_last_accept'] is None or state['last'] is None else state['last']-state['support_last_accept']),
                    'initial_rest_declared': bool(a.init_bias_seconds > 0. and a.assume_initial_rest),
