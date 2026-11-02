@@ -106,7 +106,7 @@ def replay(spec, imu_t, rotations, gyro, acc, jt, joint_pos, joint_vel, names, t
     mount_error=Rotation.from_euler('x',spec.get('mount_roll_deg',0.),degrees=True).as_matrix()
     position=np.zeros(3); velocity=np.zeros(3); origin=None; first_p=None
     last=None; last_try=None; last_accept=None; initialized=False; counts=Counter(); rows=[]
-    failure=None; failure_time=None; next_output=None
+    failure=None; failure_time=None; failure_detail=None; previous_i=None; next_output=None
     for i in selected:
         t=reported_t[i]; rwi=measured_rot[i]; r=rwi@mount_error
         w=mount_error.T@measured_gyro[i]
@@ -114,10 +114,14 @@ def replay(spec, imu_t, rotations, gyro, acc, jt, joint_pos, joint_vel, names, t
         if last is not None:
             dt=t-last
             if not 0.<dt<=.03:
-                failure='imu_timestamp_gap'; failure_time=float(t-imu_t[0]); break
+                failure=('imu_timestamp_nonmonotonic' if dt<=0. else 'imu_timestamp_gap')
+                failure_time=float(t-imu_t[0])
+                failure_detail={'reported_interval_ms':float(dt*1000.),
+                                'original_interval_ms':float((imu_t[i]-imu_t[previous_i])*1000.)}
+                break
             position += velocity*dt+.5*world*dt*dt
             velocity += world*dt
-        last=t
+        last=t; previous_i=i
         if last_try is None or t-last_try>=.02:
             last_try=t; delay=spec.get('joint_delay',0.); ji=np.searchsorted(jt,t-delay,side='right')-1
             if ji<0:
@@ -149,7 +153,7 @@ def replay(spec, imu_t, rotations, gyro, acc, jt, joint_pos, joint_vel, names, t
             rows.append((t,(pelvis_p-first_p).copy(),pelvis_v.copy()))
     result=score(rows,truth_t,truth_p,duration);result.update(counters=dict(counts),
             runtime_failure=failure,early_failure=bool(failure),
-            failure_time_s=failure_time,output_packets=len(rows))
+            failure_time_s=failure_time,failure_detail=failure_detail,output_packets=len(rows))
     if 'scored_start_stamp' in result:
         result['scored_start_offset_s']=result['scored_start_stamp']-float(imu_t[0])
         result['scored_end_offset_s']=result['scored_end_stamp']-float(imu_t[0])
