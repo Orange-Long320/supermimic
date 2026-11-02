@@ -113,6 +113,9 @@ def main():
     counters = {'imu': 0, 'packets': 0, 'invalid': 0, 'skipped_age': 0, 'skipped_skew': 0,
                 'skipped_joints_missing': 0, 'zupt': 0}
     timing = {'age_max': 0., 'publish_ms_max': 0.}
+    diagnostics = {'imu_callback_ms': [], 'joint_callback_ms': [], 'publish_work_ms': [],
+                   'imu_header_gaps_ms': [], 'imu_receive_age_ms': []}
+    last_imu_stamp = None
 
     class Producer(Node):
         def __init__(self):
@@ -130,20 +133,28 @@ def main():
                           for g in ('leg', 'waist', 'head', 'arm')]
 
         def on_imu(self, msg):
+            nonlocal last_imu_stamp
+            callback_start = time.perf_counter()
             q, w, acc = msg.orientation, msg.angular_velocity, msg.linear_acceleration
             stamp_ns = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
             self.imu = {'recv': time.time(), 'mono': time.monotonic(), 'stamp_ns': stamp_ns,
                         'q': [q.w, q.x, q.y, q.z], 'w': [w.x, w.y, w.z],
                         'a': [acc.x, acc.y, acc.z], 'frame': msg.header.frame_id}
             counters['imu'] += 1
+            diagnostics['imu_receive_age_ms'].append((self.imu['recv'] - stamp_ns * 1e-9) * 1e3)
+            if last_imu_stamp is not None:
+                diagnostics['imu_header_gaps_ms'].append((stamp_ns - last_imu_stamp) * 1e-6)
+            last_imu_stamp = stamp_ns
             if state['calibration'] is not None:
                 state['calibration'].append(self.imu)
             if state['integrate']:
                 propagate(self.imu)
                 if moving_mount is not None:
                     self.imu_history.append((self.imu, state['x'].copy(), state['z'], state['vz']))
+            diagnostics['imu_callback_ms'].append((time.perf_counter() - callback_start) * 1e3)
 
         def on_joint(self, group, msg):
+            callback_start = time.perf_counter()
             stamp = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
             if moving_mount is not None and (stamp <= 0 or
                     (self.history[group] and stamp <= self.history[group][-1]['stamp_ns'])):
@@ -155,6 +166,7 @@ def main():
                 'position': {j.name: j.position for j in msg.joints},
                 'velocity': {j.name: j.velocity for j in msg.joints}}
             self.history[group].append(self.groups[group])
+            diagnostics['joint_callback_ms'].append((time.perf_counter() - callback_start) * 1e3)
 
     def propagate(sample):
         x, P = state['x'], state['P']
@@ -245,6 +257,7 @@ def main():
             if node.imu is None or len(node.groups) < 4:
                 counters['skipped_age'] += 1
                 continue
+            work_start = time.perf_counter()
             imu = node.imu
             x, z, vz = state['x'], state['z'], state['vz']
             chosen = None
@@ -255,10 +268,9 @@ def main():
                         break
                     selected = {}
                     for g, history in node.history.items():
-                        options = [row for row in history if row['stamp_ns'] <= target]
-                        if not options:
+                        row = next((row for row in reversed(history) if row['stamp_ns'] <= target), None)
+                        if row is None:
                             break
-                        row = options[-1]
                         delta = (target-row['stamp_ns'])*1e-9
                         if not 0. <= delta <= a.max_joint_extrapolation:
                             break
@@ -361,6 +373,7 @@ def main():
             state['last_published_stamp'] = state_stamp_ns
             counters['packets'] += 1
             timing['publish_ms_max'] = max(timing['publish_ms_max'], (time.monotonic() - publish_start) * 1e3)
+            diagnostics['publish_work_ms'].append((time.perf_counter() - work_start) * 1e3)
             frames.write(json.dumps({'t': now - started, 'position': packet['position'],
                                      'stamp_ns': state_stamp_ns, 'quat_wxyz': packet['quat_wxyz'],
                                      'angular_velocity_body': packet['angular_velocity_body'],
@@ -390,6 +403,11 @@ def main():
                                    if moving_mount is not None else
                                    'Legacy output uses IMU pose as pelvis pose; height uses the lowest ankle '
                                    'and a declared sole offset. No output is validated for control.')}
+        summary['diagnostics'] = {key: ({'count': len(values), 'p50': float(np.percentile(values, 50)),
+                                          'p95': float(np.percentile(values, 95)),
+                                          'p99': float(np.percentile(values, 99)), 'max': float(max(values))}
+                                         if values else {'count': 0})
+                                  for key, values in diagnostics.items()}
         (a.out / 'summary.json').write_text(json.dumps(summary, allow_nan=False) + '\n')
         print(json.dumps(summary, allow_nan=False), flush=True)
 

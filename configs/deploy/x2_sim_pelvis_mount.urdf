@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<!-- Simulation-only fixed pelvis IMU mounting geometry from the official x2.xml. -->
+<robot name="x2_sim_pelvis_mount">
+  <link name="pelvis"/><link name="torso_link"/>
+  <joint name="pelvis_imu_mount" type="fixed">
+    <parent link="pelvis"/><child link="torso_link"/>
+  </joint>
+</robot>
