@@ -70,6 +70,18 @@ r8 配对三路 IMU 共同区间各5923条、零缺样、DDS序号连续，硬�
 
 ## 当前安全与数据位置
 
+## r9 内存定向追踪与并发资源发现
+
+操作员已执行定向脚本，数据位于 `/dev/shm/agi-x2-scheduler-trace-r9/sched.data`（约94 MB），实际 perf 样本 monotonic1608.227674–1653.239505；宿主元数据位于 `scheduler-trace-r9/`。内核不提供脚本所检查的 futex 事件，实际仅采集过滤后的调度/唤醒事件。timehist 未报告丢失事件，但过滤采集不能用于无关线程的完整全系统统计。为配对 acquisition/RMW 墙钟与 perf 单调钟，另在 `lxh` 内采集了当轮 `clock-pairs-r9.json`。
+
+r9 影子仍失败：30.008秒、1309状态、992帧、陈旧53/流停止或陈旧34，推理最大13.38 ms、处理最大21.79 ms。配对三路IMU共同区间各5897条、零缺样、DDS序号连续，采样最大6.977 ms、原生发布最大22.7303 ms。原生读者最初约60条附近有约338 ms回调停顿，RMW源时间仍连续；这属于接收/发现阶段的迟到，不能写成发布缺样或忽略到后续稳态指标中。相同索引的两个独立原生读者均迟到，实际 RMW接收时间也晚于源时间。
+
+发现先前未纳入资源假设的并发项目：宿主 `agi` 的 PID25719 于12:28:28启动，命令为 `python -u -m x2_kinematics.aimdk_bridge.dashboard --backend robot --mode web --config configs/aimdk_panel_live.json --port 8765 --instance-id panel-web-20261102-r3`，属于另一个容器 `x2-xlq-dev`。其主线程固定CPU6，整进程平均约81% CPU；子进程PID25776固定CPU7，约25% CPU。本项目转发器和FAST-LIO也在CPU6/7。perf原始事件中，本项目关节转发器在CPU6与该面板主线程/接收线程交替调度，证实资源重叠；它是否解释全部失败仍需对照测试，不能直接宣称唯一根因。
+
+没有停止或修改该面板。已请求用户明确授权是否暂时停止该面板，等待回复。独立准备的 `online_lio_20261102_hwclock_cpu45_r10` 仅将本项目线程移至CPU4/5（桥主线程4、转发器/影子5、DDS与后端池4/5），原算法、时间门限及源时间不变。CPU4/5也未被声明为独占核心；它是避开已证实冲突的对照配置，不是实时性保证。该轮尚待运行。
+
+## 安全与证据路径（续）
+
 - 本轮没有电机发布、上电、机器人模式切换或原生 MC 启动。只读桥始终标记 `control_ready=false`、`motor_output_enabled=false`。
 - PC2 容器：`/home/agi/lxh-supermimic/imu-transport-20261102-r1/`；CPU 试验和计时源码/日志分别在上文命名的 `online_lio_*` 私有目录。
 - 原生线程统计：PC2 宿主 `/home/agi/lxh-imu-clock-review-20261102-r1/native-pidstat-baseline-r1.log`，使用已安装的只读系统工具，没有在宿主安装项目依赖。
