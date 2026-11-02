@@ -20,6 +20,7 @@ import yaml
 from prepare_x2_fastlio_bag import convert_cloud, lidar_pose_in_imu
 from supermimic.deploy.online_inertial import parse_filter_state, CachedImuPropagation, fit_level_floor, grid_tick_pending
 from supermimic.deploy.pelvis_state import UrdfPelvisMount, pelvis_from_imu, pelvis_angular_velocity, gravity_level_rotation, latest_causal
+from supermimic.deploy.async_diagnostic_log import AsyncDiagnosticLog
 
 
 def main():
@@ -97,8 +98,7 @@ def main():
             self.stage_wall_max = Counter(); self.stage_cpu_max = Counter(); self.slow_stages = deque(maxlen=12)
             self.stage_slowest = {}
             self.gc_started = None
-            self.frames = (args.out/'pelvis-frames.jsonl').open('x')
-            self.status_log = (args.out/'status.jsonl').open('x')
+            self.diagnostic_log = AsyncDiagnosticLog(args.out)
             best = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
             imu_qos = QoSProfile(depth=400, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
             self.cloud_pub = self.create_publisher(PointCloud2, prefix+'/cloud', best)
@@ -356,8 +356,8 @@ def main():
                 self.timing_end('ros_output',output_timing)
                 self.last_emitted_ns = ns
                 log_timing=self.timing_start()
-                self.frames.write(json.dumps(self.last_pose, allow_nan=False)+'\n')
-                self.timing_end('frame_log_write',log_timing)
+                self.diagnostic_log.append('frame',json.dumps(self.last_pose, allow_nan=False))
+                self.timing_end('frame_log_enqueue',log_timing)
                 self.last_reason = 'publishing diagnostic pelvis state'
             except ValueError as exc:
                 self.last_reason = str(exc); self.rejects[self.last_reason] += 1
@@ -382,11 +382,9 @@ def main():
                     'thread_cpu_max_ms':dict(self.stage_cpu_max),'recent_slow_stages':list(self.slow_stages),
                     'slowest_by_stage':self.stage_slowest.copy()}
             msg = String(); msg.data = json.dumps(result, allow_nan=False); self.status_pub.publish(msg)
-            t=self.timing_start();self.frames.flush();self.timing_end('frame_log_flush',t)
-            t=self.timing_start();self.status_log.write(msg.data+'\n');self.status_log.flush();self.timing_end('status_log_flush',t)
             t=self.timing_start()
-            temporary = args.out/'status-latest.tmp'; temporary.write_text(msg.data+'\n'); temporary.replace(args.out/'status-latest.json')
-            self.timing_end('status_latest_replace',t)
+            self.diagnostic_log.append('status',msg.data)
+            self.timing_end('status_log_enqueue',t)
             self.timing_end('status',timing)
 
     rclpy.init(); node = Bridge()
@@ -410,6 +408,7 @@ def main():
     (args.out/'bridge.pid').write_text(str(os.getpid())+'\n')
     try:
         while rclpy.ok() and (args.seconds == 0 or time.monotonic()-node.started < args.seconds):
+            node.diagnostic_log.check()
             timing=node.timing_start()
             executor.spin_once(timeout_sec=.02)
             node.timing_end('executor_spin',timing)
@@ -419,11 +418,11 @@ def main():
         node.running = False
         try: node.publish_status()
         except Exception: pass  # ROS may already be shut down; child cleanup still must run.
-        node.frames.close(); node.status_log.close()
         node.process.terminate()
         try: node.process.wait(timeout=10)
         except subprocess.TimeoutExpired: node.process.kill(); node.process.wait()
         log.close(); executor.shutdown(timeout_sec=1.); node.destroy_node(); rclpy.try_shutdown()
+        node.diagnostic_log.close()
 
 
 if __name__ == '__main__': main()
