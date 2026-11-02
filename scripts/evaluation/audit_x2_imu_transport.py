@@ -13,14 +13,16 @@ from pathlib import Path
 UNSUPPORTED = (1 << 64)-1
 
 
-def analyze(path):
+def analyze(path, native_only=False):
     streams = defaultdict(list)
     with Path(path).open() as f:
         for row in csv.DictReader(f):
             streams[row['reader']].append({k: v if k in ('gid', 'reader') else int(v)
                                           for k, v in row.items()})
-    if any(len(streams[k]) < 2 for k in ('native_best_effort', 'native_reliable', 'relay_reliable')):
-        raise ValueError('All three readers must capture actual data')
+    required = ('native_best_effort', 'native_reliable') if native_only else (
+        'native_best_effort', 'native_reliable', 'relay_reliable')
+    if any(len(streams[k]) < 2 for k in required):
+        raise ValueError('All required readers must capture actual data')
     # Compare only the source-time interval observed by all three readers.
     start = max(min(r['header_ns'] for r in rows) for rows in streams.values())
     end = min(max(r['header_ns'] for r in rows) for rows in streams.values())
@@ -34,6 +36,7 @@ def analyze(path):
         seqs = [r['publication_sequence'] for r in rows]
         supported = len(gids) == 1 and all(s not in (0, UNSUPPORTED) for s in seqs)
         events = []
+        wall_stalls = []
         source_missing = []
         nonincreasing = 0
         for before, after in zip(rows, rows[1:]):
@@ -41,6 +44,15 @@ def analyze(path):
             if gap <= 0:
                 nonincreasing += 1
             delta = after['publication_sequence']-before['publication_sequence'] if supported else None
+            pub_gap = after['rmw_source_ns']-before['rmw_source_ns']
+            callback_gap = after['callback_ns']-before['callback_ns']
+            if pub_gap > 30_000_000 or callback_gap > 30_000_000:
+                wall_stalls.append(dict(header_ns=after['header_ns'],header_gap_ms=gap/1e6,
+                    publication_sequence=after['publication_sequence'],publication_sequence_delta=delta,
+                    publication_gap_ms=pub_gap/1e6,callback_gap_ms=callback_gap/1e6,
+                    publication_age_ms=(after['rmw_source_ns']-after['header_ns'])/1e6,
+                    callback_age_ms=(after['callback_ns']-after['header_ns'])/1e6,
+                    rmw_received_ns=after['rmw_received_ns'],callback_ns=after['callback_ns']))
             if supported and delta != 1:
                 source_missing.append(dict(previous=before['publication_sequence'], current=after['publication_sequence'],
                                            difference=delta, header_gap_ms=gap/1e6))
@@ -68,6 +80,8 @@ def analyze(path):
             nonincreasing_headers=nonincreasing, max_header_gap_ms=maximum_gap('header_ns'),
             max_callback_gap_ms=maximum_gap('callback_ns'), max_rmw_source_gap_ms=maximum_gap('rmw_source_ns'),
             max_callback_age_ms=max((r['callback_ns']-r['header_ns'] for r in rows),default=0)/1e6,
+            max_publication_age_ms=max((r['rmw_source_ns']-r['header_ns'] for r in rows),default=0)/1e6,
+            wall_stalls_over_30ms=wall_stalls,
             gaps_over_30ms=events)
     native_union = set(stamps['native_best_effort']) | set(stamps['native_reliable'])
     missing = {k: sorted(native_union-set(stamps[k])) for k in stamps}
@@ -80,13 +94,14 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--csv', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--native-only', action='store_true')
     a = p.parse_args()
     if a.out.exists():
         raise ValueError('New output required')
-    report = analyze(a.csv)
+    report = analyze(a.csv, native_only=a.native_only)
     a.out.write_text(json.dumps(report, indent=2)+'\n')
     print(json.dumps({k: {key: value for key,value in r.items() if key not in
-        ('publisher_gids','gaps_over_30ms','publication_sequence_discontinuities')} for k,r in report['readers'].items()},indent=2))
+        ('publisher_gids','gaps_over_30ms','publication_sequence_discontinuities','wall_stalls_over_30ms')} for k,r in report['readers'].items()},indent=2))
     for name,r in report['readers'].items():
         print(name, 'gaps',json.dumps(r['gaps_over_30ms'][:10]),
               'sequence discontinuities',len(r['publication_sequence_discontinuities']),

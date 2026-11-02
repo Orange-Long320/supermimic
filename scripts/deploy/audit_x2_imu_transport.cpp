@@ -26,8 +26,8 @@ static int64_t wall_ns() {
 }
 class Audit : public rclcpp::Node {
  public:
-  explicit Audit(bool stop_on_gap) : Node("supermimic_readonly_imu_transport_audit"), stop_on_gap_(stop_on_gap) {
-    for (int i=0;i<3;++i) {
+  Audit(bool stop_on_gap, bool native_only) : Node("supermimic_readonly_imu_transport_audit"), stop_on_gap_(stop_on_gap) {
+    for (int i=0;i<(native_only ? 2 : 3);++i) {
       rows[i].reserve(65000);
       auto qos=rclcpp::QoS(400).durability_volatile();
       if (i==0) qos.best_effort(); else qos.reliable();
@@ -55,11 +55,12 @@ class Audit : public rclcpp::Node {
   std::array<rclcpp::Subscription<Imu>::SharedPtr,3> subs;
 };
 int main(int argc,char **argv) {
-  if(argc!=3 && (argc!=4 || std::string(argv[3])!="stop_on_gap")) return 2;
+  if(argc!=3 && (argc!=4 || (std::string(argv[3])!="stop_on_gap" && std::string(argv[3])!="native_only"))) return 2;
   const double seconds=std::stod(argv[1]); const std::string out=argv[2];
   if(!std::isfinite(seconds)||seconds<5||seconds>300||std::filesystem::exists(out)) return 2;
   rclcpp::init(argc,argv);
-  auto node=std::make_shared<Audit>(argc==4);
+  auto node=std::make_shared<Audit>(argc==4 && std::string(argv[3])=="stop_on_gap",
+                                    argc==4 && std::string(argv[3])=="native_only");
   rclcpp::executors::SingleThreadedExecutor executor;executor.add_node(node);
   const auto until=std::chrono::steady_clock::now()+std::chrono::duration<double>(seconds);
   while(rclcpp::ok()&&std::chrono::steady_clock::now()<until&&!node->finished()) executor.spin_once(std::chrono::milliseconds(10));
