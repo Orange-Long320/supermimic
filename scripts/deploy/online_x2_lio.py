@@ -94,6 +94,7 @@ def main():
             self.live_tf_seen = set(); self.last_reason = 'initializing'; self.state_received = None
             self.cloud_times = deque(maxlen=128)
             self.stage_wall_max = Counter(); self.stage_cpu_max = Counter(); self.slow_stages = deque(maxlen=12)
+            self.stage_slowest = {}
             self.frames = (args.out/'pelvis-frames.jsonl').open('x')
             self.status_log = (args.out/'status.jsonl').open('x')
             best = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
@@ -135,9 +136,11 @@ def main():
         def timing_end(self,name,start):
             if start is None:return
             wall=(time.monotonic_ns()-start[0])*1e-6;cpu=(time.thread_time_ns()-start[1])*1e-6
-            self.stage_wall_max[name]=max(self.stage_wall_max[name],wall)
+            event=dict(stage=name,wall=time.time(),wall_ms=wall,thread_cpu_ms=cpu)
+            if wall>self.stage_wall_max[name]:
+                self.stage_wall_max[name]=wall;self.stage_slowest[name]=event
             self.stage_cpu_max[name]=max(self.stage_cpu_max[name],cpu)
-            if wall>10:self.slow_stages.append(dict(stage=name,wall=time.time(),wall_ms=wall,thread_cpu_ms=cpu))
+            if wall>10:self.slow_stages.append(event)
 
         def on_imu(self, msg):
             w, a = msg.angular_velocity, msg.linear_acceleration
@@ -182,6 +185,7 @@ def main():
 
         def on_cloud(self, msg):
             before = time.monotonic()
+            timing=self.timing_start()
             self.counts['raw_cloud'] += 1
             try:
                 if msg.header.frame_id != 'lidar_chest_front' or not 0 <= time.time()-self.stamp(msg) <= .3:
@@ -195,15 +199,17 @@ def main():
                     if np.max(np.abs(joint_speed)) > .05: raise ValueError('waiting for static joints')
                     self.static_ready = True
                 converted, _ = convert_cloud(msg, 1e-9)
-                # Native host header is retained. The known hardware timing
-                # uncertainty is not replaced by a guessed constant offset.
+                # The native header is retained, with driver clock provenance
+                # recorded separately; never insert a guessed time offset.
                 self.cloud_pub.publish(converted); self.counts['adapted_cloud'] += 1
                 if self.shift is None:
                     xyz = np.column_stack([np.ndarray(converted.width, dtype='<f4', buffer=converted.data,
                                              offset=o, strides=(24,))[::12] for o in (0, 4, 8)])
                     self.cloud = xyz
             except ValueError as exc: self.rejects[str(exc)] += 1
-            finally: self.cloud_times.append((time.monotonic()-before)*1000)
+            finally:
+                self.cloud_times.append((time.monotonic()-before)*1000)
+                self.timing_end('cloud',timing)
 
         def on_relay(self, msg):
             timing=self.timing_start()
@@ -257,6 +263,7 @@ def main():
                 self.live_tf_seen.add(key)
 
         def on_state(self, msg):
+            timing=self.timing_start()
             self.counts['lio_corrections'] += 1
             try:
                 state = parse_filter_state(msg.data)
@@ -267,6 +274,7 @@ def main():
                 if self.level is None:
                     self.level = Rotation.from_matrix(gravity_level_rotation(-state.gravity))
             except ValueError as exc: self.rejects[str(exc)] += 1
+            finally:self.timing_end('lio_correction',timing)
 
         def publish_pose(self):
             timing=self.timing_start()
@@ -364,7 +372,8 @@ def main():
                       'control_ready': False, 'motor_output_enabled': False}
             if args.timing_diagnostics:
                 result['timing_diagnostics']={'wall_max_ms':dict(self.stage_wall_max),
-                    'thread_cpu_max_ms':dict(self.stage_cpu_max),'recent_slow_stages':list(self.slow_stages)}
+                    'thread_cpu_max_ms':dict(self.stage_cpu_max),'recent_slow_stages':list(self.slow_stages),
+                    'slowest_by_stage':self.stage_slowest.copy()}
             msg = String(); msg.data = json.dumps(result, allow_nan=False); self.status_pub.publish(msg)
             t=self.timing_start();self.frames.flush();self.timing_end('frame_log_flush',t)
             t=self.timing_start();self.status_log.write(msg.data+'\n');self.status_log.flush();self.timing_end('status_log_flush',t)
