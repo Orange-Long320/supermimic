@@ -34,9 +34,31 @@ def validated_contract(plan_path,consent_path,now,*,isolated=False):
     if bool(evidence.get('test_only',False)) != bool(isolated):raise ValueError('Evidence scope does not match transport')
     if digest(evidence_path)!=plan.get('readiness_sha256') or evidence.get('policy_sha256')!=POLICY_SHA:
         raise ValueError('Readiness evidence mismatch')
+    safety_mode=plan.get('safety_mode','independent_hardware')
+    if safety_mode not in ('independent_hardware','manual_supervised_trial'):
+        raise ValueError('Unknown explicit safety mode')
     required=('ready_for_hardware_trial','preparation_and_handover_validated','command_limits_validated',
-              'state_pipeline_validated','independent_hardware_failsafe_validated','native_mc_stopped_verified')
+              'state_pipeline_validated','native_mc_stopped_verified')
     if any(evidence.get(k) is not True for k in required):raise ValueError('Hardware readiness not passed')
+    if safety_mode=='independent_hardware':
+        if evidence.get('independent_hardware_failsafe_validated') is not True:
+            raise ValueError('Hardware readiness not passed: independent failsafe')
+    else:
+        # A distinct, explicitly disclosed trial mode; never relabel a human
+        # emergency stop as automatic protection against a dead host/network.
+        supervision=plan.get('manual_supervision',{})
+        seconds=supervision.get('max_trial_seconds')
+        if (type(seconds) not in (int,float) or not math.isfinite(seconds) or not 0<seconds<=30
+                or supervision.get('support_condition')!='feet_loaded_fall_arrest'
+                or supervision.get('automatic_host_loss_protection') is not False):
+            raise ValueError('Invalid bounded manual-supervision plan')
+        if (evidence.get('safety_mode')!='manual_supervised_trial'
+                or evidence.get('manual_supervised_trial_validated') is not True
+                or evidence.get('independent_hardware_failsafe_validated') is not False):
+            raise ValueError('Manual trial readiness must be explicit and separate from hardware failsafe')
+        for key in ('user_confirmed_manual_supervision','operator_at_estop',
+                    'manual_estop_function_checked','acknowledges_no_automatic_host_loss_protection'):
+            if consent.get(key) is not True:raise ValueError('Fresh manual trial confirmation missing: '+key)
     if not 0<=now-evidence.get('verified_wall',float('nan'))<=120:raise ValueError('Readiness evidence stale')
     names=plan['joint_names']; n=len(names)
     if n!=31 or set(names)!={name for group in JOINT_GROUPS.values() for name in group} or len(set(names))!=n:
@@ -55,7 +77,7 @@ def validated_contract(plan_path,consent_path,now,*,isolated=False):
     if not all(type(plan.get(k)) in (int,float) and math.isfinite(plan[k]) and 0<plan[k]<=.05
                for k in ('max_state_age','max_target_age')):raise ValueError('Invalid timeout')
     if plan.get('output_hz') not in (100,200):raise ValueError('Unsupported command frequency')
-    if not isolated:require_independent_failsafe(plan,now)
+    if not isolated and safety_mode=='independent_hardware':require_independent_failsafe(plan,now)
     return plan
 
 
@@ -104,7 +126,7 @@ def main():
     supervisor=TargetLeaseSupervisor(plan['joint_names'],plan['fallback_damping'],
                                       max_state_age=plan['max_state_age'],max_target_age=plan['max_target_age'])
     publishers={g:node.create_publisher(JointCommandArray,t,qos) for g,t in topics.items()}
-    previous=None;sent=False
+    previous=None;sent=False;trial_started=None
     def receive(msg):
         nonlocal previous
         try:
@@ -113,9 +135,14 @@ def main():
         except (KeyError,TypeError,ValueError) as exc:supervisor.fault_reason='Invalid command: '+str(exc)
     node.create_subscription(String,target_topic,receive,qos)
     def tick():
-        nonlocal sent
-        packet=supervisor.tick(time.monotonic())
+        nonlocal sent,trial_started
+        now=time.monotonic()
+        if (plan.get('safety_mode')=='manual_supervised_trial' and trial_started is not None
+                and now-trial_started>=plan['manual_supervision']['max_trial_seconds']):
+            supervisor.fault_reason=supervisor.fault_reason or 'Bounded manually supervised trial ended'
+        packet=supervisor.tick(now)
         if packet is None or (packet['fallback'] and not sent):return
+        if trial_started is None:trial_started=now
         for group,rows in group_command(packet).items():
             msg=JointCommandArray()
             for row in rows:

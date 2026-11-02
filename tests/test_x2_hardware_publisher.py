@@ -60,5 +60,24 @@ class HardwareContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'scope'):mod.validated_contract(pp,cp,101.)
             self.assertEqual(mod.validated_contract(pp,cp,101.,isolated=True),plan)
 
+    def test_manual_trial_is_explicit_bounded_and_never_claims_auto_failsafe(self):
+        with tempfile.TemporaryDirectory() as folder:
+            pp,cp,ep,plan=self.make(Path(folder))
+            plan.update(safety_mode='manual_supervised_trial',manual_supervision=dict(max_trial_seconds=10.,
+                support_condition='feet_loaded_fall_arrest',automatic_host_loss_protection=False))
+            evidence=json.loads(ep.read_text());evidence.update(safety_mode='manual_supervised_trial',
+                manual_supervised_trial_validated=True,independent_hardware_failsafe_validated=False)
+            ep.write_text(json.dumps(evidence));plan['readiness_sha256']=mod.digest(ep);pp.write_text(json.dumps(plan))
+            consent=json.loads(cp.read_text());consent['plan_sha256']=mod.digest(pp);cp.write_text(json.dumps(consent))
+            with self.assertRaisesRegex(ValueError,'manual trial confirmation'):
+                mod.validated_contract(pp,cp,101.)
+            for key in ('user_confirmed_manual_supervision','operator_at_estop',
+                        'manual_estop_function_checked','acknowledges_no_automatic_host_loss_protection'):
+                consent[key]=True
+            cp.write_text(json.dumps(consent));self.assertEqual(mod.validated_contract(pp,cp,101.),plan)
+            plan['manual_supervision']['max_trial_seconds']=31.;pp.write_text(json.dumps(plan))
+            consent['plan_sha256']=mod.digest(pp);cp.write_text(json.dumps(consent))
+            with self.assertRaisesRegex(ValueError,'bounded manual'):mod.validated_contract(pp,cp,101.)
+
 
 if __name__=='__main__':unittest.main()
