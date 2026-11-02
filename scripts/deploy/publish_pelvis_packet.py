@@ -50,9 +50,12 @@ def main():
                    help='Explicit pelvis-to-torso geometry; experimental synchronized output')
     p.add_argument('--mount-xyz', type=float, nargs=3, default=[0., 0., 0.])
     p.add_argument('--mount-rpy', type=float, nargs=3, default=[0., 0., 0.], help='Radians, torso-to-IMU')
+    p.add_argument('--max-joint-extrapolation', type=float, default=.005)
     a = p.parse_args()
     if not 1. <= a.seconds <= 600.:
         raise ValueError('Bounded duration required')
+    if not 0. < a.max_joint_extrapolation <= .01:
+        raise ValueError('Joint extrapolation limit must be in (0, 10 ms]')
     if os.environ.get('SM_MOTOR_OUTPUT') not in (None, '', '0'):
         raise SystemExit('State producer must never run with motor output enabled')
 
@@ -98,6 +101,7 @@ def main():
         return Rotation.from_quat([wxyz[1], wxyz[2], wxyz[3], wxyz[0]])
     state = {'last': None, 'still_since': None, 'integrate': False, 'calibration': None,
              'z': 0., 'vz': 0., 'origin_offset': None,
+             'last_published_stamp': 0,
              'x': np.zeros(6), 'P': np.diag([.01, .01, .1, .1, .1, .1])}
     H = np.zeros((2, 6))
     H[0, 2] = H[1, 3] = 1.
@@ -114,6 +118,7 @@ def main():
             qos = QoSProfile(depth=20, reliability=ReliabilityPolicy.BEST_EFFORT,
                              durability=DurabilityPolicy.VOLATILE)
             self.imu = None
+            self.imu_history = deque(maxlen=128)
             self.groups = {}
             self.history = {g: deque(maxlen=128) for g in ('leg', 'waist', 'head', 'arm')}
             self.pub = self.create_publisher(String, a.topic, qos)
@@ -133,6 +138,8 @@ def main():
                 state['calibration'].append(self.imu)
             if state['integrate']:
                 propagate(self.imu)
+                if moving_mount is not None:
+                    self.imu_history.append((self.imu, state['x'].copy(), state['z'], state['vz']))
 
         def on_joint(self, group, msg):
             stamp = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
@@ -236,25 +243,38 @@ def main():
             if node.imu is None or len(node.groups) < 4:
                 counters['skipped_age'] += 1
                 continue
-            age = time.time() - node.imu['recv']
+            imu = node.imu
+            x, z, vz = state['x'], state['z'], state['vz']
+            chosen = None
+            if moving_mount is not None:
+                for candidate, cx, cz, cvz in reversed(node.imu_history):
+                    target = candidate['stamp_ns']
+                    if target <= state['last_published_stamp'] or time.time()-candidate['recv'] > a.max_age:
+                        break
+                    selected = {}
+                    for g, history in node.history.items():
+                        options = [row for row in history if row['stamp_ns'] <= target]
+                        if not options:
+                            break
+                        row = options[-1]
+                        delta = (target-row['stamp_ns'])*1e-9
+                        if not 0. <= delta <= a.max_joint_extrapolation:
+                            break
+                        selected[g] = dict(row, position={n: v + delta*row['velocity'][n]
+                                                           for n, v in row['position'].items()})
+                    if len(selected) == 4:
+                        imu, x, z, vz, chosen = candidate, cx, cz, cvz, selected
+                        break
+                if chosen is None:
+                    counters['skipped_skew'] += 1
+                    continue
+            age = time.time() - imu['recv']
             timing['age_max'] = max(timing['age_max'], age)
             if age > a.max_age:
                 counters['skipped_age'] += 1
                 continue
             try:
                 if moving_mount is not None:
-                    target = node.imu['stamp_ns']
-                    chosen = {}
-                    for g, history in node.history.items():
-                        candidates = [row for row in history if row['stamp_ns'] <= target]
-                        if not candidates:
-                            raise KeyError(g)
-                        row = candidates[-1]
-                        delta = (target-row['stamp_ns'])*1e-9
-                        if not 0. <= delta <= .005:
-                            raise KeyError(g)
-                        chosen[g] = dict(row, position={n: v + delta*row['velocity'][n]
-                                                        for n, v in row['position'].items()})
                     groups = chosen
                 else:
                     groups = node.groups
@@ -270,24 +290,23 @@ def main():
             except KeyError:
                 counters['skipped_age'] += 1
                 continue
-            x = state['x']
             height = 0.
             if fk is not None:
                 data = fk['data']
                 data.qpos[:] = 0.
                 data.qpos[:7] = np.r_[[0., 0., 0.],
-                                      (Rotation.from_matrix(mount) * rot_of(node.imu['q'])).as_quat()[[3, 0, 1, 2]]]
+                                      (Rotation.from_matrix(mount) * rot_of(imu['q'])).as_quat()[[3, 0, 1, 2]]]
                 data.qpos[fk['qpos_addr']] = q
                 mujoco.mj_kinematics(fk['model'], data)
                 height = float(-min(data.xpos[b][2] for b in fk['feet'])) + a.sole_offset
-            gravity = (rot_of(node.imu['q']).as_matrix().T @ np.array([0., 0., -1.]))
+            gravity = (rot_of(imu['q']).as_matrix().T @ np.array([0., 0., -1.]))
             group_stamps = [groups[g]['stamp_ns'] for g in ('leg', 'waist', 'head', 'arm')]
             group_recv = [groups[g]['recv'] for g in ('leg', 'waist', 'head', 'arm')]
             # The observation is complete only once every stream has been acquired, so
             # the packet timestamp is the newest of the five. Joints must never appear
             # to be acquired after the state they belong to.
-            state_stamp_ns = (int(node.imu['stamp_ns']) if moving_mount is not None else
-                              max([int(node.imu['stamp_ns']), *[int(t) for t in group_stamps]]))
+            state_stamp_ns = (int(imu['stamp_ns']) if moving_mount is not None else
+                              max([int(imu['stamp_ns']), *[int(t) for t in group_stamps]]))
             # The consumer rejects a set of acquisitions spread over more than 30 ms.
             # Skipping here keeps the publish slot for a coherent observation.
             if state_stamp_ns - min([int(t) for t in group_stamps]) > 25_000_000:
@@ -298,8 +317,8 @@ def main():
                 'motor_output_enabled': False,
                 'position': [float(x[0]), float(x[1]), float(height)],
                 'quat_wxyz': [float(v) for v in (Rotation.from_matrix(mount) *
-                                                 rot_of(node.imu['q'])).as_quat()[[3, 0, 1, 2]]],
-                'angular_velocity_body': [float(v) for v in node.imu['w']],
+                                                 rot_of(imu['q'])).as_quat()[[3, 0, 1, 2]]],
+                'angular_velocity_body': [float(v) for v in imu['w']],
                 'gravity_body': [float(v) for v in gravity],
                 'joint_position': [float(v) for v in q],
                 'joint_velocity': [float(v) for v in qd],
@@ -315,13 +334,13 @@ def main():
                 waist_q = [position_by_name[n] for n in waist_names]
                 waist_v = [velocity_by_name[n] for n in waist_names]
                 ppi, rpi, wm, vm = moving_mount.mount_with_velocity(waist_q, waist_v)
-                rwi = mount @ rot_of(node.imu['q']).as_matrix()
-                pwi = np.array([x[0], x[1], state['z']])
+                rwi = mount @ rot_of(imu['q']).as_matrix()
+                pwi = np.array([x[0], x[1], z])
                 pwp, rwp = pelvis_from_imu(pwi, rwi, ppi, rpi)
                 if state['origin_offset'] is None:
                     state['origin_offset'] = -pwp.copy()
-                omega = pelvis_angular_velocity(node.imu['w'], rpi, wm)
-                velocity = pelvis_velocity_from_imu([x[2], x[3], state['vz']], rwp, ppi, omega, vm)
+                omega = pelvis_angular_velocity(imu['w'], rpi, wm)
+                velocity = pelvis_velocity_from_imu([x[2], x[3], vz], rwp, ppi, omega, vm)
                 packet['position'] = (pwp + state['origin_offset']).tolist()
                 packet['quat_wxyz'] = Rotation.from_matrix(rwp).as_quat()[[3, 0, 1, 2]].tolist()
                 packet['angular_velocity_body'] = omega.tolist()
@@ -337,6 +356,7 @@ def main():
             msg = String()
             msg.data = json.dumps(packet, allow_nan=False)
             node.pub.publish(msg)
+            state['last_published_stamp'] = state_stamp_ns
             counters['packets'] += 1
             timing['publish_ms_max'] = max(timing['publish_ms_max'], (time.monotonic() - publish_start) * 1e3)
             frames.write(json.dumps({'t': now - started, 'position': packet['position'],
