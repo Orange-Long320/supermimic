@@ -106,6 +106,7 @@ def main():
     if src is None:
         raise SystemExit('A source root is required to import the state-packet validator')
     sys.path.insert(0, str(src))
+    from supermimic.deploy.async_diagnostic_log import AsyncDiagnosticLog
     from supermimic.deploy.imu_calibration import check_static_window, body_bias_at_declared_rest
     from supermimic.deploy.sim_foot_support import SimFootSupport
     from supermimic.deploy.policy_packet import validate_policy_packet
@@ -294,20 +295,20 @@ def main():
         row = next((j for j in reversed(history) if j['stamp_ns'] <= sample['stamp_ns']), None)
         if row is None:
             counters['support_missing'] += 1
-            support_events.write(json.dumps({'stamp_ns':sample['stamp_ns'],'reason':'missing'})+'\n')
+            diagnostics_log.emit('support-events', {'stamp_ns':sample['stamp_ns'],'reason':'missing'})
             return
         lag = (sample['stamp_ns']-row['stamp_ns'])*1e-9
         diagnostics['support_joint_lag_ms'].append(lag*1000.)
         if lag > a.max_joint_extrapolation:
             counters['support_stale'] += 1
-            support_events.write(json.dumps({'stamp_ns':sample['stamp_ns'],'reason':'stale','lag_s':lag})+'\n')
+            diagnostics_log.emit('support-events', {'stamp_ns':sample['stamp_ns'],'reason':'stale','lag_s':lag})
             return
         position = {n: q + lag*row['velocity'][n] for n, q in row['position'].items()}
         rwp = mount @ rot_of(sample['q']).as_matrix()
         pelvis_v, reason = support.observe(now, rwp, sample['w'], position, row['velocity'])
         if pelvis_v is None:
             counters['support_' + reason] += 1
-            support_events.write(json.dumps({'stamp_ns':sample['stamp_ns'],'reason':reason,'lag_s':lag})+'\n')
+            diagnostics_log.emit('support-events', {'stamp_ns':sample['stamp_ns'],'reason':reason,'lag_s':lag})
             return
         site_v = pelvis_v + rwp @ np.cross(sample['w'], np.asarray(a.mount_xyz))
         height_site = support.accepted_relative_height + (rwp @ np.asarray(a.mount_xyz))[2]
@@ -324,8 +325,8 @@ def main():
             corrected_z = float(height_site - state['support_height_origin'])
             diagnostics['support_height_correction_m'].append(corrected_z - state['z'])
             state['z'] = corrected_z
-        support_events.write(json.dumps({'stamp_ns':sample['stamp_ns'],'reason':'accepted',
-            'lag_s':lag,'height_site_m':float(height_site),'site_velocity_m_s':site_v.tolist()})+'\n')
+        diagnostics_log.emit('support-events', {'stamp_ns':sample['stamp_ns'],'reason':'accepted',
+            'lag_s':lag,'height_site_m':float(height_site),'site_velocity_m_s':site_v.tolist()})
         state['x'][2:4] = site_v[:2]
         state['vz'] = float(site_v[2])
         state['support_last_accept'] = now
@@ -369,8 +370,7 @@ def main():
         print('initial body bias (conditional on rest and attitude) %s' %
               np.round(state['bias_body'], 5), flush=True)
 
-    frames = (a.out / 'packets.jsonl').open('x')
-    support_events = (a.out / 'support-events.jsonl').open('x') if support is not None else None
+    diagnostics_log = AsyncDiagnosticLog(a.out)
     started = time.monotonic()
     state['integrate'] = True
     last_publish = 0.
@@ -417,10 +417,9 @@ def main():
             if (support is not None and (selected_support_stamp is None or
                     imu['stamp_ns']*1e-9 - selected_support_stamp > .1)):
                 counters['support_output_stale'] += 1
-                frames.write(json.dumps({'event': 'support_output_stale', 't': now-started,
-                                         'imu_stamp_ns': int(imu['stamp_ns']),
-                                         'support_stamp_ns': (None if selected_support_stamp is None else
-                                             int(round(selected_support_stamp*1e9)))})+'\n')
+                diagnostics_log.emit('packets', {'event': 'support_output_stale', 't': now-started,
+                    'imu_stamp_ns': int(imu['stamp_ns']), 'support_stamp_ns':
+                    (None if selected_support_stamp is None else int(round(selected_support_stamp*1e9)))})
                 continue
             age = time.time() - imu['recv']
             timing['age_max'] = max(timing['age_max'], age)
@@ -504,7 +503,7 @@ def main():
                 validate_policy_packet(packet, names, time.time(), max_age=a.max_age)
             except ValueError as exc:
                 counters['invalid'] += 1
-                frames.write(json.dumps({'invalid': str(exc)}, allow_nan=False) + '\n')
+                diagnostics_log.emit('packets', {'invalid': str(exc)})
                 continue
             publish_start = time.monotonic()
             msg = String()
@@ -514,30 +513,27 @@ def main():
             counters['packets'] += 1
             timing['publish_ms_max'] = max(timing['publish_ms_max'], (time.monotonic() - publish_start) * 1e3)
             diagnostics['publish_work_ms'].append((time.perf_counter() - work_start) * 1e3)
-            frames.write(json.dumps({'t': now - started, 'position': packet['position'],
+            diagnostics_log.emit('packets', {'t': now - started, 'position': packet['position'],
                                      'stamp_ns': state_stamp_ns, 'quat_wxyz': packet['quat_wxyz'],
                                      'angular_velocity_body': packet['angular_velocity_body'],
                                      'velocity': packet.get('linear_velocity_world', [float(x[2]), float(x[3])]),
                                      'bias_body': state['bias_body'].tolist(),
                                      'support_age': (None if selected_support_stamp is None else
                                          imu['stamp_ns']*1e-9-selected_support_stamp),
-                                     'age': age}, allow_nan=False) + '\n')
+                                     'age': age})
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     except rclpy_implementation.RCLError:
         if rclpy.ok():
             raise
     finally:
-        frames.flush()
-        frames.close()
-        if support_events is not None:
-            support_events.close()
+        logger_status = diagnostics_log.close()
         node.destroy_node()
         rclpy.try_shutdown()
         elapsed = time.monotonic() - started
         summary = {'seconds': elapsed, 'session_id': session, 'topic': a.topic,
                    'publish_rate_hz': counters['packets'] / elapsed if elapsed else None,
-                   'counters': counters, 'timing': {k: float(v) for k, v in timing.items()},
+                   'counters': counters, 'diagnostic_logger': logger_status, 'timing': {k: float(v) for k, v in timing.items()},
                    'extrinsic_deg': [a.fix_deg_x, a.fix_deg_y, a.fix_deg_z],
                    'motor_output_enabled': False, 'control_ready': False,
                    'initial_velocity_assumed_zero': support is None,
@@ -564,6 +560,8 @@ def main():
                                   for key, values in diagnostics.items()}
         (a.out / 'summary.json').write_text(json.dumps(summary, allow_nan=False) + '\n')
         print(json.dumps(summary, allow_nan=False), flush=True)
+        if not logger_status['success']:
+            raise RuntimeError('Diagnostic logger failed; output evidence incomplete')
 
 
 if __name__ == '__main__':
