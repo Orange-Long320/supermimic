@@ -36,6 +36,8 @@ def main():
                    help='Model-only standing-goal elbow margin; does not alter source references or weights')
     p.add_argument('--preparation-elbow-margin',type=float,default=0.,
                    help='Model-only preparation target margin, separate from the policy goal margin')
+    p.add_argument('--waist-pitch-sdk-gains',action='store_true',
+                   help='Model-only active waist-pitch gain comparison; never a hardware gain approval')
     a=p.parse_args()
     if (a.out.exists() or not .1<=a.blend_seconds<=2 or not 5<=a.active_seconds<=30
             or not 0<=a.stand_elbow_margin<=.25 or not 0<=a.preparation_elbow_margin<=.25):
@@ -83,11 +85,17 @@ def main():
     initial_bottoms=[min(float(d.geom_xpos[g,2]-m.geom_size[g,0]) for g in gs) for gs in foot_geoms]
     default=np.array(c['action_default']);scale=np.array(c['action_scale'])
     kp=np.array([spec['stiffness'][x] for x in names]);kd=np.array([spec['damping'][x] for x in names])
+    gains=yaml.safe_load(a.prep_gains.read_text());special={x['name']:x for x in gains['default_joints']['joints']}
     if a.prep_gain_source=='policy':pk,pd=kp.copy(),kd.copy()
     else:
-        gains=yaml.safe_load(a.prep_gains.read_text());special={x['name']:x for x in gains['default_joints']['joints']}
         pk=np.array([special.get(x,{}).get('kp',gains['default_kp']) for x in names])
         pd=np.array([special.get(x,{}).get('kd',gains['default_kd']) for x in names])
+    gain_override={}
+    if a.waist_pitch_sdk_gains:
+        name='waist_pitch_joint';j=names.index(name)
+        gain_override[name]=dict(original_kp=float(kp[j]),original_kd=float(kd[j]),
+            candidate_kp=float(special[name]['kp']),candidate_kd=float(special[name]['kd']))
+        kp[j]=special[name]['kp'];kd[j]=special[name]['kd']
     policy=TorchScriptPolicy(a.policy)
     tracker=SkillGoal(a.dataset,a.profile,d.qpos[:3].copy(),d.qpos[3:7].copy())
     goal_override={}
@@ -157,6 +165,7 @@ def main():
         prep_gain_source=a.prep_gain_source,blend_seconds=a.blend_seconds,
         stand_goal_override_model_only=goal_override,
         preparation_override_model_only=preparation_override,
+        policy_gain_override_model_only=gain_override,
         simulation_only_guard=dict(target_step_rad=.3,max_tilt_rad=.35,max_angular_speed_rad_s=2.),
         failure=failure,frames=len(rows),active_seconds=active_s,
         saturated_substep_fraction=fraction,maximum_nonfoot_contact_n=peak_other,
