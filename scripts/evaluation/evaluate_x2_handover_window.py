@@ -34,9 +34,11 @@ def main():
     p.add_argument('--active-seconds',type=float,default=5.)
     p.add_argument('--stand-elbow-margin',type=float,default=0.,
                    help='Model-only standing-goal elbow margin; does not alter source references or weights')
+    p.add_argument('--preparation-elbow-margin',type=float,default=0.,
+                   help='Model-only preparation target margin, separate from the policy goal margin')
     a=p.parse_args()
     if (a.out.exists() or not .1<=a.blend_seconds<=2 or not 5<=a.active_seconds<=30
-            or not 0<=a.stand_elbow_margin<=.25):
+            or not 0<=a.stand_elbow_margin<=.25 or not 0<=a.preparation_elbow_margin<=.25):
         raise ValueError('New output and bounded diagnostic duration required')
     a.out.mkdir(parents=True)
     if sha(a.policy)!='4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c':
@@ -61,6 +63,12 @@ def main():
     if any(not gs for gs in foot_geoms) or any(m.geom_type[g]!=mujoco.mjtGeom.mjGEOM_SPHERE for gs in foot_geoms for g in gs):
         raise ValueError('This diagnostic requires the verified official foot spheres')
     target=np.array(c['startup']['position']);lower=np.array(c['measured_lower_candidate']);upper=np.array(c['measured_upper_candidate'])
+    preparation_override={}
+    if a.preparation_elbow_margin:
+        for name in ('left_elbow_joint','right_elbow_joint'):
+            j=names.index(name);desired=lower[j]+a.preparation_elbow_margin
+            if not lower[j]<desired<upper[j]:raise ValueError('Invalid model preparation margin')
+            preparation_override[name]=dict(original=float(target[j]),candidate=float(desired));target[j]=desired
     start=target.copy() if a.start=='reference' else np.array(snapshot['q'])
     quat=np.array(c['startup']['root_quat_wxyz'] if a.start=='reference' else snapshot['imu']['orientation_wxyz'])
     if abs(np.linalg.norm(quat)-1)>1e-3:raise ValueError('Invalid initial IMU/reference orientation')
@@ -148,6 +156,7 @@ def main():
         support_model='Ground contacts only; fall-arrest harness supplies no balance force',root_fixed=False,
         prep_gain_source=a.prep_gain_source,blend_seconds=a.blend_seconds,
         stand_goal_override_model_only=goal_override,
+        preparation_override_model_only=preparation_override,
         simulation_only_guard=dict(target_step_rad=.3,max_tilt_rad=.35,max_angular_speed_rad_s=2.),
         failure=failure,frames=len(rows),active_seconds=active_s,
         saturated_substep_fraction=fraction,maximum_nonfoot_contact_n=peak_other,
