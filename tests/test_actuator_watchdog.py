@@ -9,7 +9,7 @@ class ActuatorWatchdogTests(unittest.TestCase):
         return w
 
     def accept(self,w,t=1.001,seq=0,state=0,age=.002,challenge=None):
-        c=challenge or w.challenge(t-.001)
+        c=challenge or w.challenge(t-.0005)
         return w.accept(session=c.session,nonce=c.nonce,command_sequence=seq,
                         state_sequence=state,state_age=age,now=t)
 
