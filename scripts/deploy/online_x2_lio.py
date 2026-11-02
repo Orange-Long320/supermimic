@@ -8,6 +8,7 @@ from bisect import bisect_left
 from collections import Counter, deque
 import json
 import gc
+import resource
 from pathlib import Path
 import subprocess
 import time
@@ -25,6 +26,8 @@ from supermimic.deploy.async_diagnostic_log import AsyncDiagnosticLog
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--freeze-startup-gc', action='store_true',
+                        help='Freeze initialized long-lived objects before callbacks; automatic GC remains enabled')
     for key in ('binary', 'urdf', 'profile', 'extrinsics', 'out'):
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--seconds', type=float, default=0., help='0 keeps the diagnostic running until stopped')
@@ -98,6 +101,7 @@ def main():
             self.stage_wall_max = Counter(); self.stage_cpu_max = Counter(); self.slow_stages = deque(maxlen=12)
             self.stage_slowest = {}
             self.gc_started = None
+            self.gc_frozen_objects = 0
             self.diagnostic_log = AsyncDiagnosticLog(args.out)
             best = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
             imu_qos = QoSProfile(depth=400, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
@@ -381,6 +385,9 @@ def main():
                 result['timing_diagnostics']={'wall_max_ms':dict(self.stage_wall_max),
                     'thread_cpu_max_ms':dict(self.stage_cpu_max),'recent_slow_stages':list(self.slow_stages),
                     'slowest_by_stage':self.stage_slowest.copy()}
+                result['timing_diagnostics'].update(gc_stats=gc.get_stats(),
+                    startup_frozen_objects=self.gc_frozen_objects,
+                    max_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
             msg = String(); msg.data = json.dumps(result, allow_nan=False); self.status_pub.publish(msg)
             t=self.timing_start()
             self.diagnostic_log.append('status',msg.data)
@@ -407,6 +414,12 @@ def main():
     import os
     (args.out/'bridge.pid').write_text(str(os.getpid())+'\n')
     try:
+        if args.freeze_startup_gc:
+            if gc.get_freeze_count():
+                raise RuntimeError('Unexpected pre-existing GC freeze')
+            gc.collect()
+            gc.freeze()
+            node.gc_frozen_objects = gc.get_freeze_count()
         while rclpy.ok() and (args.seconds == 0 or time.monotonic()-node.started < args.seconds):
             node.diagnostic_log.check()
             timing=node.timing_start()
@@ -423,6 +436,7 @@ def main():
         except subprocess.TimeoutExpired: node.process.kill(); node.process.wait()
         log.close(); executor.shutdown(timeout_sec=1.); node.destroy_node(); rclpy.try_shutdown()
         node.diagnostic_log.close()
+        if node.gc_frozen_objects: gc.unfreeze()
 
 
 if __name__ == '__main__': main()
