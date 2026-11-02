@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from supermimic.deploy.x2_command_groups import JOINT_GROUPS
+from test_failsafe_evidence import fixture as failsafe_fixture
 
 module_path=Path(__file__).resolve().parents[1]/'scripts/deploy/x2_hardware_publisher.py'
 spec=importlib.util.spec_from_file_location('x2_hardware_publisher',module_path)
@@ -24,6 +25,7 @@ class HardwareContractTests(unittest.TestCase):
               'joint_names':names,'command_lower':[-1.]*n,'command_upper':[1.]*n,'measured_lower':[-1.]*n,
               'measured_upper':[1.]*n,'max_target_step':[.1]*n,'max_stiffness':[100.]*n,'max_damping':[10.]*n,
               'fallback_damping':[3.]*n,'max_state_age':.05,'max_target_age':.05,'output_hz':100}
+        failsafe_fixture(folder,plan)
         pp=folder/'plan.json';pp.write_text(json.dumps(plan));cp=folder/'consent.json'
         cp.write_text(json.dumps({'user_confirmed_motor_power':True,'plan_sha256':mod.digest(pp),'confirmed_wall':100.}))
         return pp,cp,ep,plan

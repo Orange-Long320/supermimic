@@ -16,6 +16,7 @@ import time
 
 from supermimic.deploy.supervision import MotorPowerConsent,TargetLeaseSupervisor
 from supermimic.deploy.x2_command_groups import JOINT_GROUPS,group_command
+from supermimic.deploy.failsafe_evidence import require_independent_failsafe
 
 POLICY_SHA='4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c'
 
@@ -54,6 +55,7 @@ def validated_contract(plan_path,consent_path,now,*,isolated=False):
     if not all(type(plan.get(k)) in (int,float) and math.isfinite(plan[k]) and 0<plan[k]<=.05
                for k in ('max_state_age','max_target_age')):raise ValueError('Invalid timeout')
     if plan.get('output_hz') not in (100,200):raise ValueError('Unsupported command frequency')
+    if not isolated:require_independent_failsafe(plan,now)
     return plan
 
 
