@@ -28,6 +28,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--freeze-startup-gc', action='store_true',
                         help='Freeze initialized long-lived objects before callbacks; automatic GC remains enabled')
+    parser.add_argument('--backend-nice', type=int, choices=(0, 10), default=10,
+                        help='CPU nice for the owned diagnostic FAST-LIO child; 0 uses ordinary priority')
     for key in ('binary', 'urdf', 'profile', 'extrinsics', 'out'):
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--seconds', type=float, default=0., help='0 keeps the diagnostic running until stopped')
@@ -408,7 +410,7 @@ def main():
             node.gc_started=None
     if args.timing_diagnostics: gc.callbacks.append(gc_timing)
     executor = SingleThreadedExecutor(); executor.add_node(node)
-    command = ['nice', '-n', '10', str(args.binary.resolve()), '--ros-args', '--params-file', str(config.resolve()),
+    command = (['nice', '-n', '10'] if args.backend_nice else []) + [str(args.binary.resolve()), '--ros-args', '--params-file', str(config.resolve()),
                '-r', '__node:=supermimic_fastlio_online', '-r', '__ns:='+prefix,
                '-r', '/Odometry:='+prefix+'/imu_odometry', '-r', '/tf:='+prefix+'/tf',
                '-r', '/path:='+prefix+'/path', '-r', '/cloud_registered:='+prefix+'/registered',
