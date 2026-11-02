@@ -22,16 +22,22 @@ export SM_ROBOT=x2_ultra SM_ROBOT_SPEC="$release/fk-only/profile.json"
 mkdir "$trial"
 mkdir "$trial/src"
 cp -a "$release/source/src/." "$trial/src/"
-cp "${PATCHED_CONTROLLER:-$trial/early_handover.py}" "$trial/src/supermimic/deploy/early_handover.py"
+cp "${PATCHED_CONTROLLER:-$script/early_handover.py}" "$trial/src/supermimic/deploy/early_handover.py"
 cd "$trial"
+
+echo "== capture read-only measured pose =="
+env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/capture_x2_entry_snapshot.py" \
+  --candidate "$release/startup-candidate.json" --out "$trial/snapshot.json"
 
 echo "== build contract =="
 env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/build_x2_11500_trial.py" --release "$release" --out "$trial/contract" \
-  --max-trial-seconds 30 --prep-seconds 10 > "$trial/contract.log" 2>&1
+  --max-trial-seconds 30 --prep-seconds 10 --snapshot "$trial/snapshot.json" > "$trial/contract.log" 2>&1
 python3 - "$trial" <<'PY'
 import json,sys,pathlib
 t=pathlib.Path(sys.argv[1]); d=json.loads((t/'contract.log').read_text())
-print(json.dumps({k:d[k] for k in ('plan_sha256','prep_seconds','max_tick_gap','max_target_step')},indent=2))
+keys=('plan_sha256','prep_seconds','max_tick_gap','max_target_step','max_tilt','max_tilt_delta')
+print(json.dumps({k:d.get(k) for k in keys},indent=2))
+print('bound extensions:',json.dumps(d.get('bound_extensions'),indent=1))
 PY
 plan=$trial/contract/plan.json
 consent=$trial/contract/consent.json

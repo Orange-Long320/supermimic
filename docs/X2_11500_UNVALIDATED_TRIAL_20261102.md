@@ -24,16 +24,27 @@
 | r2 | 状态生产者挂了 r3 源码路径，`supermimic.deploy.online_inertial` 缺失而退出；无电机命令 |
 | r3 | 首次发出准备目标后控制器立即锁存 `Tilt or angular speed outside contract` |
 | r4 | 加入相对倾角判据后，控制器构造即拒绝：实测姿态越界 |
+| r5 | 运行脚本的补丁控制器路径指向运行目录，`early_handover.py` 在试验根目录，未启动 |
+| r6 | 用户授权扩边后首次起步：准备轨迹以 0.335 rad/s 正常运动，随即锁存 `policy packet stale or future` |
+| r7 | 把三个时效门限统一放宽到 0.35 s 后，发布器契约校验直接拒绝 `Invalid timeout`；零电机命令 |
 
 r3 的实际动作：8.0 秒开始、10.7 秒结束，峰值 3.47 rad/s（左肘），末端与启动姿态的偏差从 0.951 rad 增大到 2.017 rad。这是故障锁存后发布器转入零刚度阻尼、手臂在吊挂下自行下垂，不是准备轨迹；准备轨迹的速度上限是 0.35 rad/s。角速度全程最大仅 1.09 rad/s，**故障来自倾角判据**：我把 `max_tilt` 设为 0.35，而测量稳态倾角是 0.3548，等于每帧都越限。这是门限设置错误，不能记作策略或动力学结论。
 
 r4 拒绝原因（实测关节值对照）：`left_knee_joint=-0.0659`，URDF 与模型下限均为 0.0；`waist_pitch_joint=0.3479`，URDF 上限 0.314（模型上限 0.4887）。膝关节读数超出所有已记录范围，属编码器零位/方向未验证。未放宽测量边界去容纳该读数。
 
+## 用户授权扩边后的尝试（r5–r7）
+
+用户选择放宽测量边界以容纳实测姿态。构建器新增 `--snapshot` 与 `--extend-margin`：只在越界关节上把边界扩到实测值外 0.05 rad，并把每个关节的原值、实测值和扩展值逐项写入计划与 `unvalidated_items`。r6 的扩展项为 `left_knee_joint` 下限与 `waist_pitch_joint` 上限。
+
+r6 是本轮第一次真正起步的准备动作：关节以峰值 0.3356 rad/s 向启动姿态移动（准备轨迹上限 0.35 rad/s），行程约 0.085 rad，随后锁存 `policy packet stale or future`。原因是 worker 的包时效上限硬编码 50 ms，而实测状态链有 33 次 >30 ms、最大 244 ms 的到达缺口；`validate_policy_packet` 在进入控制器前就拒绝。
+
+r7 把 `max_state_age`、`max_target_age`、`max_tick_gap` 统一设为 0.35 s 并改为计划驱动，但发布器门禁中仍硬编码 `0<max_state_age<=0.05`，两个进程都在契约校验阶段退出，**未发送任何电机命令**。该 50 ms 上限是传输层既有设计约束，放宽它需要修改门禁常量，本轮没有继续改。
+
 ## 当前状态与证据
 
 四组命令话题发布者 0，无本项目进程，原生 MC `Idel`；关节在 4 秒内漂移 0.0。手臂当前偏离参考启动姿态约 2 rad，膝关节读数仍为负。
 
-PC2 容器路径：`/home/agi/lxh-supermimic/trials/11500_unvalidated_20261102_r1/`（`run-prep-r2`/`r3`/`r4`、`contract-dryrun`）；在线定位会话在各 `run-prep-r*/state/`；关节记录 `run-prep-r3/joint-recording.json`；版本化脚本：`scripts/deploy/build_x2_11500_trial.py`、`run_x2_11500_prep.sh`、`run_x2_11500_trial.sh`、`record_x2_joint_states.py`、`probe_x2_state_rate.py`、`check_x2_trial_contract.py`。运行前需把打过补丁的 `early_handover.py` 放到试验目录，脚本用 `PATCHED_CONTROLLER` 或 `$trial/early_handover.py` 覆盖到源码副本。
+PC2 容器路径：`/home/agi/lxh-supermimic/trials/11500_unvalidated_20261102_r1/`（`run-prep-r2`–`r7`、`contract-dryrun`）；在线定位会话在各 `run-prep-r*/state/`；关节记录 `run-prep-r3/joint-recording.json`；版本化脚本：`scripts/deploy/build_x2_11500_trial.py`、`run_x2_11500_prep.sh`、`run_x2_11500_trial.sh`、`record_x2_joint_states.py`、`probe_x2_state_rate.py`、`check_x2_trial_contract.py`。运行前需把打过补丁的 `early_handover.py` 放到试验目录，脚本用 `PATCHED_CONTROLLER` 或 `$trial/early_handover.py` 覆盖到源码副本。
 
 ## 仍未解决
 
@@ -41,3 +52,4 @@ PC2 容器路径：`/home/agi/lxh-supermimic/trials/11500_unvalidated_20261102_r
 2. 准备姿态动力学仍未通过；两次电机尝试都没有完成从当前姿态到启动姿态的过渡。
 3. 命令合同仍是设备 URDF 范围替代，HAL 实际 PD 目标允许范围未确认。
 4. 策略接管未执行；状态链的人工监督路径未验收。
+5. 准备动作能否在 50 ms 时效约束内连续运行，取决于那 33 次/45 s 的状态缺口；这是测量链问题，不是策略问题。

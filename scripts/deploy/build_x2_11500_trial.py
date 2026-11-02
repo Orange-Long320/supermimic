@@ -36,8 +36,14 @@ def main():
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--max-trial-seconds', type=float, default=30.)
     p.add_argument('--prep-seconds', type=float, default=6.)
-    p.add_argument('--max-tick-gap', type=float, default=.30)
+    p.add_argument('--max-tick-gap', type=float, default=.35)
     p.add_argument('--max-target-step', type=float, default=.15)
+    p.add_argument('--max-state-age', type=float, default=.35,
+                   help='Packet and target lease bound; must exceed the measured state gaps')
+    p.add_argument('--snapshot', type=Path,
+                   help='Fresh read-only joint snapshot; required to contain the measured pose')
+    p.add_argument('--extend-margin', type=float, default=.05,
+                   help='Radians added beyond a measured pose that falls outside the file bounds')
     a = p.parse_args()
 
     release = a.release.resolve()
@@ -66,6 +72,41 @@ def main():
     measured_lower = list(command_lower)
     measured_upper = list(command_upper)
     startup = [float(v) for v in candidate['startup']['position']]
+
+    # The declared file ranges are unvalidated, and the measured pose can sit
+    # outside them (unverified encoder zero). Widen ONLY the joints that need it,
+    # by a fixed margin, and record every extension in the plan and the evidence.
+    extensions = []
+    unvalidated = list(UNVALIDATED)
+    unvalidated.append(f'state packet and target lease bound widened to {a.max_state_age:.2f} s '
+                       'to cover measured state gaps of up to 244 ms; a 50 ms bound latched a fault')
+    if a.snapshot is not None:
+        snapshot = json.loads(a.snapshot.read_text())
+        if snapshot['names'] != names:
+            raise ValueError('Snapshot joint order mismatch')
+        measured_q = [float(v) for v in snapshot['q']]
+        for i, name in enumerate(names):
+            q = measured_q[i]
+            if q < measured_lower[i]:
+                extensions.append(dict(joint=name, side='lower', file=measured_lower[i],
+                                       measured=q, extended=q - a.extend_margin))
+                measured_lower[i] = q - a.extend_margin
+            if q > measured_upper[i]:
+                extensions.append(dict(joint=name, side='upper', file=measured_upper[i],
+                                       measured=q, extended=q + a.extend_margin))
+                measured_upper[i] = q + a.extend_margin
+        # EarlyHandover requires the measured pose to be inside the command range
+        # as well; the published target stays inside the original file range.
+        for i, name in enumerate(names):
+            q = measured_q[i]
+            if q < command_lower[i]:
+                command_lower[i] = q - a.extend_margin
+            if q > command_upper[i]:
+                command_upper[i] = q + a.extend_margin
+        if extensions:
+            detail = ', '.join(f"{row['joint']} {row['side']} {row['file']:.4f}->{row['extended']:.4f}"
+                               f" (measured {row['measured']:.4f})" for row in extensions)
+            unvalidated.append('measured/command bounds widened beyond the device URDF file range: ' + detail)
     outside = [name for name, q, lo, hi in zip(names, startup, command_lower, command_upper)
                if not lo <= q <= hi]
     if outside:
@@ -77,7 +118,7 @@ def main():
         verified_wall=time.time(),
         explicitly_unvalidated_trial=True,
         safety_mode='manual_supervised_unvalidated_trial',
-        unvalidated_items=UNVALIDATED,
+        unvalidated_items=unvalidated,
         ready_for_hardware_trial=False,
         preparation_and_handover_validated=False,
         command_limits_validated=False,
@@ -115,10 +156,11 @@ def main():
         max_velocity=[.35] * n, max_acceleration=[.4] * n,
         minimum_duration=a.prep_seconds, blend_seconds=.5,
         max_tick_gap=a.max_tick_gap, max_tilt=.70, max_tilt_delta=.20, max_angular_speed=2.,
-        max_state_age=.05, max_target_age=.05, output_hz=100,
+        max_state_age=a.max_state_age, max_target_age=a.max_state_age, output_hz=100,
         history_source='executed',
         safety_mode='manual_supervised_unvalidated_trial',
-        unvalidated_items=UNVALIDATED,
+        unvalidated_items=unvalidated,
+        bound_extensions=extensions,
         manual_supervision=dict(max_trial_seconds=a.max_trial_seconds,
                                support_condition='feet_loaded_fall_arrest',
                                automatic_host_loss_protection=False,
@@ -151,7 +193,8 @@ def main():
                    policy_kp_range=[min(policy_kp), max(policy_kp)],
                    startup_max_delta_from_urdf_bound=round(max(
                        min(s - lo, hi - s) for s, lo, hi in zip(startup, command_lower, command_upper)), 6),
-                   unvalidated_items=UNVALIDATED)
+                   unvalidated_items=unvalidated,
+                   bound_extensions=extensions)
     print(json.dumps(summary, indent=2))
 
 

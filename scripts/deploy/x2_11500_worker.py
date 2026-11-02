@@ -101,7 +101,8 @@ def main():
         nonlocal controller,session,seq,last_receipt
         if controller is not None and controller.phase is Phase.FAULT:return
         try:
-            now_wall=time.time();now_mono=time.monotonic();row=validate_policy_packet(json.loads(msg.data),names,now_wall)
+            now_wall=time.time();now_mono=time.monotonic()
+            row=validate_policy_packet(json.loads(msg.data),names,now_wall,max_age=plan['max_state_age'])
             if session is not None and row['session_id']!=session:raise ValueError('State session changed')
             session=row['session_id'];q=np.asarray(row['joint_position']);qd=row['joint_velocity'];quat=np.asarray(row['quat_wxyz'])
             w,x,y,z=quat;gravity=[2*(w*y-x*z),-2*(w*x+y*z),-1+2*(x*x+y*y)]

@@ -22,11 +22,18 @@ export LD_LIBRARY_PATH="$lio/install/lib:${LD_LIBRARY_PATH:-}"
 export SM_ROBOT=x2_ultra SM_ROBOT_SPEC="$release/fk-only/profile.json"
 
 mkdir "$trial"
+mkdir "$trial/src"
+cp -a "$release/source/src/." "$trial/src/"
+cp "${PATCHED_CONTROLLER:-$script/early_handover.py}" "$trial/src/supermimic/deploy/early_handover.py"
 cd "$trial"
+
+echo "== capture read-only measured pose =="
+env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/capture_x2_entry_snapshot.py" \
+  --candidate "$release/startup-candidate.json" --out "$trial/snapshot.json"
 
 echo "== build contract =="
 env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/build_x2_11500_trial.py" --release "$release" --out "$trial/contract" \
-  --max-trial-seconds "$seconds" --prep-seconds 6 > "$trial/contract.log" 2>&1
+  --max-trial-seconds "$seconds" --prep-seconds 10 --snapshot "$trial/snapshot.json" > "$trial/contract.log" 2>&1
 cat "$trial/contract.log"
 
 plan=$trial/contract/plan.json
