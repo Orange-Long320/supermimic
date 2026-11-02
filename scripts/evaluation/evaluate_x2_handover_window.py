@@ -69,10 +69,13 @@ def main():
                    help='Model-only inverse-statics support torque, faded out during handover')
     p.add_argument('--preparation-only-seconds',type=float,default=0.,
                    help='Diagnostic preparation window without requesting policy handover (0 uses normal test)')
+    p.add_argument('--suspended-root-model',action='store_true',
+                   help='Preparation-only counterfactual: rigid world-to-pelvis support, feet clear of floor; not an actual sling model')
     a=p.parse_args()
     if (a.out.exists() or not .1<=a.blend_seconds<=2 or not 5<=a.active_seconds<=30
             or not 0<=a.stand_elbow_margin<=.25 or not 0<=a.preparation_elbow_margin<=.25
-            or not (a.preparation_only_seconds==0 or .2<=a.preparation_only_seconds<=8.)):
+            or not (a.preparation_only_seconds==0 or .2<=a.preparation_only_seconds<=20.)
+            or (a.suspended_root_model and not a.preparation_only_seconds)):
         raise ValueError('New output and bounded diagnostic duration required')
     a.out.mkdir(parents=True)
     if sha(a.policy)!='4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c':
@@ -82,7 +85,13 @@ def main():
     snapshot=json.loads(a.snapshot.read_text());names=spec['joint_names'];n=len(names)
     if n!=31 or c['joint_names']!=names or snapshot['names']!=names:
         raise ValueError('Joint order mismatch')
-    m=mujoco.MjModel.from_xml_path(str(a.scene));d=mujoco.MjData(m)
+    if a.suspended_root_model:
+        model_spec=mujoco.MjSpec.from_file(str(a.scene));support=model_spec.add_equality()
+        support.name='diagnostic_rigid_pelvis_support';support.type=mujoco.mjtEq.mjEQ_WELD
+        support.objtype=mujoco.mjtObj.mjOBJ_BODY;support.name1='world';support.name2='pelvis'
+        m=model_spec.compile()
+    else:m=mujoco.MjModel.from_xml_path(str(a.scene))
+    d=mujoco.MjData(m)
     ids=np.array([mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_JOINT,x) for x in names])
     if min(ids)<0 or m.nu!=n:raise ValueError('Unexpected joints or actuators')
     qa=m.jnt_qposadr[ids];va=m.jnt_dofadr[ids]
@@ -112,6 +121,10 @@ def main():
     mujoco.mj_forward(m,d)
     bottoms=[min(float(d.geom_xpos[g,2]-m.geom_size[g,0]) for g in gs) for gs in foot_geoms]
     d.qpos[2]-=min(bottoms)+.0002
+    if a.suspended_root_model:
+        d.qpos[2]+=.1
+        eid=mujoco.mj_name2id(m,mujoco.mjtObj.mjOBJ_EQUALITY,'diagnostic_rigid_pelvis_support')
+        m.eq_data[eid,3:10]=d.qpos[:7]
     mujoco.mj_forward(m,d)
     initial_root=d.qpos[:7].copy()
     initial_bottoms=[min(float(d.geom_xpos[g,2]-m.geom_size[g,0]) for g in gs) for gs in foot_geoms]
@@ -159,7 +172,11 @@ def main():
             out=controller.step(now,d.qpos[:3].copy(),quat,q,qd,velocity[:3],gravity)
             feedforward=np.zeros(n)
             if a.preparation_gravity_compensation and controller.phase is not Phase.ACTIVE:
-                feedforward,support_diagnostic=static_support_effort(m,d,foot_geoms,va)
+                if a.suspended_root_model:
+                    static=mujoco.MjData(m);static.qpos[:]=d.qpos;mujoco.mj_forward(m,static)
+                    feedforward=static.qfrc_bias[va].copy()
+                    support_diagnostic=dict(model_only='Gravity with rigid pelvis support, no foot reactions')
+                else:feedforward,support_diagnostic=static_support_effort(m,d,foot_geoms,va)
                 if controller.phase is Phase.HANDOVER:
                     s=float(np.clip((now-controller.blend_started)/controller.blend_seconds,0.,1.))
                     feedforward*=1-(10*s**3-15*s**4+6*s**5)
@@ -201,13 +218,18 @@ def main():
         source_sha256={k:sha(getattr(a,k)) for k in ('scene','profile','dataset','policy','candidate','snapshot','prep_gains') if k!='dataset'},
         start=a.start,initial_root_model_assumption=initial_root.tolist(),initial_foot_bottoms_m=initial_bottoms,
         calibration_validated=False,payload_model='No additional payload; not a measured load model',
-        support_model='Ground contacts only; fall-arrest harness supplies no balance force',root_fixed=False,
+        support_model=('Counterfactual rigid world-to-pelvis weld; not measured sling geometry or compliance'
+                       if a.suspended_root_model else 'Ground contacts only; fall-arrest harness supplies no balance force'),
+        root_fixed=a.suspended_root_model,
         prep_gain_source=a.prep_gain_source,blend_seconds=a.blend_seconds,
         stand_goal_override_model_only=goal_override,
         preparation_override_model_only=preparation_override,
         policy_gain_override_model_only=gain_override,
         preparation_gravity_compensation_model_only=a.preparation_gravity_compensation,
         preparation_only_seconds=a.preparation_only_seconds,
+        final_preparation_error_rad=None if not rows else float(np.max(np.abs(np.asarray(rows[-1]['q'])-target))),
+        final_joint_speed_rad_s=None if not rows else float(np.max(np.abs(rows[-1]['qd']))),
+        max_root_translation_from_initial_m=max((float(np.linalg.norm(np.array(r['root'][:3])-initial_root[:3])) for r in rows),default=0.),
         simulation_only_guard=dict(target_step_rad=.3,max_tilt_rad=.35,max_angular_speed_rad_s=2.),
         failure=failure,frames=len(rows),active_seconds=active_s,
         saturated_substep_fraction=fraction,maximum_nonfoot_contact_n=peak_other,
