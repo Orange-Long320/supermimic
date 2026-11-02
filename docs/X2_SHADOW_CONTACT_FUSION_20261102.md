@@ -107,3 +107,37 @@ x = +13.11°, y = −1.04°, z = −0.12°   残差 0.0000 m/s²
 静止位置漂移在三者中都已很小（零速更新主导），**区别体现在偏置状态**：外参正确时偏置收敛到零，说明物理模型自洽；外参错误时偏置停在 2.22，说明滤波器在持续抵消一个真实误差。后者在姿态改变时（转向）会失效，因为世界系偏置不会随姿态旋转。
 
 参数入口：`--auto-mount`（自动拟合）或 `--fix-deg-x/--fix-deg-y/--fix-deg-z`（手调世界系角度）。`achieved_rate_hz` 字段在早期版本包含标定窗口，按帧统计为准。
+
+## 电机部署准备：用 500 Hz IMU 状态包替换雷达链路
+
+用户授权电机与策略部署，并确认现场为**已吊挂防跌、双脚承重、有人守急停**，首次范围限定为**只做准备姿态接管、≤30 秒、不发策略目标**。
+
+### 状态包生产者已验证
+
+`scripts/deploy/publish_pelvis_packet.py` 用同一套 500 Hz 卡尔曼 + 固定外参生成 schema 2 状态包，发布到 `/supermimic/x2_online_lio/policy_state`，`motor_output_enabled=false`。本进程不创建任何电机发布者。
+
+| 指标 | 实测 |
+| --- | --- |
+| 发布速率 | 49.1 Hz |
+| 无效包 | **0 / 1477** |
+| 包年龄最大 | 7.8 ms（消费端门限 50 ms） |
+| 发布耗时最大 | 1.9 ms |
+
+首版曾出现 856 个无效包，原因全部是 `policy packet future joint acquisition`：关节帧头比 IMU 帧头新。修正为**取五路时间戳的最大值作为状态时间**，此后 0 无效。这直接对应上次 r6 失败的 `policy packet stale or future`（旧链路最大 244 ms 缺口，门限 50 ms）。
+
+### 计划已构建，待审阅后启动
+
+`trials/11500_prep_imu_20261102_r1/run-r1/contract/plan.json`：
+
+```
+plan_sha256                3720f4ecd0bf3d9b…37ef58
+max_trial_seconds          30
+prep_seconds               10
+max_tick_gap               0.3
+max_target_step            0.15
+startup_max_delta_from_urdf_bound   2.460847
+```
+
+计划内 `unvalidated_items` 仍引用旧状态链的描述（"49.8 Hz、33 次 >30 ms、最大 244 ms"），实际本轮使用的是新生产者；该文本未改写，以免把未经运动验证的新链路写成已验证。`startup_max_delta_from_urdf_bound=2.46 rad` 与仓库记录的"手臂当前偏离参考启动姿态约 2 rad"一致，10 秒准备在 0.35 rad/s 上限内可覆盖，但接近上限。
+
+启动入口 `trials/11500_prep_imu_20261102_r1/run-prep-imu.sh`：状态生产者 → 硬件发布器 → 关节只读记录 → 准备 worker，26 秒后停止发布并把最后指令留在 HAL。**尚未执行电机部分。**

@@ -1,0 +1,46 @@
+{
+  "name": "x2_shadow_imu_kalman_500hz",
+  "date": "2026-11-02",
+  "scope": "read-only shadow estimator; no policy, no publisher, no motor output",
+  "source": "scripts/deploy/shadow_imu_kalman.py",
+  "imu_topic": "/aima/hal/imu/torso/state",
+  "integration": {
+    "mode": "callback",
+    "qos_depth": 20,
+    "achieved_rate_hz_measured": 500.2,
+    "max_sample_age_s": 0.05
+  },
+  "attitude_extrinsic_world_frame_deg": {
+    "x": 13.11,
+    "y": -1.04,
+    "z": -0.12,
+    "fitted_from": "3 s static window, rotation mapping measured gravity direction onto +z",
+    "residual_m_s2": 0.0,
+    "note": "effective axis is x; a y-only correction leaves 2.22 m/s^2 in the bias state"
+  },
+  "filter": {
+    "state": ["px", "py", "vx", "vy", "bx", "by"],
+    "velocity_sigma": 0.02,
+    "still_accel_tol_m_s2": 0.5,
+    "still_gyro_tol_rad_s": 0.08,
+    "still_hold_s": 0.2,
+    "init_bias_seconds": 3.0
+  },
+  "validated_conditions": {
+    "robot_state": "static, both sessions",
+    "static_drift_max_m_per_30s": 0.00008,
+    "converged_bias_norm_m_s2": 0.0004
+  },
+  "not_validated": [
+    "any motion: walking, turning, stepping",
+    "translation drift while the zero-velocity update is inactive",
+    "height or 3D position",
+    "behavior under waist motion (the extrinsic is fitted at one waist pose)"
+  ],
+  "explicitly_not_included": [
+    "policy inference",
+    "control-handover",
+    "motor or actuator publishing",
+    "hardware watchdog"
+  ]
+}
