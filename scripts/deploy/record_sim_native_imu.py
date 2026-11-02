@@ -2,7 +2,7 @@
 
 Purpose: the deployed state chain keeps only the latest IMU message and forwards
 it at the 50 Hz control tick, so the strapdown integrator never sees the
-high-frequency content of foot-strike impacts. This recorder stores every native
+high-frequency content of foot-strike impacts. This recorder attempts to store each received native
 sample with both the message header stamp and the local receive time, so the
 same session can be integrated at native rate and at 50 Hz snapshots for a
 direct comparison. Read-only: it subscribes and writes files only.
@@ -52,8 +52,8 @@ def main():
     class Recorder(Node):
         def __init__(self):
             super().__init__('supermimic_native_imu_recorder')
-            # Deep best-effort queue: a recorder that drops samples would bias
-            # the very comparison it is collecting.
+            # Best-effort buffering cannot guarantee delivery or callback throughput;
+            # compare against independent subscribers when assessing missing samples.
             qos = QoSProfile(depth=400, reliability=ReliabilityPolicy.BEST_EFFORT,
                              durability=DurabilityPolicy.VOLATILE)
             self.subs = [

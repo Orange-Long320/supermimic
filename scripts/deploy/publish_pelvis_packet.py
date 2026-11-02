@@ -401,6 +401,10 @@ def main():
             if (support is not None and (selected_support_stamp is None or
                     imu['stamp_ns']*1e-9 - selected_support_stamp > .1)):
                 counters['support_output_stale'] += 1
+                frames.write(json.dumps({'event': 'support_output_stale', 't': now-started,
+                                         'imu_stamp_ns': int(imu['stamp_ns']),
+                                         'support_stamp_ns': (None if selected_support_stamp is None else
+                                             int(round(selected_support_stamp*1e9)))})+'\n')
                 continue
             age = time.time() - imu['recv']
             timing['age_max'] = max(timing['age_max'], age)

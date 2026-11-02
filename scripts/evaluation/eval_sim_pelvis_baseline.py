@@ -59,9 +59,29 @@ def main():
     if end-start < 5:
         raise ValueError('Insufficient shared time window')
     grid = np.arange(start, end, .02)
+    original_grid_count = len(grid)
+    # Do not score invented estimates across missing output periods.
+    valid_grid = np.ones(len(grid), dtype=bool)
+    report['output_gaps'] = {}
+    for name, (times, _, _) in variants.items():
+        intervals = np.diff(times)
+        report['output_gaps'][name] = {'max_s': float(np.max(intervals)),
+                                       'over_50ms': int(np.sum(intervals > .05))}
+        idx = np.searchsorted(times, grid, side='right')
+        idx = np.clip(idx, 1, len(times)-1)
+        valid_grid &= (times[idx]-times[idx-1] <= .05)
+    grid = grid[valid_grid]
+    if len(grid) < 250:
+        raise ValueError('Insufficient common output without long-gap interpolation')
+    report['scoring_valid_grid_fraction'] = float(len(grid)/original_grid_count)
     actual = interp(tt, pos, grid) - interp(tt, pos, np.array([start]))
     vel = (interp(tt, pos, grid+.05)-interp(tt, pos, grid-.05))/.1
     report['common_duration_s'] = float(end-start)
+    report['common_start_stamp'] = float(start)
+    report['common_end_stamp'] = float(end)
+    report['outside_common_window'] = {name: {'before_s': float(max(0., start-v[0][0])),
+                                               'after_s': float(max(0., v[0][-1]-end))}
+                                       for name, v in variants.items()}
     # Central attitude difference provides a separate local-frame gyro reference.
     gt = it[(it >= tt[0]+.01) & (it <= tt[-1]-.01)][::5]
     q0, q1 = Slerp(tt, tq)(gt-.01), Slerp(tt, tq)(gt+.01)
@@ -87,10 +107,18 @@ def main():
             'horizontal_position_rmse_m': rmse(np.linalg.norm(pe[:, :2], axis=1)),
             'horizontal_velocity_rmse_m_s': rmse(np.linalg.norm(ve[:, :2], axis=1)),
             'vertical_position_rmse_m': rmse(pe[:, 2]), 'vertical_velocity_rmse_m_s': rmse(ve[:, 2]),
+            'max_horizontal_position_error_m': float(np.max(np.linalg.norm(pe[:, :2], axis=1))),
+            'max_vertical_position_error_m': float(np.max(np.abs(pe[:, 2]))),
+            'max_horizontal_velocity_error_m_s': float(np.max(np.linalg.norm(ve[:, :2], axis=1))),
+            'max_vertical_velocity_error_m_s': float(np.max(np.abs(ve[:, 2]))),
+            'final_position_error_m': pe[-1].tolist(),
             'final_vertical_position_error_m': float(pe[-1, 2]),
-            'truth_initial_vertical_velocity_diagnostic': {'adjustment_m_s': dz,
-                'vertical_position_rmse_m': rmse(pe[:, 2]+dz*(grid-start)),
-                'final_vertical_position_error_m': float(pe[-1, 2]+dz*(grid[-1]-start))}}
+            'truth_initial_vertical_velocity_diagnostic': (
+                None if (a.run / name / 'summary.json').exists() and
+                json.loads((a.run / name / 'summary.json').read_text()).get('simulation_support') else
+                {'adjustment_m_s': dz,
+                 'vertical_position_rmse_m': rmse(pe[:, 2]+dz*(grid-start)),
+                 'final_vertical_position_error_m': float(pe[-1, 2]+dz*(grid[-1]-start))})}
     a.out.write_text(json.dumps(report, indent=2)+'\n')
     print(json.dumps(report, indent=2))
 
