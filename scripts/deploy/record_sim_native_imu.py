@@ -87,6 +87,7 @@ def main():
 
         def on_joint(self, group, msg):
             emit(joint_file, 'joints', {
+                'stamp': [msg.header.stamp.sec, msg.header.stamp.nanosec],
                 'recv': time.monotonic(),
                 'group': group,
                 'joints': [[j.name, j.position, j.velocity, j.effort] for j in msg.joints],

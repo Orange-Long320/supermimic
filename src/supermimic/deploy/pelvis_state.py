@@ -114,6 +114,23 @@ def pelvis_angular_velocity(omega_imu, r_pelvis_imu, omega_mount_in_pelvis):
     return np.asarray(r_pelvis_imu) @ np.asarray(omega_imu) - np.asarray(omega_mount_in_pelvis)
 
 
+def pelvis_velocity_from_imu(v_world_imu, r_world_pelvis, p_pelvis_imu,
+                             omega_pelvis, mount_velocity_pelvis):
+    """Convert IMU linear velocity to pelvis velocity at the same sample time.
+
+    The last two vectors are respectively pelvis angular velocity and the
+    moving mount's linear velocity relative to the pelvis, in pelvis axes.
+    """
+    v, r, p, omega, relative = (np.asarray(x, dtype=float) for x in
+                                (v_world_imu, r_world_pelvis, p_pelvis_imu,
+                                 omega_pelvis, mount_velocity_pelvis))
+    if (v.shape != (3,) or r.shape != (3, 3) or p.shape != (3,)
+            or omega.shape != (3,) or relative.shape != (3,)
+            or not all(np.isfinite(x).all() for x in (v, r, p, omega, relative))):
+        raise ValueError('Invalid synchronized velocity conversion inputs')
+    return v - r @ (np.cross(omega, p) + relative)
+
+
 def latest_causal(rows, now_ns, *, max_age_s, stamp_key='header_ns',
                   at_ns=None, received_times=None):
     """Select only received, nonfuture data; reject old acquisition/header times."""

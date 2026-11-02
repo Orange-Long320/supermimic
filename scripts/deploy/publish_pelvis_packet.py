@@ -85,7 +85,7 @@ def main():
     def rot_of(wxyz):
         """The device publishes w,x,y,z; scipy expects x,y,z,w."""
         return Rotation.from_quat([wxyz[1], wxyz[2], wxyz[3], wxyz[0]])
-    state = {'last': None, 'still_since': None, 'integrate': False,
+    state = {'last': None, 'still_since': None, 'integrate': False, 'calibration': None,
              'x': np.zeros(6), 'P': np.diag([.01, .01, .1, .1, .1, .1])}
     H = np.zeros((2, 6))
     H[0, 2] = H[1, 3] = 1.
@@ -116,6 +116,8 @@ def main():
                         'q': [q.w, q.x, q.y, q.z], 'w': [w.x, w.y, w.z],
                         'a': [acc.x, acc.y, acc.z], 'frame': msg.header.frame_id}
             counters['imu'] += 1
+            if state['calibration'] is not None:
+                state['calibration'].append(self.imu)
             if state['integrate']:
                 propagate(self.imu)
 
@@ -129,10 +131,14 @@ def main():
 
     def propagate(sample):
         x, P = state['x'], state['P']
-        now = sample['mono']
-        dt = now - state['last'] if state['last'] is not None else .002
+        now = sample['stamp_ns'] * 1e-9
+        if state['last'] is None:
+            state['last'] = now
+            return
+        dt = now - state['last']
+        if not 0. < dt <= .03:
+            raise ValueError('IMU acquisition timestamp rollback or gap')
         state['last'] = now
-        dt = float(min(max(dt, 1e-4), .05))
         acc_body = np.array(sample['a'])
         gyro = np.array(sample['w'])
         world = mount @ rot_of(sample['q']).apply(acc_body)
@@ -164,15 +170,24 @@ def main():
     # Static settle: bias is not fitted here, the extrinsic fixes the model, so a
     # short window only removes any residual offset.
     if a.init_bias_seconds > 0.:
-        window = []
+        state['calibration'] = []
         end = time.monotonic() + a.init_bias_seconds
         while time.monotonic() < end:
             rclpy.spin_once(node, timeout_sec=.01)
-            if node.imu is not None:
-                window.append(mount @ rot_of(node.imu['q']).apply(np.array(node.imu['a'])))
-        if len(window) < 100:
+        samples = state['calibration']
+        state['calibration'] = None
+        if len(samples) < 100:
             raise SystemExit('Static window produced too few samples')
-        window = np.array(window)
+        stamps = np.array([s['stamp_ns'] for s in samples], dtype=np.int64)
+        acc = np.array([s['a'] for s in samples])
+        gyro = np.array([s['w'] for s in samples])
+        if (stamps[-1] - stamps[0] < (a.init_bias_seconds - .1) * 1e9
+                or np.any(np.diff(stamps) <= 0) or np.any(np.diff(stamps) > 30_000_000)
+                or not np.isfinite(acc).all() or not np.isfinite(gyro).all()
+                or np.any(abs(np.linalg.norm(acc, axis=1)-9.81) > a.still_accel_tol)
+                or np.any(np.linalg.norm(gyro, axis=1) > a.still_gyro_tol)):
+            raise SystemExit('Calibration window is moving, invalid, or has an IMU timestamp gap')
+        window = np.array([mount @ rot_of(s['q']).apply(np.array(s['a'])) for s in samples])
         if a.auto_mount:
             mean = window.mean(axis=0)
             mount = Rotation.align_vectors([[0., 0., 1.]], [mean])[0].as_matrix()

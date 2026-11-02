@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
-from supermimic.deploy.pelvis_state import UrdfPelvisMount,pelvis_from_imu,pelvis_angular_velocity,latest_causal,gravity_level_rotation
+from supermimic.deploy.pelvis_state import UrdfPelvisMount,pelvis_from_imu,pelvis_angular_velocity,pelvis_velocity_from_imu,latest_causal,gravity_level_rotation
 
 
 class PelvisStateTest(unittest.TestCase):
@@ -25,6 +25,16 @@ class PelvisStateTest(unittest.TestCase):
     def test_waist_motion_is_not_pelvis_rotation(self):
         rpi=Rotation.from_euler('y',.5).as_matrix(); waist=np.array([0.,.4,0.])
         np.testing.assert_allclose(pelvis_angular_velocity(rpi.T@waist,rpi,waist),0,atol=1e-12)
+
+    def test_velocity_conversion_includes_rotation_and_waist_motion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mount = self.mount_model(directory)
+            q, qd = np.array([.4, -.2]), np.array([.2, .1])
+            p, _, _, relative = mount.mount_with_velocity(q, qd)
+            r = Rotation.from_euler('xyz', [.2, -.3, .5]).as_matrix()
+            omega, velocity = np.array([.3, -.1, .2]), np.array([1., .4, -.2])
+            measured = velocity + r @ (np.cross(omega, p) + relative)
+            np.testing.assert_allclose(pelvis_velocity_from_imu(measured, r, p, omega, relative), velocity, atol=1e-12)
 
     def test_late_arrival_and_stale_data_rejected(self):
         rows=[{'received_ns':100_000_000,'header_ns':90_000_000},
