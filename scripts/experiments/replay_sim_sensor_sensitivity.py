@@ -29,6 +29,7 @@ VARIANTS = {
     'lever_error_5mm_xz': {'lever_error': [.005, 0., .005]},
     'mount_roll_error_1deg': {'mount_roll_deg': 1.},
     'leg_stale_5ms': {'joint_delay': .005},
+    'imu_header_jitter_0p5ms': {'imu_stamp_jitter': .0005},
     'imu_drop_every_10': {'drop_every': 10},
     'imu_burst_drop_18': {'burst_drop': 18},
 }
@@ -63,6 +64,7 @@ def score(rows, truth_t, truth_p, window):
     pv=interp(t,v,grid); tv=(interp(truth_t,truth_p,grid+.05)-interp(truth_t,truth_p,grid-.05))/.1
     pe=pred-actual; ve=pv-tv; rmse=lambda x:float(np.sqrt(np.mean(x*x)))
     return {'coverage':float(len(grid)*.02/window),'scored_samples':len(grid),
+            'scored_start_stamp':float(grid[0]), 'scored_end_stamp':float(grid[-1]),
             'horizontal_position_rmse_m':rmse(np.linalg.norm(pe[:,:2],axis=1)),
             'vertical_position_rmse_m':rmse(pe[:,2]),
             'horizontal_velocity_rmse_m_s':rmse(np.linalg.norm(ve[:,:2],axis=1)),
@@ -79,6 +81,9 @@ def score(rows, truth_t, truth_p, window):
 def replay(spec, imu_t, rotations, gyro, acc, jt, joint_pos, joint_vel, names, truth_t, truth_p, xml, support_cls, duration, seed):
     support=support_cls(xml); rng=np.random.default_rng(seed)
     selected=np.arange(len(imu_t))
+    reported_t=imu_t.copy()
+    if spec.get('imu_stamp_jitter'):
+        reported_t += rng.uniform(-spec['imu_stamp_jitter'],spec['imu_stamp_jitter'],len(imu_t))
     if spec.get('drop_every'):
         selected=selected[(selected+1)%spec['drop_every'] != 0]
     if spec.get('burst_drop'):
@@ -103,7 +108,7 @@ def replay(spec, imu_t, rotations, gyro, acc, jt, joint_pos, joint_vel, names, t
     last=None; last_try=None; last_accept=None; initialized=False; counts=Counter(); rows=[]
     failure=None; failure_time=None; next_output=None
     for i in selected:
-        t=imu_t[i]; rwi=measured_rot[i]; r=rwi@mount_error
+        t=reported_t[i]; rwi=measured_rot[i]; r=rwi@mount_error
         w=mount_error.T@measured_gyro[i]
         world=rwi@measured_acc[i]-np.array([0.,0.,9.81])
         if last is not None:
@@ -142,8 +147,12 @@ def replay(spec, imu_t, rotations, gyro, acc, jt, joint_pos, joint_vel, names, t
             if first_p is None: first_p=pelvis_p.copy()
             pelvis_v=velocity-r@np.cross(w,lever)
             rows.append((t,(pelvis_p-first_p).copy(),pelvis_v.copy()))
-    result=score(rows,truth_t,truth_p,duration);result.update(counters=dict(counts),failure=failure,
+    result=score(rows,truth_t,truth_p,duration);result.update(counters=dict(counts),
+            runtime_failure=failure,early_failure=bool(failure),
             failure_time_s=failure_time,output_packets=len(rows))
+    if 'scored_start_stamp' in result:
+        result['scored_start_offset_s']=result['scored_start_stamp']-float(imu_t[0])
+        result['scored_end_offset_s']=result['scored_end_stamp']-float(imu_t[0])
     return result, rows
 
 
@@ -166,8 +175,8 @@ def main():
     manifest={'scope':__doc__,'source':str(a.run),'duration_s':float(end-start),'seed':a.seed,
               'variants':{k:VARIANTS[k] for k in a.variants},'xml_sha256':hashlib.sha256(a.xml.read_bytes()).hexdigest(),
               'noise_note':'Adds noise to recorded IMU; existing MuJoCo XML declares gyro and accelerometer noise 0.001, orientation framequat 0.',
-              'orientation_note':'Synthetic world-frame attitude output errors; gyro and accelerometer measurements remain as recorded unless separately perturbed. Mount rotation is a separate estimator calibration error.',
-              'timing_note':'Joint delay makes old samples appear 5 ms newer; simulated header semantics, not physical timestamp proof.',
+              'orientation_note':'External orientation is supplied, not gyro-integrated. Synthetic world-frame attitude output errors leave gyro and accelerometer unchanged unless separately perturbed. Mount rotation is a separate estimator calibration error.',
+              'timing_note':'Joint delay makes old samples appear 5 ms newer; IMU jitter perturbs reported headers uniformly ±0.5 ms while sample fields stay fixed. Neither establishes physical timestamp semantics.',
               'source_hashes':{name:hashlib.sha256((a.run/'trial-record'/name).read_bytes()).hexdigest() for name in ('imu.jsonl','joints.jsonl','odom.jsonl')}}
     (a.out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     results={}
