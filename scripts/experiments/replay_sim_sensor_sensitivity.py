@@ -27,6 +27,7 @@ VARIANTS = {
     'leg_zero_0p01rad': {'joint_offset': .01},
     'leg_scale_1p01': {'joint_scale': 1.01},
     'lever_error_5mm_xz': {'lever_error': [.005, 0., .005]},
+    'mount_roll_error_1deg': {'mount_roll_deg': 1.},
     'leg_stale_5ms': {'joint_delay': .005},
     'imu_drop_every_10': {'drop_every': 10},
     'imu_burst_drop_18': {'burst_drop': 18},
@@ -90,19 +91,21 @@ def replay(spec, imu_t, rotations, gyro, acc, jt, joint_pos, joint_vel, names, t
         measured_rot=np.einsum('ij,njk->nik',correction,rotations)
     else:
         angles=np.deg2rad(yaw0+drift*(imu_t-imu_t[0])/60.)
-        correction=Rotation.from_euler('z',angles).as_matrix()
+        correction=Rotation.from_euler('z',angles[:,None]).as_matrix()
         measured_rot=np.einsum('nij,njk->nik',correction,np.einsum('ij,njk->nik',tilt,rotations))
     measured_acc=acc+np.asarray(spec.get('acc_bias',[0.,0.,0.]))
     if spec.get('acc_noise'):
         measured_acc=measured_acc+rng.normal(0.,spec['acc_noise'],size=acc.shape)
     measured_gyro=gyro+np.asarray(spec.get('gyro_bias',[0.,0.,0.]))
     lever=np.array([.0239465,-.000228682,.04171])+np.asarray(spec.get('lever_error',[0.,0.,0.]))
+    mount_error=Rotation.from_euler('x',spec.get('mount_roll_deg',0.),degrees=True).as_matrix()
     position=np.zeros(3); velocity=np.zeros(3); origin=None; first_p=None
     last=None; last_try=None; last_accept=None; initialized=False; counts=Counter(); rows=[]
     failure=None; failure_time=None; next_output=None
     for i in selected:
-        t=imu_t[i]; r=measured_rot[i]; w=measured_gyro[i]
-        world=r@measured_acc[i]-np.array([0.,0.,9.81])
+        t=imu_t[i]; rwi=measured_rot[i]; r=rwi@mount_error
+        w=mount_error.T@measured_gyro[i]
+        world=rwi@measured_acc[i]-np.array([0.,0.,9.81])
         if last is not None:
             dt=t-last
             if not 0.<dt<=.03:
@@ -163,7 +166,7 @@ def main():
     manifest={'scope':__doc__,'source':str(a.run),'duration_s':float(end-start),'seed':a.seed,
               'variants':{k:VARIANTS[k] for k in a.variants},'xml_sha256':hashlib.sha256(a.xml.read_bytes()).hexdigest(),
               'noise_note':'Adds noise to recorded IMU; existing MuJoCo XML declares gyro and accelerometer noise 0.001, orientation framequat 0.',
-              'orientation_note':'Synthetic world-frame attitude output errors; gyro and accelerometer measurements remain as recorded unless separately perturbed.',
+              'orientation_note':'Synthetic world-frame attitude output errors; gyro and accelerometer measurements remain as recorded unless separately perturbed. Mount rotation is a separate estimator calibration error.',
               'timing_note':'Joint delay makes old samples appear 5 ms newer; simulated header semantics, not physical timestamp proof.',
               'source_hashes':{name:hashlib.sha256((a.run/'trial-record'/name).read_bytes()).hexdigest() for name in ('imu.jsonl','joints.jsonl','odom.jsonl')}}
     (a.out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
