@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run inside lxh only. Fixed-input checks and read-only robot subscriptions.
-set -euo pipefail
+set -eo pipefail
 release=${1:?candidate release directory}
 out=${2:?new report directory}
 base=/home/agi/lxh-supermimic
