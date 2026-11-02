@@ -78,3 +78,24 @@
 边界：单场次、同一确定性轨迹、负载 10.3–14.0；关节样本只有本地接收时间，未记录消息头时间戳，因此关节与 IMU 的对齐依赖接收时刻；支撑仍是几何代理，没有测力；离线回放，不接控制。
 
 证据：`native-fusion-r3.json`（六变体）、`native-fusion-r1.json`、`native-fusion-r2.json`（中间版本）；脚本 `scripts/evaluation/eval_native_rate_fusion.py`。
+
+## 力矩接触代理：当前数据无法执行，未得到末端误差
+
+目标是用关节力矩估计替掉几何接触代理。检查前提时发现仿真**不发布关节力矩**，因此该实验在本环境不能运行，没有可报告的新误差数字。
+
+两处独立证据：
+
+- 新增记录器在第二场次（`native-r2-record/joints.jsonl`，185325 条组快照）中，第 4 字段 effort **非零条目数为 0**。
+- 策略自身的 `native-r1/policy/frames.jsonl` 2826 帧全部带 `joint_effort` 字段，`max|joint_effort| = 0.0`、非零占比 0。
+
+`official_sim_state.py` 的 `efforts` 字段与 `official_sim_policy.py` 的 `invalid simulator effort sample` 检查都只能证明字段存在且有限，不能证明其数值有意义；仓库里 `audit_stand_entry_pair.py` 已记录过"joint effort 字段可能未填充，不得据此推断零力矩或零负载"。
+
+已实现的代码路径（`eval_native_rate_fusion.py --contact-source torque`）：对该侧腿关节求解 `J^T F = tau` 的最小二乘解，取世界 z 分量作为准静态支撑力，门限按体重比例（默认 0.1 倍体重），符号约定由静止段的实测中位数自动判定并写入报告。**当记录中的 effort 全为零时程序直接报错退出**，避免把"零力矩→无接触→退化为纯 strapdown"误读成融合结果。
+
+实机上可能的替代来源：`/aima/hal/joint/norealtime/{udcu,ddcu}_joint/state` 提供 `motor_current_state` 与 `target_effort` 原始整数（见 `scripts/deploy/read_x2_hardware_status.py`）。这是非实时话题，发布速率与实际可用性尚未测量，且需要与关节力矩的比例/零点核对，不能直接当作接触力使用。
+
+### 第二场次（重复性，无力矩）
+
+`native-r2` 为同日程、同策略的独立场次，exit 0：真值 60.01 秒、路径 8.25 m、净位移 3.50 m，关节 185325 条组快照。可用于重复性对照，但因 effort 全零同样不能用于力矩实验。
+
+边界：本方向的接触力来源尚未确认，不得写成已验证或已改善。`recorder.log` 被第二场次覆盖，第一场次的同名日志未保留；各场次 `summary.json` 与数据文件完整。

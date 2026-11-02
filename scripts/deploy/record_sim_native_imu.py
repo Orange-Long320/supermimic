@@ -89,7 +89,7 @@ def main():
             emit(joint_file, 'joints', {
                 'recv': time.monotonic(),
                 'group': group,
-                'joints': [[j.name, j.position, j.velocity] for j in msg.joints],
+                'joints': [[j.name, j.position, j.velocity, j.effort] for j in msg.joints],
             })
 
     rclpy.init()

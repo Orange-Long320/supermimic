@@ -63,19 +63,23 @@ def load_joint_timeline(path, names, recv_to_time):
                 continue
             position = np.zeros(len(names))
             velocity = np.zeros(len(names))
+            effort = np.zeros(len(names))
             seen = np.zeros(len(names), dtype=bool)
             for record in latest.values():
-                for name, q, qd in record['joints']:
+                for entry in record['joints']:
+                    name, q, qd = entry[0], entry[1], entry[2]
                     column = index.get(name)
                     if column is None:
                         continue
                     position[column] = q
                     velocity[column] = qd
+                    if len(entry) > 3:
+                        effort[column] = entry[3]
                     seen[column] = True
             if not seen.all():
                 continue
             times.append(recv_to_time(r['recv']))
-            rows.append(np.concatenate([position, velocity]))
+            rows.append(np.concatenate([position, velocity, effort]))
     times = np.array(times)
     rows = np.array(rows)
     order = np.argsort(times, kind='stable')
@@ -90,8 +94,15 @@ def support_latest(times, values, query):
     return values[idx]
 
 
-def foot_geometry(model, data, qpos_addr, dof_addr, feet, quats, joints, joint_vel, gyro):
-    """Foot contact-point positions and their velocities from the contact Jacobian."""
+def foot_geometry(model, data, qpos_addr, dof_addr, feet, quats, joints, joint_vel, gyro,
+                  joint_effort=None, dof_by_side=None):
+    """Foot contact-point positions, their velocities, and the joint-torque force.
+
+    The force is the least-squares solution of ``J^T F = tau`` restricted to the
+    leg joints, i.e. the ground reaction implied by measured joint torque. It is
+    a quasi-static estimate: it ignores leg inertia and base acceleration, so it
+    is used only as a load indicator, not as a measured contact force.
+    """
     spheres = [[j for j in range(model.ngeom) if model.geom_bodyid[j] == body
                 and model.geom_type[j] == mujoco.mjtGeom.mjGEOM_SPHERE and model.geom_contype[j]]
                for body in feet]
@@ -99,6 +110,7 @@ def foot_geometry(model, data, qpos_addr, dof_addr, feet, quats, joints, joint_v
         raise ValueError('Missing foot collision spheres')
     rel = np.zeros((len(quats), 2, 3))
     foot_v = np.zeros_like(rel)
+    force = np.zeros((len(quats), 2))
     for i in range(len(quats)):
         data.qpos[:7] = np.r_[[0., 0., 0.], quats[i]]
         data.qpos[qpos_addr] = joints[i]
@@ -115,10 +127,15 @@ def foot_geometry(model, data, qpos_addr, dof_addr, feet, quats, joints, joint_v
             jac = np.zeros((3, model.nv))
             mujoco.mj_jac(model, data, jac, None, point, feet[foot])
             foot_v[i, foot] = jac @ data.qvel
-    return rel, foot_v
+            if joint_effort is not None and dof_by_side is not None:
+                leg_dofs = dof_by_side[foot]
+                tau = joint_effort[i, leg_dofs[1]]
+                force[i, foot] = np.linalg.lstsq(jac[:, leg_dofs[0]].T, tau, rcond=None)[0][2]
+    return rel, foot_v, force
 
 
-def fuse(times, acc_world, rel, foot_v, bias_scale, r_scale=1., increments=None):
+def fuse(times, acc_world, rel, foot_v, bias_scale, r_scale=1., increments=None,
+         force_z=None, contact_source='height', force_threshold=0.):
     """Identical filter to the recorded-fusion evaluator, driven by variable dt."""
     n = len(times)
     x = np.zeros(6)
@@ -164,7 +181,11 @@ def fuse(times, acc_world, rel, foot_v, bias_scale, r_scale=1., increments=None)
         candidates = []
         for foot in range(2):
             measurement = -foot_v[i, foot, :2]
-            if (rel[i, foot, 2] - low <= .015 and abs(foot_v[i, foot, 2]) <= .12
+            if contact_source == 'torque':
+                loaded = force_z is not None and force_z[i, foot] >= force_threshold
+            else:
+                loaded = rel[i, foot, 2] - low <= .015
+            if (loaded and abs(foot_v[i, foot, 2]) <= .12
                     and np.linalg.norm(measurement) <= 1.5):
                 candidates.append((np.linalg.norm(measurement - H @ x), foot, measurement))
         if candidates:
@@ -245,9 +266,11 @@ def static_drift(times, truth_xy, estimate_xy, speed_limit=.02, window=1.):
 
 
 def run_variant(times, acc_world, rel, foot_v, truth_t, truth_xy, bias_scale,
-                r_scale=1., increments=None):
+                r_scale=1., increments=None, force_z=None, contact_source='height',
+                force_threshold=0.):
     est, imu, counters = fuse(times, acc_world, rel, foot_v, bias_scale,
-                              r_scale=r_scale, increments=increments)
+                              r_scale=r_scale, increments=increments, force_z=force_z,
+                              contact_source=contact_source, force_threshold=force_threshold)
     truth_at = np.column_stack([np.interp(times, truth_t, truth_xy[:, 0]),
                                 np.interp(times, truth_t, truth_xy[:, 1])])
     base = truth_at[0]
@@ -264,6 +287,9 @@ def main():
     for name in ('record', 'profile', 'scene', 'out'):
         p.add_argument('--' + name, type=Path, required=True)
     p.add_argument('--foot-dwell', type=float, default=.2)
+    p.add_argument('--contact-source', choices=('height', 'torque'), default='height')
+    p.add_argument('--force-fraction', type=float, default=.1,
+                   help='contact threshold as a fraction of total body weight')
     p.add_argument('--warmup', type=float, default=1.)
     a = p.parse_args()
     if a.out.exists():
@@ -287,7 +313,10 @@ def main():
     gyro = gyro_all[keep]
     acc = acc_all[keep]
     joints = support_latest(joint_t, joint_rows, imu_t)
-    joint_pos, joint_vel = joints[:, :nj], joints[:, nj:]
+    joint_pos, joint_vel = joints[:, :nj], joints[:, nj:2 * nj]
+    joint_effort = joints[:, 2 * nj:]
+    if a.contact_source == 'torque' and not np.abs(joint_effort).max() > 0.:
+        raise ValueError('Torque contact requires recorded joint effort')
 
     rotation = Rotation.from_quat(q)
     acc_world = rotation.apply(acc) + np.array([0., 0., -G])
@@ -301,9 +330,38 @@ def main():
         raise ValueError('Missing model joint or foot')
     qpos_addr = [model.jnt_qposadr[i] for i in ids]
     dof_addr = [model.jnt_dofadr[i] for i in ids]
-    rel, foot_v_raw = foot_geometry(model, data, qpos_addr, dof_addr, feet,
-                                    q[:, [3, 0, 1, 2]], joint_pos, joint_vel, gyro)
-    # Rate-invariant low-pass on the contact-Jacobian foot velocity.
+    sides = [n.split('_')[0] for n in name_list]
+    dof_by_side = [([model.jnt_dofadr[ids[k]] for k in range(nj) if sides[k] == side],
+                    [k for k in range(nj) if sides[k] == side]) for side in ('left', 'right')]
+    weight = float(model.body_mass.sum()) * G
+    threshold = a.force_fraction * weight
+
+    def geometry(idx_map, quat, joints_position, joints_velocity, gyro_samples, effort):
+        return foot_geometry(model, data, qpos_addr, dof_addr, feet, quat, joints_position,
+                             joints_velocity, gyro_samples, joint_effort=effort,
+                             dof_by_side=dof_by_side)
+
+    rel, foot_v_raw, force_z = geometry(None, q[:, [3, 0, 1, 2]], joint_pos, joint_vel, gyro,
+                                        joint_effort)
+    # Determine the sign convention of the simulator's joint effort from static samples.
+    truth_speed = np.linalg.norm(np.gradient(
+        np.column_stack([np.interp(imu_t, odom_t, odom[:, 0]),
+                         np.interp(imu_t, odom_t, odom[:, 1])]), imu_t, axis=0), axis=1)
+    quiet = truth_speed < .02
+    flipped = False
+    if quiet.any() and np.median(force_z[quiet]) < 0.:
+        force_z = -force_z
+        flipped = True
+    loaded_any = (force_z >= threshold).any(axis=1)
+    contact_stats = {
+        'threshold_n': float(threshold),
+        'threshold_fraction_of_body_weight': float(a.force_fraction),
+        'force_sign_flipped': bool(flipped),
+        'median_force_quiet_per_foot_n': [float(x) for x in np.median(force_z[quiet], axis=0)] if quiet.any() else None,
+        'fraction_samples_with_a_loaded_foot': float(loaded_any.mean()),
+        'fraction_samples_with_two_loaded_feet': float((force_z >= threshold).all(axis=1).mean()),
+    }
+
     foot_v = np.zeros_like(foot_v_raw)
     for i in range(1, len(imu_t)):
         alpha = np.exp(-(imu_t[i] - imu_t[i - 1]) / TAU_FOOT_VEL)
@@ -311,63 +369,51 @@ def main():
     truth_xy = np.column_stack([odom[:, 0], odom[:, 1]]) - np.column_stack([odom[0, 0], odom[0, 1]])
 
     gate = {'dwell': a.foot_dwell, 'slip_guard': True}
-    native = run_variant(imu_t, acc_world, rel, foot_v, odom_t, truth_xy, gate)
 
-    # Same recording, collapsed to the deployed 20 ms tick before any processing.
+    def variant(times, acc_t, rel_t, fv_t, force_t, source, increments=None):
+        return run_variant(times, acc_t, rel_t, fv_t, odom_t, truth_xy, gate,
+                           increments=increments, force_z=force_t, contact_source=source,
+                           force_threshold=threshold)
+
+    def entry(result):
+        return {'fusion': result['fusion'], 'strapdown_only': result['strapdown_only'],
+                'counters': result['counters'], 'static': result['static']}
+
     grid = np.arange(imu_t[0], imu_t[-1], DT_REF)
     idx = np.searchsorted(imu_t, grid, side='right') - 1
     ok = idx > 0
-    snap = run_variant(grid[ok], acc_world[idx[ok]], rel[idx[ok]], foot_v[idx[ok]],
-                       odom_t, truth_xy, gate)
-    # The original pipeline: geometry, low-pass and propagation all evaluated on the
-    # 20 ms grid. This is the baseline the historical 0.176-0.48 m numbers came from.
     epochs = grid[ok]
     idx_epoch = np.clip(np.searchsorted(imu_t, epochs, side='right') - 1, 0, len(imu_t) - 1)
     joints_epoch = support_latest(joint_t, joint_rows, epochs)
-    rel_snap, raw_snap = foot_geometry(model, data, qpos_addr, dof_addr, feet,
-                                       q[idx_epoch][:, [3, 0, 1, 2]],
-                                       joints_epoch[:, :nj], joints_epoch[:, nj:],
-                                       gyro[idx_epoch])
+    rel_snap, raw_snap, force_snap = geometry(
+        None, q[idx_epoch][:, [3, 0, 1, 2]], joints_epoch[:, :nj], joints_epoch[:, nj:2 * nj],
+        gyro[idx_epoch], joints_epoch[:, 2 * nj:])
+    if flipped:
+        force_snap = -force_snap
     fv_snap = np.zeros_like(raw_snap)
     for i in range(1, len(epochs)):
         fv_snap[i] = .5 * raw_snap[i] + .5 * fv_snap[i - 1]
     acc_snap = acc_world[idx_epoch]
-    orig = run_variant(epochs, acc_snap, rel_snap, fv_snap, odom_t, truth_xy, gate)
     pre = preintegrate(imu_t, acc_world, epochs)
-    fused = run_variant(epochs, acc_world[idx[ok]], rel[idx[ok]], foot_v[idx[ok]],
-                        odom_t, truth_xy, gate, increments=pre)
-    native_r = run_variant(imu_t, acc_world, rel, foot_v, odom_t, truth_xy, gate,
-                           r_scale=np.median(np.diff(imu_t)) / DT_REF)
-    # Same 20 ms measurement stream, native-rate propagation: isolates propagation quality.
-    pre_snap = run_variant(epochs, acc_snap, rel_snap, fv_snap, odom_t, truth_xy, gate,
-                           increments=pre)
 
     report = {
         'native_rate_hz': 1. / float(np.median(np.diff(imu_t))),
         'native_samples': int(len(imu_t)),
         'compared_seconds': float(imu_t[-1] - imu_t[0]),
         'foot_dwell_s': a.foot_dwell,
-        'native': {'fusion': native['fusion'], 'strapdown_only': native['strapdown_only'],
-                   'counters': native['counters'], 'static': native['static']},
-        'snapshot_50hz': {'fusion': snap['fusion'], 'strapdown_only': snap['strapdown_only'],
-                          'counters': snap['counters'], 'static': snap['static']},
-        'native_preintegration_update_50hz': {'fusion': fused['fusion'],
-                                              'strapdown_only': fused['strapdown_only'],
-                                              'counters': fused['counters'],
-                                              'static': fused['static']},
-        'snapshot_geometry_50hz': {'fusion': orig['fusion'], 'strapdown_only': orig['strapdown_only'],
-                                   'counters': orig['counters'], 'static': orig['static']},
-        'preintegration_snapshot_geometry': {'fusion': pre_snap['fusion'],
-                                             'counters': pre_snap['counters'],
-                                             'static': pre_snap['static']},
-        'native_with_rate_scaled_measurement_noise': {'fusion': native_r['fusion'],
-                                                     'counters': native_r['counters'],
-                                                     'static': native_r['static']},
+        'contact': contact_stats,
+        'height_native_500hz': entry(variant(imu_t, acc_world, rel, foot_v, None, 'height')),
+        'torque_native_500hz': entry(variant(imu_t, acc_world, rel, foot_v, force_z, 'torque')),
+        'height_50hz': entry(variant(epochs, acc_snap, rel_snap, fv_snap, None, 'height')),
+        'torque_50hz': entry(variant(epochs, acc_snap, rel_snap, fv_snap, force_snap, 'torque')),
+        'height_preintegration_50hz': entry(variant(epochs, acc_snap, rel_snap, fv_snap, None, 'height', increments=pre)),
+        'torque_preintegration_50hz': entry(variant(epochs, acc_snap, rel_snap, fv_snap, force_snap, 'torque', increments=pre)),
         'rate_normalisation': ('foot-velocity low-pass re-expressed as a time constant, support dwell '
                                'in seconds, process noise scaled by dt; measurement noise unchanged'),
-        'limitations': ('Offline replay only. Joint samples are aligned by local receive time because the '
-                        'recording kept no joint header stamp. Support is inferred geometrically, not from '
-                        'measured contact. No control loop, no hardware validation.'),
+        'limitations': ('Offline replay only. Joint samples are aligned by local receive time. The torque '
+                        'force is a quasi-static least-squares estimate from J^T F = tau over leg joints, '
+                        'not a measured contact force; leg inertia and base acceleration are ignored. '
+                        'No control loop, no hardware validation.'),
     }
     a.out.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
