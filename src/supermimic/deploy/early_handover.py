@@ -92,6 +92,11 @@ class EarlyHandover:
         if self.phase is Phase.PREPARE:
             target,_,_=self.path.sample(now-self.started);velocity=np.zeros_like(q);kp=self.prep_kp;kd=self.prep_kd
         else:
+            # Term-major history: every q over the window, then every qd, then every
+            # omega, gravity and previous action. This is the training layout
+            # (world_model/heads.py: OBS_TERMS, "term-major history"), and the two
+            # conventions are both 990 wide, so a silent swap is invisible to shape
+            # checks.
             obs=np.concatenate([h[term] for term in range(5) for h in self.history])
             try:
                 goal=self.tracker.goal(position,quat,q,'stand');action=np.asarray(self.policy.infer(obs,goal),dtype=float)
