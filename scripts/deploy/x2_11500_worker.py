@@ -131,7 +131,9 @@ def main():
                     return tracker
                 prep_target=np.asarray(plan.get('prep_target') or candidate['startup']['position'],dtype=float)
                 unclipped_waist=plan.get('unclipped_waist_pitch_target',False)
+                unclipped_all=plan.get('unclipped_all_joint_targets',False)
                 if type(unclipped_waist) is not bool:raise ValueError('Invalid waist pitch override')
+                if type(unclipped_all) is not bool:raise ValueError('Invalid all-joint override')
                 controller=EarlyHandover(q,prep_target,candidate['action_default'],candidate['action_scale'],
                     plan['prep_kp'],plan['prep_kd'],plan['policy_kp'],plan['policy_kd'],plan['measured_lower'],plan['measured_upper'],
                     plan['command_lower'],plan['command_upper'],plan['max_target_step'],max_velocity=plan['max_velocity'],
@@ -141,9 +143,11 @@ def main():
                     history_source=plan['history_source'],max_tilt_delta=plan.get('max_tilt_delta'),
                     handover_max_tilt=plan.get('handover_max_tilt'),
                     zero_stand_anchor_xy=plan.get('zero_stand_anchor_xy',False),
-                    unclipped_target_indices=(names.index('waist_pitch_joint'),) if unclipped_waist else ())
+                    unclipped_target_indices=tuple(range(len(names))) if unclipped_all else
+                        (names.index('waist_pitch_joint'),) if unclipped_waist else ())
                 print('stand anchor XY forced to zero:',controller.zero_stand_anchor_xy,flush=True)
-                print('waist pitch target range clipping disabled:',unclipped_waist,flush=True)
+                print('waist pitch target range clipping disabled:',unclipped_waist or unclipped_all,flush=True)
+                print('all-joint target range clipping disabled:',unclipped_all,flush=True)
                 return  # Reacquire fresh input after setup; no command sent yet.
             out=controller.step(row['state_stamp'],row['position'],quat,q,qd,row['angular_velocity_body'],gravity)
             generated=time.monotonic();state_sampled=generated-(time.time()-row['state_stamp'])

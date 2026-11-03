@@ -66,5 +66,14 @@ class ZeroAnchorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'indices'):
                 self.controller(np.arange(729), True, unclipped=indices)
 
+    def test_all_selected_joint_targets_are_unclipped(self):
+        c, policy = self.controller(np.arange(729), True, unclipped=tuple(range(31)))
+        action = np.zeros(31); action[13] = -5.; action[14] = 4.; action[0] = 3.
+        policy.infer = lambda obs, goal: action
+        for i in range(10): self.step(c, i*.02)
+        c.request_handover()
+        for i in range(10, 22): out = self.step(c, i*.02)
+        np.testing.assert_allclose(out['position'][[0,13,14]],[3.,-5.,4.])
+
 
 if __name__ == '__main__': unittest.main()

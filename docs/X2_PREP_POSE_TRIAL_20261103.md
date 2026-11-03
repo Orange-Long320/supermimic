@@ -391,3 +391,25 @@ do not rely on that guard. Only offline synthetic tests and a synthetic contract
 were checked, not the physical dynamics, HAL handling or complete ROS chain.
 The operator must start the trial and confirm support and emergency stop. No
 physical trial was run by this task.
+
+## All-joint unclipped target experiment (unvalidated)
+
+After the risks were explained, the user explicitly requested an all-joint
+hardware trial and retained responsibility for starting it. A separate launcher
+selects `unclipped_all_joint_targets=true`: the worker does not range-clip any
+position target and the publisher does not reject targets based on position
+range. Finite values, measured-position bounds and the existing target-step
+logic remain; the launcher still uses a 10 rad step value. Whether the HAL or
+actuator independently clips or limits torque is unknown. The existing
+publisher step-limit implementation does not apply its calculated step result
+to the outgoing packet, so it must not be relied upon as a safety guard.
+
+The zero-horizontal-anchor intervention, 1 ms blend, effectively disabled
+attitude/angular-speed guards and unbounded publisher window remain. In the
+older `run-p30` fixed input replay, replacing anchor x/y with zero yielded seven
+targets beyond that run's file-based ranges, with right ankle pitch about 115
+degrees beyond its upper bound. This is a target deviation, not measured joint
+travel or an actual force. No closed-loop simulation or physical verification
+establishes safe behavior. Synthetic controller and publisher tests verify the
+software selection and retained measured-state check only. No robot control
+was started by this task.

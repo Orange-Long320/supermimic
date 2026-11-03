@@ -54,6 +54,8 @@ def main():
                    help='Experimental: replace only the standing anchor translation x/y inputs with zero')
     p.add_argument('--unclipped-waist-pitch-target', action='store_true',
                    help='Experimental: disable the waist pitch command-position range check and clamp')
+    p.add_argument('--unclipped-all-joint-targets', action='store_true',
+                   help='Experimental: disable project command-position range clipping for all joints')
     p.add_argument('--operator-confirms-support-and-estop', action='store_true',
                    help='Operator confirmed feet loaded, fall arrest and checked emergency stop')
     p.add_argument('--max-angular-speed', type=float, default=2.,
@@ -88,7 +90,7 @@ def main():
                         ' many radians. The policy starts from an upright reference stance;'
                         ' handed over from a lean it saturates trying to correct it.')
     a = p.parse_args()
-    if (a.zero_stand_anchor_xy or a.unclipped_waist_pitch_target) and not a.operator_confirms_support_and_estop:
+    if (a.zero_stand_anchor_xy or a.unclipped_waist_pitch_target or a.unclipped_all_joint_targets) and not a.operator_confirms_support_and_estop:
         raise ValueError('Hardware trial requires explicit operator confirmation of support and emergency stop')
 
     release = a.release.resolve()
@@ -144,6 +146,8 @@ def main():
         unvalidated.append('stand anchor x/y are forced to zero as an unvalidated control intervention; position hold is removed')
     if a.unclipped_waist_pitch_target:
         unvalidated.append('waist pitch command target bypasses model range clipping and publisher range check; actual hardware response is unvalidated')
+    if a.unclipped_all_joint_targets:
+        unvalidated.append('all joint position targets bypass project range clipping and publisher range checks; actual hardware response is unvalidated')
     if a.unbounded:
         unvalidated.append('bounded manual-trial window removed: the policy runs until the operator stops it'
                            ' and there is no automatic host-loss protection')
@@ -243,6 +247,7 @@ def main():
         history_source=a.history_source,
         zero_stand_anchor_xy=bool(a.zero_stand_anchor_xy),
         unclipped_waist_pitch_target=bool(a.unclipped_waist_pitch_target),
+        unclipped_all_joint_targets=bool(a.unclipped_all_joint_targets),
         safety_mode='manual_supervised_unvalidated_trial',
         unvalidated_items=unvalidated,
         bound_extensions=extensions,

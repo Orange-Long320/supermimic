@@ -39,8 +39,10 @@ def validated_contract(plan_path,consent_path,now,*,isolated=False):
         raise ValueError('Readiness evidence mismatch')
     safety_mode=plan.get('safety_mode','independent_hardware')
     waist_override=plan.get('unclipped_waist_pitch_target',False)
-    if type(waist_override) is not bool or (waist_override and safety_mode!='manual_supervised_unvalidated_trial'):
-        raise ValueError('Waist override requires an explicitly unvalidated manual trial')
+    all_override=plan.get('unclipped_all_joint_targets',False)
+    if (type(waist_override) is not bool or type(all_override) is not bool or
+            ((waist_override or all_override) and safety_mode!='manual_supervised_unvalidated_trial')):
+        raise ValueError('Joint target override requires an explicitly unvalidated manual trial')
     if safety_mode not in ('independent_hardware','manual_supervised_trial',
                            'manual_supervised_unvalidated_trial'):
         raise ValueError('Unknown explicit safety mode')
@@ -127,8 +129,9 @@ def validate_target(packet,plan,previous):
     if any(not lo<=x<=hi for x,lo,hi in zip(packet['measured_position'],plan['measured_lower'],plan['measured_upper'])):
         raise ValueError('Measured position outside contract')
     override=plan.get('unclipped_waist_pitch_target',False)
-    if type(override) is not bool:raise ValueError('Invalid waist pitch override')
-    if any(not lo<=x<=hi and not (override and names[i]=='waist_pitch_joint')
+    all_override=plan.get('unclipped_all_joint_targets',False)
+    if type(override) is not bool or type(all_override) is not bool:raise ValueError('Invalid joint target override')
+    if any(not lo<=x<=hi and not all_override and not (override and names[i]=='waist_pitch_joint')
            for i,(x,lo,hi) in enumerate(zip(packet['position'],plan['command_lower'],plan['command_upper']))):
         raise ValueError('Command position outside contract')
     if any(v!=0 for v in packet['velocity']+packet['effort']):raise ValueError('Nonzero feedforward is not allowed')
