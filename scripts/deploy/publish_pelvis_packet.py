@@ -51,6 +51,8 @@ def main():
     p.add_argument('--still-gyro-tol', type=float, default=.08)
     p.add_argument('--still-hold', type=float, default=.2)
     p.add_argument('--max-age', type=float, default=.05)
+    p.add_argument('--trigger-group', default='head',
+                   help='publish when this joint group arrives, so all four are maximally fresh')
     p.add_argument('--model', type=Path, default=None,
                    help='FK-only model used to estimate pelvis height above the feet')
     p.add_argument('--sole-offset', type=float, default=.05,
@@ -242,6 +244,8 @@ def main():
                 'domain': int(msg.state.value),
                 'position': {j.name: j.position for j in msg.joints},
                 'velocity': {j.name: j.velocity for j in msg.joints}}
+            if group == a.trigger_group and state['integrate'] and len(self.groups) == 4:
+                self.trigger = True
             self.history[group].append(self.groups[group])
             if support is not None and group == 'leg' and state['integrate']:
                 self.drain_pending()
@@ -381,6 +385,11 @@ def main():
             now = time.monotonic()
             if now - last_publish < publish_period:
                 continue
+            # Event-driven: only emit once the slowest stream has just arrived.
+            if not getattr(node, 'trigger', False):
+                counters['waited_trigger'] = counters.get('waited_trigger', 0) + 1
+                continue
+            node.trigger = False
             last_publish = now
             if not state['support_initialized']:
                 counters['support_waiting'] += 1

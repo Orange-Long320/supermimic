@@ -194,3 +194,25 @@ startup_max_delta_from_urdf_bound   2.460847
 占用来源（只读观测）：`/home/agi/.vscode-server` 的 node 进程约 386% CPU，另有相机、感知、nvargus 等厂商进程；主机 load average 17.78。VS Code 服务进程不属于本项目，未停止。
 
 结论：在这个负载下启动，worker 大概率因状态包年龄超限而锁存，属于可预见的无效尝试。需要先降低负载或等待，再复测生产者达到约 45 Hz、年龄 <10 ms 后再上电。
+
+## 11-03 续 2：互斥解除后仍被时间戳守卫拦住
+
+原生运控关闭后，四组 `/aima/hal/joint/*/command` 发布者均为 0，互斥解除。随后按示例初始姿态重建契约（`--prep-seconds 6`、`--max-state-age 0.05`、`--snapshot` + `--extend-margin`），计划哈希本轮为 `f24a72ad0e21000b`（每轮重建都会变，因为计划内嵌就绪证据路径/哈希与实测边界）。
+
+初始姿态改为官方 `x2_rl_deploy v1.1` 的 `motion_control.yaml:default_joints`：髋 pitch −0.05、knee 0.1、ankle pitch −0.05、shoulder pitch 0.4、elbow −1.2、waist 全 0，其余按 0。与当前实测相比最大行程 **0.949 rad**（此前用参考片段启动位姿需要 2.105 rad）。官方做法是 2 ms 周期、1.5 秒线性插值；本项目受 0.35 rad/s 速度上限约束，改用同一目标的五次插值、准备 6 秒。
+
+### 阻塞：生产者在新时间戳守卫下退出
+
+`publish_pelvis_packet.py` 现由另一并行会话扩展（新增 `--assume-initial-rest`、`--imu-only-zupt`、`--integration-method`、支持几何、异步诊断日志等）。其 `propagate()` 中有：
+
+```
+if not 0. < dt <= .03: raise ValueError('IMU acquisition timestamp rollback or gap')
+```
+
+本机当前负载下 IMU 相邻样本间隔实测最大 **53.9 ms**（`imu_header_gaps_ms`），触发该守卫，生产者退出。worker 因"state publishers 0"拒绝启动。
+
+**本轮同样没有任何电机指令**：关节记录最大速率 0.0096 rad/s、最大行程全 0.0。
+
+### 待决
+
+该守卫属于另一会话正在开发的代码，我没有擅自放宽。可选：等其时间戳处理完成；或由我改为"跳过并计数"后重跑；或回退到此前自包含版本（曾稳定 45.9 Hz、0 无效包）。
