@@ -305,3 +305,36 @@ of a long policy run is still missing.
 - `handover_max_tilt` exists in the plan but was set to 0.40 rad, i.e. above the
   0.34 rad the preparation actually reaches, so it did not gate anything in this
   run.
+
+## `run-r3` follow-up: publisher startup failed
+
+Read-only inspection of PC2 `lxh` showed that `run-r3` did not reach policy
+takeover: `publisher.log` reports `TargetLeaseSupervisor.__init__()` rejected
+`outage_grace`, and `worker.log` reports zero target subscribers. The four
+handover requests also failed. The joint recording is sensor evidence only;
+it does not demonstrate commands from this trial or identify the cause of the
+recorded motion. The producer reported a maximum IMU header gap of 108 ms.
+
+The trial's `src/supermimic/deploy/supervision.py` lacked `outage_grace`;
+the candidate release copy has the argument and matches the current repository
+file by SHA256. The later simulator-semantics launcher builds a fresh source
+tree from that release, but this source comparison does not validate the
+complete runtime chain or establish hardware readiness.
+
+The checked runner now exits if no joint command is observed or if no handover
+request succeeds. A successful request must also contain the exact success
+line: the old substring check matched the failure message `not acknowledged`.
+The checked launcher refuses existing trial processes instead of terminating
+them, and refuses an existing output directory rather than deleting it.
+Shell syntax and mocked startup/request branches were checked offline only.
+An acknowledgment does not prove sustained policy control: the runner still
+does not continuously verify the policy phase during its timed wait. Cleanup
+continues to use the existing publisher/worker stop behavior, whose actual HAL
+response is not established by these tests. The recorder may continue until
+its deadline during cleanup.
+
+The simulator-semantics configuration has effectively disabled attitude and
+angular-speed checks, effectively no target-step limit or handover ramp, and an
+unbounded publisher window. Preparation/command limits, state estimation,
+hardware fault response and encoder zero remain unvalidated. No new hardware
+control or startup was performed in this follow-up.

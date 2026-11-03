@@ -24,17 +24,16 @@ TRIAL=$B/trials/11500_prep_imu_20261102_r1/run-sim-$(date +%H%M%S)
 PREP=${SM_PREP_SECONDS:-20}
 ACTIVE=${SM_ACTIVE_SECONDS:-180}
 
-echo "== stale trial processes"
-stale=$(pgrep -f 'publish_pelvis_packet\.py|x2_hardware_publisher\.py|x2_11500_worker\.py|run-policy\.sh|record_joints\.py' || true)
+echo "== existing trial processes"
+stale=$(pgrep -f 'publish_pelvis_packet[.]py|x2_hardware_publisher[.]py|x2_11500_worker[.]py|run-policy[^ ]*[.]sh|record_joints[.]py' || true)
 if [ -n "$stale" ]; then
-  echo "$stale" ; kill -TERM $stale 2>/dev/null || true ; sleep 4
+  echo "refusing: existing processes: $stale" >&2
+  exit 1
 fi
-still=$(pgrep -f 'publish_pelvis_packet\.py|x2_hardware_publisher\.py|x2_11500_worker\.py|run-policy\.sh|record_joints\.py' || true)
-if [ -n "$still" ]; then echo "refusing: still running: $still"; exit 1; fi
 
 echo "== trial source: rebuilt from the release, new early_handover"
-rm -rf "$TRIAL"
-mkdir -p "$TRIAL/src"
+mkdir "$TRIAL"
+mkdir "$TRIAL/src"
 cp -a "$REL/source/src/." "$TRIAL/src/"
 cp "$LIB/early_handover.py" "$TRIAL/src/supermimic/deploy/early_handover.py"
 md5sum "$TRIAL/src/supermimic/deploy/supervision.py" "$REL/source/src/supermimic/deploy/supervision.py"
@@ -75,5 +74,5 @@ echo "   no step limit: this is the simulator's law. The policy may move fast"
 echo "   in the first second because the body starts ~19 deg forward."
 echo "== preparation ${PREP}s, then policy up to ${ACTIVE}s"
 SM_PREP_SECONDS="$PREP" SM_ACTIVE_SECONDS="$ACTIVE" \
-  bash "$B/trials/11500_prep_imu_20261102_r1/run-policy.sh" "$REL" "$TRIAL"
-echo "== done. HAL holds the last command."
+  bash "$B/trials/11500_prep_imu_20261102_r1/run-policy-checked-20261103.sh" "$REL" "$TRIAL"
+echo "== runner finished; verify the actual robot and HAL state."

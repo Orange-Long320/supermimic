@@ -96,7 +96,7 @@ trap cleanup EXIT
 # must not subscribe there: it watches the joint command stream instead, which
 # only carries traffic once the publisher has accepted a target.
 stamp "wait for the first joint command"
-python3 - <<'WAITPY'
+if ! python3 - <<'WAITPY'
 import time, rclpy
 from rclpy.node import Node
 from aimdk_msgs.msg import JointCommandArray
@@ -110,21 +110,38 @@ while not seen and time.monotonic() < end:
     rclpy.spin_once(node, timeout_sec=.05)
 print("first command seen:", bool(seen), flush=True)
 node.destroy_node(); rclpy.try_shutdown()
+if not seen:
+    raise SystemExit(1)
 WAITPY
+then
+  stamp "no joint command observed; aborting before handover"
+  exit 1
+fi
 stamp "wait ${prep_seconds}s for the preparation path"
 sleep "$prep_seconds"
 
+handover_acknowledged=false
 for attempt in 1 2 3 4; do
   stamp "policy handover request, attempt $attempt"
-  env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/x2_11500_worker.py" \
-    --plan "$plan" --consent "$consent" --request-policy > "$trial/request-$attempt.log" 2>&1 || true
+  if env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/x2_11500_worker.py" \
+    --plan "$plan" --consent "$consent" --request-policy > "$trial/request-$attempt.log" 2>&1; then
+    request_ok=true
+  else
+    request_ok=false
+  fi
   tail -1 "$trial/request-$attempt.log" || true
-  if grep -q 'acknowledged' "$trial/request-$attempt.log" 2>/dev/null; then
+  if [ "$request_ok" = true ] && grep -Eq '^policy request acknowledged: (handover|active)$' "$trial/request-$attempt.log"; then
     stamp "handover acknowledged"
+    handover_acknowledged=true
     break
   fi
   sleep 2
 done
+
+if [ "$handover_acknowledged" != true ]; then
+  stamp "handover was not acknowledged; aborting"
+  exit 1
+fi
 
 stamp "hold ${active_seconds}s under the policy"
 sleep "$active_seconds"
