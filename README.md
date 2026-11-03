@@ -17,6 +17,7 @@
 - [本项目实验记录](docs/LOCAL_EXPERIMENT.md) · [历史仿真实验](docs/EXPERIMENTS.md)
 - [X2 部署基础与当前路线](docs/X2_DEPLOYMENT.md) · [500 Hz IMU 状态估计](docs/X2_SHADOW_CONTACT_FUSION_20261102.md) · [PC2 容器准备](docs/X2_LXH_PC2_PREPARATION_20261031.md)
 - [Git 回档](docs/GIT_RECOVERY.md) · [上游来源](UPSTREAM.md)
+- [常用 X2 Ultra 模型、11500 检查点和动作参考](bundles/x2_ultra_11500/README.md)（大文件使用 Git LFS）
 - [项目操作约束](AGENTS.md)
 
 ## 项目目录与入口
