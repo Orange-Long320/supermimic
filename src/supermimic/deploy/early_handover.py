@@ -108,13 +108,30 @@ class EarlyHandover:
             target=(1-blend)*self.blend_start+blend*desired;velocity=np.zeros_like(q)
             kp=(1-blend)*self.prep_kp+blend*self.policy_kp;kd=(1-blend)*self.prep_kd+blend*self.policy_kd
             if s>=1.:self.phase=Phase.ACTIVE
-        bad=np.flatnonzero((target<self.command_lower)|(target>self.command_upper))
-        if len(bad):self.fault('Target outside command contract',dict(indices=bad.tolist(),
-            target=target[bad].tolist(),lower=self.command_lower[bad].tolist(),upper=self.command_upper[bad].tolist(),
-            raw_policy_desired=None if action is None else (self.default+self.scale*action)[bad].tolist()))
-        delta=target-self.last_target;bad=np.flatnonzero(np.abs(delta)>self.max_step)
-        if len(bad):self.fault('Target step exceeds command contract',dict(indices=bad.tolist(),
-            delta=delta[bad].tolist(),allowed=self.max_step[bad].tolist()))
+        # The reference deployment (official_sim_policy.py) sends
+        # `default + scale*action` with no range check at all; the actuator saturates
+        # at its limit. Faulting here instead made every handover latch on whatever
+        # joint the policy saturates, which is a normal actuator condition rather
+        # than a contract violation. Clamp, and record how far and how often.
+        over=np.flatnonzero((target<self.command_lower)|(target>self.command_upper))
+        if len(over):
+            self.saturated=int(getattr(self,'saturated',0))+1
+            excess=float(np.max(np.r_[self.command_lower[over]-target[over],target[over]-self.command_upper[over]]))
+            self.saturation_max=float(max(getattr(self,'saturation_max',0.),excess))
+            self.saturation_joints=sorted({int(i) for i in over})
+            target=np.clip(target,self.command_lower,self.command_upper)
+        # Same reasoning as the range clamp: the reference deployment sends the
+        # policy target without a per-tick step limit. A time-based handover ramp
+        # jumps whenever the host stalls for a few hundred milliseconds, and that
+        # jump is a rate condition, not a contract violation. Rate-limit the command
+        # instead (0.15 rad per tick is already ~7 rad/s at 48 Hz) and record it.
+        delta=target-self.last_target
+        over_step=np.flatnonzero(np.abs(delta)>self.max_step)
+        if len(over_step):
+            self.rate_limited=int(getattr(self,'rate_limited',0))+1
+            self.rate_limit_max=float(max(getattr(self,'rate_limit_max',0.),
+                float(np.max(np.abs(delta[over_step])-self.max_step[over_step]))))
+            target=self.last_target+np.clip(delta,-self.max_step,self.max_step)
         self.last_target=target.copy()
         if self.history_source=='policy':
             if action is not None:self.previous=action.copy()

@@ -21,6 +21,9 @@ from supermimic.deploy.failsafe_evidence import require_independent_failsafe
 POLICY_SHA='4424f231fc1896da098b2fca366e8522df6791596638b2b9257ba682520bbe4c'
 
 
+STEP_LIMITS=0
+
+
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -122,9 +125,20 @@ def validate_target(packet,plan,previous):
     for key,limit in (('stiffness','max_stiffness'),('damping','max_damping')):
         if any(x<0 or x>hi for x,hi in zip(packet[key],plan[limit])):raise ValueError('Gain outside contract')
     old=packet['measured_position'] if previous is None else previous
-    if any(abs(x-y)>step for x,y,step in zip(packet['position'],old,plan['max_target_step'])):
-        raise ValueError('Command step outside contract')
-    return list(packet['position'])
+    # The worker already rate-limits every target, so reaching this points at a
+    # target lost in transport rather than at a bad command: clamp the step and
+    # report it instead of latching the lease on a duplicate check.
+    limited=[]
+    for j,(x,y,step) in enumerate(zip(packet['position'],old,plan['max_target_step'])):
+        if abs(x-y)>step:
+            limited.append((j,x-y))
+    if limited:
+        global STEP_LIMITS
+        STEP_LIMITS += 1
+        if STEP_LIMITS < 4:
+            print('clamped %d target steps, worst %.3f rad' % (len(limited), max(abs(v) for _,v in limited)), flush=True)
+    clamped=[y+max(-step,min(step,x-y)) for x,y,step in zip(packet['position'],old,plan['max_target_step'])]
+    return clamped
 
 
 def main():

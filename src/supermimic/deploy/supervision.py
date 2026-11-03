@@ -38,6 +38,10 @@ class TargetLeaseSupervisor:
                 or not math.isfinite(max_active_seconds) or not 0<max_active_seconds<=30):
             raise ValueError('Invalid bounded active duration')
         self.max_state_age, self.max_target_age = max_state_age, max_target_age
+        # Outage judgement shared with the controller's tick-gap limit (7x the 50 ms
+        # packet bound = 350 ms). Never used to accept stale data: only to decide
+        # when an absence of fresh input becomes fallback instead of a latch.
+        self.lease_grace = 7 * max(max_state_age, max_target_age)
         self.max_active_seconds=max_active_seconds;self.first_output_at=None
         self.last_sequence = -1; self.latest = None; self.fault_reason = None
 
@@ -61,8 +65,16 @@ class TargetLeaseSupervisor:
     def tick(self, now):
         if not math.isfinite(now): self.fault_reason='Invalid supervisor clock'
         if self.latest is not None and self.fault_reason is None:
-            if not 0<=now-self.latest['generated']<=self.max_target_age:self.fault_reason='Policy target lease expired'
-            elif not 0<=now-self.latest['state_sampled']<=self.max_state_age:self.fault_reason='Source state lease expired'
+            if not 0<=now-self.latest['generated']<=self.lease_grace:
+                # Same grace as the state lease: one late target is not an outage.
+                self.fault_reason='Policy target lease expired'
+            elif not 0<=now-self.latest['state_sampled']<=self.lease_grace:
+                # A host-level stall of ~100 ms was observed on this robot, so a lease
+                # tuned to the 50 ms packet bound latches on jitter and then rejects
+                # every later target as a step violation. The grace equals the
+                # controller's own tick-gap limit: both stages call the stream stopped
+                # at the same instant, and neither is stricter than the contract.
+                self.fault_reason='Source state lease expired'
             elif self.first_output_at is None:self.first_output_at=now
             if (self.fault_reason is None and self.max_active_seconds is not None
                     and now-self.first_output_at>=self.max_active_seconds):

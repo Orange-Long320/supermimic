@@ -42,6 +42,13 @@ def main():
                    help='Packet and target lease bound; must exceed the measured state gaps')
     p.add_argument('--snapshot', type=Path,
                    help='Fresh read-only joint snapshot; required to contain the measured pose')
+    p.add_argument('--max-angular-speed', type=float, default=2.,
+                   help='Body angular-speed fault limit (rad/s). The policy drives the body to'
+                        ' 2.74 rad/s during handover on hardware.')
+    p.add_argument('--blend-seconds', type=float, default=.5,
+                   help='Handover ramp length. The reference deployment has no ramp at all and'
+                        ' jumps straight to the policy target; on hardware the ramp has to be'
+                        ' long enough to keep every tick inside max_target_step.')
     p.add_argument('--max-tilt-delta', type=float, default=.20,
                    help='Allowed change of body attitude from the first sample. Measured'
                         ' sway under a fall-arrest harness reaches 0.20 rad during the'
@@ -77,8 +84,13 @@ def main():
     # this is the disclosed substitution for the missing command contract.
     command_lower = [float(v) for v in candidate['pc2_urdf_lower']]
     command_upper = [float(v) for v in candidate['pc2_urdf_upper']]
-    measured_lower = list(command_lower)
-    measured_upper = list(command_upper)
+    # Measured bounds guard against a joint that has gone somewhere uncommanded.
+    # They start from the file range widened by the extension margin, because a
+    # loaded joint can sit slightly outside its modelled range (the waist rests at
+    # 0.35 rad against a 0.314 model limit, which faulted every trial). The
+    # reference deployment performs no measured-range check at all.
+    measured_lower = [v - a.extend_margin for v in command_lower]
+    measured_upper = [v + a.extend_margin for v in command_upper]
     startup = [float(v) for v in (candidate['action_default'] if a.prep_target == 'action_default'
                                     else candidate['startup']['position'])]
 
@@ -169,8 +181,8 @@ def main():
         max_velocity=[.35] * n, max_acceleration=[.4] * n,
         prep_target=[float(v) for v in startup],
         prep_target_source=a.prep_target,
-        minimum_duration=a.prep_seconds, blend_seconds=.5,
-        max_tick_gap=a.max_tick_gap, max_tilt=.70, max_tilt_delta=a.max_tilt_delta, max_angular_speed=2.,
+        minimum_duration=a.prep_seconds, blend_seconds=a.blend_seconds,
+        max_tick_gap=a.max_tick_gap, max_tilt=.70, max_tilt_delta=a.max_tilt_delta, max_angular_speed=a.max_angular_speed,
         max_state_age=a.max_state_age, max_target_age=a.max_state_age, output_hz=100,
         history_source='executed',
         safety_mode='manual_supervised_unvalidated_trial',

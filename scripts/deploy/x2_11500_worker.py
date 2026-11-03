@@ -144,6 +144,11 @@ def main():
                     'measured_position':q.tolist(),'phase':out['phase'],
                     **{k:out[k].tolist() for k in ('position','velocity','effort','stiffness','damping')}}
             m=String();m.data=json.dumps(packet,allow_nan=False);pub.publish(m);seq+=1;last_receipt=now_mono
+            if seq%50==0:
+                print('phase %s seq %d saturated %d max_over %.3f rate_limited %d max_step_over %.3f'
+                      % (out['phase'],seq,getattr(controller,'saturated',0),
+                         getattr(controller,'saturation_max',0.),getattr(controller,'rate_limited',0),
+                         getattr(controller,'rate_limit_max',0.)),flush=True)
         except Exception as exc:
             # No target has been sent yet, so a stale startup packet carries no
             # control history: wait for a fresh one instead of latching a fault
