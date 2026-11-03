@@ -85,6 +85,38 @@ against a commanded quintic peak of ~0.25 rad/s; the arm tracks in bursts
 (stick-slip) rather than smoothly, so the recorded peak is not a command
 violation but it is not the commanded rate either.
 
+## Follow-up runs (run-r16, run-r17, plan `b12accef075f73b0`, `d1e33e7fb1c32d49`)
+
+run-r16: the producer aborted inside its 3 s calibration window
+(`Calibration window is moving, invalid, or has an IMU timestamp gap`). The
+shallow receive queue plus the startup load can leave a >30 ms IMU stamp gap in
+that window, and the calibration gate rejects it. No packet was published, so no
+motor command was sent and the robot stayed where it was. This is intermittent
+(1 of 3 runs) and is not yet handled: the gate should wait for a clean window
+instead of exiting.
+
+run-r17: 47.4 Hz, 1685 packets, `invalid` 0, `skipped_duplicate` 5,
+`imu_discontinuity_skipped` 15, no worker fault, no lease fault. The robot was
+already at the target pose, so travel was only 0.035-0.039 rad per joint and the
+run is a hold test rather than a motion test.
+
+Residual to the example initial pose after run-r17 (every joint within 0.076 rad):
+
+| joint | residual (rad) |
+| --- | ---: |
+| right knee | 0.075 |
+| left / right shoulder roll | 0.067 / 0.066 |
+| left knee | 0.064 |
+| right elbow | 0.050 |
+| left elbow | 0.046 |
+| left hip pitch | 0.024 |
+
+The 0.197 rad left hip pitch residual in run-r15 was a convergence lag, not a
+stall: the HAL keeps applying the last command with its stiffness after the
+publisher exits, and the hip finished converging from -0.247 to -0.074 between
+runs. Any residual measured at the instant the publisher is killed understates
+what the joint would reach.
+
 ## Known open items
 
 * Left hip pitch does not reach the commanded pose under load; the left/right
