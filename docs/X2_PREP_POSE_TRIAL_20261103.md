@@ -364,3 +364,30 @@ native MC publisher was observed on all four command topics; its current state
 must be rechecked, and this project does not make a control-mode change.
 Software tests verify only the intended indices, unchanged input, rejection of
 wrong dimensions, and a synthetic plan. No new physical test was run.
+
+## Unclipped waist-pitch target experiment (unvalidated)
+
+At the user's explicit request, a separate manual trial removes the project-side
+position-target clamp and publisher range rejection for `waist_pitch_joint`
+only, while retaining the zero-XY stand experiment. Other joints' command
+ranges and the measured-position checks are unchanged. The plan records the
+exception and the worker reports its raw action, unclipped desired target,
+worker target and measured position in sampled log lines. The worker target is
+not proof of the actual HAL-received command or actual physical joint angle.
+
+In the prior run the device URDF listed a waist-pitch range of +/-0.314 rad;
+from unsynchronized late records the unbounded desired target was estimated at
+about -2.03 rad. That is a position target, not measured travel. A simple
+`kp * (target - measured)` calculation using the logged gap and policy kp
+suggests roughly -33.5 versus -9.0 in proportional terms, but actuator mapping,
+damping, force limits and any downstream clipping are unverified. It cannot be
+used as a hardware torque measurement or safety guarantee.
+
+The underlying launcher still uses the earlier effectively disabled attitude
+and angular-speed guards, a 1 ms blend, a 10 rad target-step value, an
+unbounded publisher window and no independent host-loss protection. The
+publisher's existing step-limit result is not applied to its outgoing packet;
+do not rely on that guard. Only offline synthetic tests and a synthetic contract
+were checked, not the physical dynamics, HAL handling or complete ROS chain.
+The operator must start the trial and confirm support and emergency stop. No
+physical trial was run by this task.

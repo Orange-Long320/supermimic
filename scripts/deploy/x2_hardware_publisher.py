@@ -38,6 +38,9 @@ def validated_contract(plan_path,consent_path,now,*,isolated=False):
     if digest(evidence_path)!=plan.get('readiness_sha256') or evidence.get('policy_sha256')!=POLICY_SHA:
         raise ValueError('Readiness evidence mismatch')
     safety_mode=plan.get('safety_mode','independent_hardware')
+    waist_override=plan.get('unclipped_waist_pitch_target',False)
+    if type(waist_override) is not bool or (waist_override and safety_mode!='manual_supervised_unvalidated_trial'):
+        raise ValueError('Waist override requires an explicitly unvalidated manual trial')
     if safety_mode not in ('independent_hardware','manual_supervised_trial',
                            'manual_supervised_unvalidated_trial'):
         raise ValueError('Unknown explicit safety mode')
@@ -123,7 +126,10 @@ def validate_target(packet,plan,previous):
             raise ValueError('Invalid target '+key)
     if any(not lo<=x<=hi for x,lo,hi in zip(packet['measured_position'],plan['measured_lower'],plan['measured_upper'])):
         raise ValueError('Measured position outside contract')
-    if any(not lo<=x<=hi for x,lo,hi in zip(packet['position'],plan['command_lower'],plan['command_upper'])):
+    override=plan.get('unclipped_waist_pitch_target',False)
+    if type(override) is not bool:raise ValueError('Invalid waist pitch override')
+    if any(not lo<=x<=hi and not (override and names[i]=='waist_pitch_joint')
+           for i,(x,lo,hi) in enumerate(zip(packet['position'],plan['command_lower'],plan['command_upper']))):
         raise ValueError('Command position outside contract')
     if any(v!=0 for v in packet['velocity']+packet['effort']):raise ValueError('Nonzero feedforward is not allowed')
     for key,limit in (('stiffness','max_stiffness'),('damping','max_damping')):

@@ -60,6 +60,28 @@ class HardwareContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'scope'):mod.validated_contract(pp,cp,101.)
             self.assertEqual(mod.validated_contract(pp,cp,101.,isolated=True),plan)
 
+    def test_only_waist_pitch_can_bypass_command_range(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _,_,_,plan=self.make(Path(folder));names=plan['joint_names'];n=len(names)
+            plan['max_target_step']=[10.]*n
+            target={'names':names,'position':[0.]*n,'measured_position':[0.]*n,'velocity':[0.]*n,'effort':[0.]*n,
+                    'stiffness':[20.]*n,'damping':[2.]*n}
+            waist=names.index('waist_pitch_joint'); other=names.index('waist_roll_joint')
+            target['position'][waist]=-2.
+            with self.assertRaisesRegex(ValueError,'Command position'):mod.validate_target(target,plan,None)
+            plan['unclipped_waist_pitch_target']=True
+            self.assertEqual(mod.validate_target(target,plan,None)[waist],-2.)
+            target['position'][other]=-2.
+            with self.assertRaisesRegex(ValueError,'Command position'):mod.validate_target(target,plan,None)
+            target['position'][other]=0.;target['measured_position'][waist]=-2.
+            with self.assertRaisesRegex(ValueError,'Measured position'):mod.validate_target(target,plan,None)
+
+    def test_waist_override_forbidden_in_validated_mode(self):
+        with tempfile.TemporaryDirectory() as folder:
+            pp,cp,ep,plan=self.make(Path(folder));plan['unclipped_waist_pitch_target']=True
+            pp.write_text(json.dumps(plan));consent=json.loads(cp.read_text());consent['plan_sha256']=mod.digest(pp);cp.write_text(json.dumps(consent))
+            with self.assertRaisesRegex(ValueError,'Waist override'):mod.validated_contract(pp,cp,101.)
+
     def test_manual_trial_is_explicit_bounded_and_never_claims_auto_failsafe(self):
         with tempfile.TemporaryDirectory() as folder:
             pp,cp,ep,plan=self.make(Path(folder))

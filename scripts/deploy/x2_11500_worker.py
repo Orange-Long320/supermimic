@@ -130,6 +130,8 @@ def main():
                     tracker.yaw=tracker.rotation(orientation).as_euler('xyz')[2]
                     return tracker
                 prep_target=np.asarray(plan.get('prep_target') or candidate['startup']['position'],dtype=float)
+                unclipped_waist=plan.get('unclipped_waist_pitch_target',False)
+                if type(unclipped_waist) is not bool:raise ValueError('Invalid waist pitch override')
                 controller=EarlyHandover(q,prep_target,candidate['action_default'],candidate['action_scale'],
                     plan['prep_kp'],plan['prep_kd'],plan['policy_kp'],plan['policy_kd'],plan['measured_lower'],plan['measured_upper'],
                     plan['command_lower'],plan['command_upper'],plan['max_target_step'],max_velocity=plan['max_velocity'],
@@ -138,8 +140,10 @@ def main():
                     max_angular_speed=plan['max_angular_speed'],policy=policy,tracker_factory=factory,
                     history_source=plan['history_source'],max_tilt_delta=plan.get('max_tilt_delta'),
                     handover_max_tilt=plan.get('handover_max_tilt'),
-                    zero_stand_anchor_xy=plan.get('zero_stand_anchor_xy',False))
+                    zero_stand_anchor_xy=plan.get('zero_stand_anchor_xy',False),
+                    unclipped_target_indices=(names.index('waist_pitch_joint'),) if unclipped_waist else ())
                 print('stand anchor XY forced to zero:',controller.zero_stand_anchor_xy,flush=True)
+                print('waist pitch target range clipping disabled:',unclipped_waist,flush=True)
                 return  # Reacquire fresh input after setup; no command sent yet.
             out=controller.step(row['state_stamp'],row['position'],quat,q,qd,row['angular_velocity_body'],gravity)
             generated=time.monotonic();state_sampled=generated-(time.time()-row['state_stamp'])
@@ -165,6 +169,10 @@ def main():
                     print('  policy tick %d: desired-measured '%diag_prints[0]
                           +', '.join('%s %+.3f'%(names[i],diag['desired'][i]-diag['measured'][i]) for i in worst),
                           flush=True)
+                    if controller.unclipped_target_indices:
+                        i=names.index('waist_pitch_joint')
+                        print('  waist pitch: action %.6f desired %.6f worker_target %.6f measured %.6f rad'
+                              % (diag['action'][i],diag['desired'][i],out['position'][i],diag['measured'][i]),flush=True)
 
         except Exception as exc:
             # No target has been sent yet, so a stale startup packet carries no

@@ -17,6 +17,7 @@ base=/home/agi/lxh-supermimic
 script=/home/agi/lxh-supermimic/trials/11500_unvalidated_20261102_r1
 worker_script=${SM_WORKER_SCRIPT:-$script/x2_11500_worker.py}
 recorder_script=${SM_RECORDER_SCRIPT:-$script/record_joints.py}
+publisher_script=${SM_PUBLISHER_SCRIPT:-$script/x2_hardware_publisher.py}
 prep_seconds=${SM_PREP_SECONDS:-6}
 active_seconds=${SM_ACTIVE_SECONDS:-12}
 source /opt/ros/humble/setup.bash
@@ -39,10 +40,10 @@ consent=$trial/contract/consent.json
 # occupied, so the new publisher exits with "Another motor command publisher
 # exists" and the *old* one silently absorbs the new targets under the old
 # contract. Refuse to start instead of running a trial nobody is driving.
-stray=$(pgrep -f 'x2_hardware_publisher[.]py|publish_pelvis_packet[.]py|x2_11500_worker[^ ]*[.]py' || true)
+stray=$(pgrep -f 'x2_hardware_publisher[^ ]*[.]py|publish_pelvis_packet[.]py|x2_11500_worker[^ ]*[.]py' || true)
 if [ -n "$stray" ]; then
   echo "stray trial process still running; refusing to start:" >&2
-  pgrep -af 'x2_hardware_publisher[.]py|publish_pelvis_packet[.]py|x2_11500_worker[^ ]*[.]py' >&2
+  pgrep -af 'x2_hardware_publisher[^ ]*[.]py|publish_pelvis_packet[.]py|x2_11500_worker[^ ]*[.]py' >&2
   exit 1
 fi
 
@@ -59,7 +60,7 @@ sleep 8
 head -2 "$trial/state.log" || true
 
 stamp "start hardware publisher"
-nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/x2_hardware_publisher.py" \
+nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$publisher_script" \
   --plan "$plan" --consent "$consent" > "$trial/publisher.log" 2>&1 &
 publisher_pid=$!
 sleep 3

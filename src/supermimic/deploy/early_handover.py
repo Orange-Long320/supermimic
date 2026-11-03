@@ -24,7 +24,7 @@ class EarlyHandover:
                  *, max_velocity, max_acceleration, minimum_duration, blend_seconds,
                  max_tick_gap, max_tilt, max_angular_speed, policy, tracker_factory,
                  history_source='executed', max_tilt_delta=None, handover_max_tilt=None,
-                 zero_stand_anchor_xy=False):
+                 zero_stand_anchor_xy=False, unclipped_target_indices=()):
         vectors=[np.asarray(x,dtype=float) for x in (start,target,default,scale,prep_kp,prep_kd,policy_kp,policy_kd,
                  measured_lower,measured_upper,command_lower,command_upper,max_step,max_velocity,max_acceleration)]
         n=len(vectors[0]);
@@ -55,6 +55,11 @@ class EarlyHandover:
             raise ValueError('Invalid explicit control contract')
         if not isinstance(zero_stand_anchor_xy, bool):raise ValueError('Invalid stand anchor option')
         self.zero_stand_anchor_xy=zero_stand_anchor_xy
+        if (not isinstance(unclipped_target_indices,(tuple,list)) or
+                any(type(i) is not int or not 0<=i<n for i in unclipped_target_indices) or
+                len(set(unclipped_target_indices))!=len(unclipped_target_indices)):
+            raise ValueError('Invalid unclipped target indices')
+        self.unclipped_target_indices=tuple(unclipped_target_indices)
         self.handover_max_tilt=handover_max_tilt;self.last_tilt=None
         self.policy=policy;self.tracker_factory=tracker_factory;self.tracker=None
         self.phase=Phase.PREPARE;self.reason=None;self.fault_context=None;self.history=deque(maxlen=10)
@@ -143,13 +148,16 @@ class EarlyHandover:
         # at its limit. Faulting here instead made every handover latch on whatever
         # joint the policy saturates, which is a normal actuator condition rather
         # than a contract violation. Clamp, and record how far and how often.
-        over=np.flatnonzero((target<self.command_lower)|(target>self.command_upper))
+        clipped=np.clip(target,self.command_lower,self.command_upper)
+        if self.unclipped_target_indices:
+            clipped[list(self.unclipped_target_indices)]=target[list(self.unclipped_target_indices)]
+        over=np.flatnonzero(clipped!=target)
         if len(over):
             self.saturated=int(getattr(self,'saturated',0))+1
             excess=float(np.max(np.r_[self.command_lower[over]-target[over],target[over]-self.command_upper[over]]))
             self.saturation_max=float(max(getattr(self,'saturation_max',0.),excess))
             self.saturation_joints=sorted({int(i) for i in over})
-            target=np.clip(target,self.command_lower,self.command_upper)
+            target=clipped
         # Same reasoning as the range clamp: the reference deployment sends the
         # policy target without a per-tick step limit. A time-based handover ramp
         # jumps whenever the host stalls for a few hundred milliseconds, and that
