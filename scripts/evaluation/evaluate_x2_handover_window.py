@@ -58,6 +58,8 @@ def main():
     p.add_argument('--start',choices=('reference','snapshot'),required=True)
     p.add_argument('--prep-gain-source',choices=('sdk','policy'),required=True)
     p.add_argument('--blend-seconds',type=float,required=True)
+    p.add_argument('--history-source', choices=('executed', 'policy'), default='policy',
+                   help='Simulation-only comparison of feedback semantics')
     p.add_argument('--active-seconds',type=float,default=5.)
     p.add_argument('--stand-elbow-margin',type=float,default=0.,
                    help='Model-only standing-goal elbow margin; does not alter source references or weights')
@@ -156,7 +158,7 @@ def main():
     controller=EarlyHandover(start,target,default,scale,pk,pd,kp,kd,lower,upper,lower,upper,np.full(n,.3),
         max_velocity=np.full(n,.35),max_acceleration=np.full(n,.4),minimum_duration=8.,
         blend_seconds=a.blend_seconds,max_tick_gap=.031,max_tilt=.35,max_angular_speed=2.,
-        policy=policy,tracker_factory=lambda position,orientation:tracker,history_source='policy')
+        policy=policy,tracker_factory=lambda position,orientation:tracker,history_source=a.history_source)
     substeps=round(.02/m.opt.timestep)
     if abs(substeps*m.opt.timestep-.02)>1e-9:raise ValueError('Unexpected simulation timestep')
     rows=[];failure=None;active_start=None;clipped=0;total=0;peak_other=0.;support_diagnostic=None
@@ -221,7 +223,7 @@ def main():
         support_model=('Counterfactual rigid world-to-pelvis weld; not measured sling geometry or compliance'
                        if a.suspended_root_model else 'Ground contacts only; fall-arrest harness supplies no balance force'),
         root_fixed=a.suspended_root_model,
-        prep_gain_source=a.prep_gain_source,blend_seconds=a.blend_seconds,
+        prep_gain_source=a.prep_gain_source,blend_seconds=a.blend_seconds,history_source=a.history_source,
         stand_goal_override_model_only=goal_override,
         preparation_override_model_only=preparation_override,
         policy_gain_override_model_only=gain_override,
