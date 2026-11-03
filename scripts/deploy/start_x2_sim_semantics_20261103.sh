@@ -33,7 +33,8 @@ still=$(pgrep -f 'publish_pelvis_packet\.py|x2_hardware_publisher\.py|x2_11500_w
 if [ -n "$still" ]; then echo "refusing: still running: $still"; exit 1; fi
 
 echo "== trial source: rebuilt from the release, new early_handover"
-rm -rf "$TRIAL"mkdir -p "$TRIAL/src"
+rm -rf "$TRIAL"
+mkdir -p "$TRIAL/src"
 cp -a "$REL/source/src/." "$TRIAL/src/"
 cp "$LIB/early_handover.py" "$TRIAL/src/supermimic/deploy/early_handover.py"
 md5sum "$TRIAL/src/supermimic/deploy/supervision.py" "$REL/source/src/supermimic/deploy/supervision.py"
