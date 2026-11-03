@@ -19,7 +19,10 @@ from supermimic.deploy.policy_packet import validate_policy_packet
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--plan',type=Path,required=True)
     p.add_argument('--consent',type=Path,required=True);p.add_argument('--request-policy',action='store_true')
+    p.add_argument('--keyboard-port',type=int,help='Loopback-only keyboard page; no motor failsafe')
     p.add_argument('--isolated-prefix');a=p.parse_args()
+    if a.keyboard_port is not None and (a.request_policy or not 1024<=a.keyboard_port<=65535):
+        raise ValueError('Invalid keyboard listener configuration')
     if a.isolated_prefix:
         if os.environ.get('ROS_DOMAIN_ID')!='197' or not re.fullmatch('/supermimic/isolated_[a-z0-9_]+',a.isolated_prefix):
             raise ValueError('Isolated testing requires domain 197 and isolated prefix')
@@ -78,6 +81,11 @@ def main():
     # in the first callback leaves real sensor packets queued for seconds;
     # they correctly fail the 50 ms age guard when dispatch resumes.
     tracker=SkillGoal(dataset,profile,candidate['startup']['root_position'],candidate['startup']['root_quat_wxyz'])
+    if a.keyboard_port is not None:
+        # SkillPhase appends seam and mode events indefinitely. Keep recent
+        # diagnostics bounded; requested mode changes are printed separately.
+        from collections import deque
+        tracker.scheduler.events=deque(tracker.scheduler.events,maxlen=4096)
     for _ in range(10):
         warm_goal=tracker.goal(candidate['startup']['root_position'],candidate['startup']['root_quat_wxyz'],
                                candidate['startup']['position'],'stand')
@@ -91,14 +99,19 @@ def main():
     if state_publishers!=1 or target_subscribers!=1:
         raise ValueError(f'Expected one state producer and one motor publisher; '
                          f'got state publishers {state_publishers} and target subscribers {target_subscribers}')
-    pub=node.create_publisher(String,target_topic,qos);controller=None;session=None;seq=0;last_receipt=None;dropped=0;seen=None;diag_prints=[0]
+    keyboard=None
+    if a.keyboard_port is not None:
+        from x2_keyboard import Keyboard
+        keyboard=Keyboard(a.keyboard_port)
+        print('keyboard page listening on 127.0.0.1:%d; waits for active policy'%a.keyboard_port,flush=True)
+    pub=node.create_publisher(String,target_topic,qos);controller=None;session=None;seq=0;last_receipt=None;dropped=0;seen=None;diag_prints=[0];last_mode=None
     def request(msg):
         if controller is not None and msg.data==plan_hash:
             try:controller.request_handover();print('policy handover requested',flush=True)
             except ValueError as exc:print('handover rejected: '+str(exc),flush=True)
     node.create_subscription(String,trigger,request,qos)
     def receive(msg):
-        nonlocal controller,session,seq,last_receipt,dropped,seen
+        nonlocal controller,session,seq,last_receipt,dropped,seen,last_mode
         if controller is not None and controller.phase is Phase.FAULT:return
         try:
             now_wall=time.time();now_mono=time.monotonic()
@@ -149,7 +162,11 @@ def main():
                 print('waist pitch target range clipping disabled:',unclipped_waist or unclipped_all,flush=True)
                 print('all-joint target range clipping disabled:',unclipped_all,flush=True)
                 return  # Reacquire fresh input after setup; no command sent yet.
-            out=controller.step(row['state_stamp'],row['position'],quat,q,qd,row['angular_velocity_body'],gravity)
+            mode=keyboard.read() if keyboard is not None else 'stand'
+            out=controller.step(row['state_stamp'],row['position'],quat,q,qd,row['angular_velocity_body'],gravity,mode=mode)
+            if keyboard is not None and out['phase']=='active':keyboard.set_ready(True)
+            if mode!=last_mode:
+                print('requested skill:',mode,flush=True);last_mode=mode
             generated=time.monotonic();state_sampled=generated-(time.time()-row['state_stamp'])
             packet={'names':names,'sequence':seq,'generated':generated,'state_sampled':state_sampled,
                     'measured_position':q.tolist(),'phase':out['phase'],
@@ -185,6 +202,7 @@ def main():
             # packet is a real gap and still latches.
             if seq==0 and 'stale or future' in str(exc):
                 print('dropped stale startup packet: '+str(exc),flush=True);return
+            if keyboard is not None:keyboard.set_ready(False)
             if controller is not None:controller.phase=Phase.FAULT;controller.reason=str(exc)
             print('policy worker fault: '+str(exc),flush=True)
             # The contract refuses to say which joint, so record the context: the
@@ -199,7 +217,9 @@ def main():
     sensor_qos=QoSProfile(depth=10,reliability=ReliabilityPolicy.BEST_EFFORT,durability=DurabilityPolicy.VOLATILE)
     node.create_subscription(String,state_topic,receive,sensor_qos)
     try:rclpy.spin(node)
-    finally:node.destroy_node();rclpy.try_shutdown()
+    finally:
+        if keyboard is not None:keyboard.close()
+        node.destroy_node();rclpy.try_shutdown()
 
 
 if __name__=='__main__':main()

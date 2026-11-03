@@ -413,3 +413,33 @@ travel or an actual force. No closed-loop simulation or physical verification
 establishes safe behavior. Synthetic controller and publisher tests verify the
 software selection and retained measured-state check only. No robot control
 was started by this task.
+
+## Continuous keyboard trial preparation (unvalidated)
+
+The user's all-joint-unclipped run `run-unclipped-all-20261103-215417` reached
+`active` and the last logged worker sequence was 5700. The IMU state record
+spans about 132 s; the joint recorder saved 5976 samples before a ROS shutdown
+exception. This is a single operator trial, not a movement, timing or safety
+acceptance test.
+
+An independent trial launcher now connects the real worker to a loopback-only
+browser keyboard using the existing `SkillGoal` five-skill scheduler. W/S
+select walk/backward, A/D select left/right turns, Shift+W selects jog. Key
+release, page blur or 0.5 s heartbeat loss selects the stand reference; the
+committed future window and stop trajectory can delay physical stopping. The
+zero-XY intervention applies when `stand` is requested; other skills retain
+their original anchor inputs.
+
+The runner, IMU source, publisher window and joint recorder have no preset
+180 s or 600 s stop. It exits on operator interrupt or if a monitored process
+exits. State diagnostics use bounded rolling samples and the joint recorder
+uses a bounded asynchronous queue with streamed files; output storage still
+grows with time. On interruption the program stops its own processes, but HAL
+behavior and independent host-loss protection remain unvalidated. The keyboard
+heartbeat is a skill selector, not a motor watchdog or emergency stop.
+
+Software tests cover the local HTTP listener, readiness/heartbeat, skill
+selection, asynchronous logging and signal handling. An additional fixed-state
+server smoke used the deployed model/reference and selected all five skills;
+it did not simulate dynamics or control a robot. The user starts all real
+robot commands; no real keyboard or movement test has been performed here.

@@ -82,8 +82,10 @@ class EarlyHandover:
                                  %(float('nan') if tilt is None else tilt,self.handover_max_tilt))
         self.requested=True
 
-    def step(self, now, position, quat_wxyz, q, qd, omega, gravity):
+    def step(self, now, position, quat_wxyz, q, qd, omega, gravity, *, mode='stand'):
         if self.phase is Phase.FAULT:raise ValueError('Controller fault latched: '+self.reason)
+        if mode not in ('stand','walk','backward','jog','turn_left_inplace','turn_right_inplace'):
+            self.fault('Unknown skill mode')
         position,quat,q,qd,omega,gravity=(np.asarray(x,dtype=float) for x in (position,quat_wxyz,q,qd,omega,gravity))
         if (position.shape!=(3,) or quat.shape!=(4,) or q.shape!=self.default.shape or qd.shape!=q.shape
             or omega.shape!=(3,) or gravity.shape!=(3,) or not np.isfinite(np.r_[now,position,quat,q,qd,omega,gravity]).all()
@@ -120,8 +122,8 @@ class EarlyHandover:
             # checks.
             obs=np.concatenate([h[term] for term in range(5) for h in self.history])
             try:
-                goal=self.tracker.goal(position,quat,q,'stand')
-                if self.zero_stand_anchor_xy:
+                goal=self.tracker.goal(position,quat,q,mode)
+                if self.zero_stand_anchor_xy and mode=='stand':
                     goal=np.asarray(goal).copy()
                     if goal.shape!=(729,):raise ValueError('Zero-XY experiment requires the 729-element anchor goal')
                     goal[-9:-7]=0.

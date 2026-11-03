@@ -2,11 +2,15 @@
 import json
 import multiprocessing as mp
 import queue
+import signal
 import time
 from pathlib import Path
 
 
 def _writer(out, records, delay):
+    # The parent owns shutdown and drains the queue. Terminal Ctrl-C otherwise
+    # interrupts this subprocess before the producer can preserve its evidence.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     counts = {'packets': 0, 'support-events': 0}
     files = {key: (Path(out)/(key + '.jsonl')).open('x') for key in counts}
     try:

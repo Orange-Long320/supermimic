@@ -27,6 +27,7 @@ def main():
     p.add_argument('--profile', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--seconds', type=float, default=120.)
+    p.add_argument('--continuous', action='store_true', help='Run until interrupted; retain rolling diagnostics')
     p.add_argument('--publish-rate', type=float, default=50.)
     p.add_argument('--topic', default='/supermimic/x2_online_lio/policy_state')
     p.add_argument('--fix-deg-x', type=float, default=0.)
@@ -95,7 +96,7 @@ def main():
         raise SystemExit('Calibration requires --assume-initial-rest; motion tests cannot prove rest')
     if a.init_bias_seconds <= 0. and not a.allow_unobserved_initial_velocity and not a.sim_support_xml:
         raise SystemExit('Initial velocity is unobserved; provide a declared-rest calibration or use the diagnostic override')
-    if not 1. <= a.seconds <= 600.:
+    if not a.continuous and not 1. <= a.seconds <= 600.:
         raise ValueError('Bounded duration required')
     if not 0. < a.max_joint_extrapolation <= .01:
         raise ValueError('Joint extrapolation limit must be in (0, 10 ms]')
@@ -167,9 +168,10 @@ def main():
                 'support_stale': 0, 'support_waiting': 0, 'support_output_stale': 0,
                 'support_queue_timeout': 0, 'support_queue_overflow': 0}
     timing = {'age_max': 0., 'publish_ms_max': 0.}
-    diagnostics = {'imu_callback_ms': [], 'joint_callback_ms': [], 'publish_work_ms': [],
-                   'imu_header_gaps_ms': [], 'imu_receive_age_ms': [], 'support_joint_lag_ms': [],
-                   'support_innovation_m_s': [], 'support_queue_wait_ms': [], 'support_height_correction_m': []}
+    diagnostic_keys = ('imu_callback_ms', 'joint_callback_ms', 'publish_work_ms',
+                       'imu_header_gaps_ms', 'imu_receive_age_ms', 'support_joint_lag_ms',
+                       'support_innovation_m_s', 'support_queue_wait_ms', 'support_height_correction_m')
+    diagnostics = {key: (deque(maxlen=200000) if a.continuous else []) for key in diagnostic_keys}
     last_imu_stamp = None
 
     class Producer(Node):
@@ -406,7 +408,7 @@ def main():
     last_publish = 0.
     publish_period = 1. / a.publish_rate
     try:
-        while time.monotonic() - started < a.seconds:
+        while a.continuous or time.monotonic() - started < a.seconds:
             rclpy.spin_once(node, timeout_sec=.001)
             now = time.monotonic()
             if now - last_publish < publish_period:
@@ -618,6 +620,8 @@ def main():
                                           'p99': float(np.percentile(values, 99)), 'max': float(max(values))}
                                          if values else {'count': 0})
                                   for key, values in diagnostics.items()}
+        if a.continuous:
+            summary['diagnostic_percentile_scope'] = 'last 200000 samples per metric, not full-session percentiles'
         (a.out / 'summary.json').write_text(json.dumps(summary, allow_nan=False) + '\n')
         print(json.dumps(summary, allow_nan=False), flush=True)
         if not logger_status['success']:

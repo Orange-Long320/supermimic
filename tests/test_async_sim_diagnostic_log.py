@@ -1,4 +1,6 @@
 import json
+import os
+import signal
 import time
 import pytest
 from supermimic.deploy.async_sim_diagnostic_log import AsyncDiagnosticLog
@@ -27,3 +29,21 @@ def test_slow_writer_cannot_block_callback_and_fails_closed(tmp_path):
     status = log.close(timeout=.2)
     assert not status['success'] and status['fault'] == 'diagnostic queue overflow'
     assert not log.process.is_alive()
+
+
+def test_interrupt_does_not_kill_writer_before_queue_drain(tmp_path):
+    log = AsyncDiagnosticLog(tmp_path)
+    try:
+        deadline=time.monotonic()+5.
+        while not (tmp_path/'packets.jsonl').exists() and time.monotonic()<deadline:
+            time.sleep(.01)
+        assert (tmp_path/'packets.jsonl').exists()
+        os.kill(log.process.pid, signal.SIGINT)
+        log.emit('packets', {'stamp_ns': 17})
+        status=log.close(timeout=5.)
+        assert status['success']
+        assert json.loads((tmp_path/'packets.jsonl').read_text())['stamp_ns']==17
+    finally:
+        if log.process.is_alive():
+            log.process.terminate()
+            log.process.join(timeout=2.)

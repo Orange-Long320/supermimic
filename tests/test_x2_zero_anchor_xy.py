@@ -7,7 +7,7 @@ from supermimic.deploy.early_handover import EarlyHandover, Phase
 class Tracker:
     def __init__(self, goal): self.value = goal
     def goal(self, position, quat, joints, mode):
-        if mode != 'stand': raise AssertionError('unexpected skill')
+        self.mode = mode
         return self.value
     def advance(self): pass
 
@@ -74,6 +74,19 @@ class ZeroAnchorTests(unittest.TestCase):
         c.request_handover()
         for i in range(10, 22): out = self.step(c, i*.02)
         np.testing.assert_allclose(out['position'][[0,13,14]],[3.,-5.,4.])
+
+    def test_keyboard_skill_selects_goal_and_zero_xy_only_for_stand(self):
+        goal=np.arange(729,dtype=np.float32);c,policy=self.controller(goal,True)
+        for i in range(10):self.step(c,i*.02)
+        c.request_handover();self.step(c,.2)
+        self.assertEqual(c.tracker.mode,'stand')
+        np.testing.assert_array_equal(policy.goal[-9:-7],[0.,0.])
+        z=np.zeros(31)
+        c.step(.22,[0,0,.6],[1,0,0,0],z,z,[0,0,0],[0,0,-1],mode='walk')
+        self.assertEqual(c.tracker.mode,'walk')
+        np.testing.assert_array_equal(policy.goal,goal)
+        with self.assertRaisesRegex(ValueError,'Unknown skill'):
+            c.step(.24,[0,0,.6],[1,0,0,0],z,z,[0,0,0],[0,0,-1],mode='invalid')
 
 
 if __name__ == '__main__': unittest.main()
