@@ -73,6 +73,10 @@ def main():
                         ' SDK leg gains hold the nominal stance with a steady-state sag:'
                         ' kp 40 on the ankle left it 0.25-0.35 rad below the reference, which'
                         ' leaned the body ~20 deg going into the handover.')
+    p.add_argument('--max-tilt', type=float, default=.70,
+                   help='Hard ceiling on the measured body tilt. The reference deployment'
+                        ' (official_sim_policy.py) has no attitude guard at all; this is a'
+                        ' hardware-only addition and can be raised to match the simulator.')
     p.add_argument('--handover-max-tilt', type=float,
                    help='Refuse the policy handover while the measured body tilt exceeds this'
                         ' many radians. The policy starts from an upright reference stance;'
@@ -221,7 +225,7 @@ def main():
         prep_target=[float(v) for v in startup],
         prep_target_source=a.prep_target,
         minimum_duration=a.prep_seconds, blend_seconds=a.blend_seconds,
-        max_tick_gap=a.max_tick_gap, max_tilt=.70, max_tilt_delta=a.max_tilt_delta, max_angular_speed=a.max_angular_speed,
+        max_tick_gap=a.max_tick_gap, max_tilt=a.max_tilt, max_tilt_delta=a.max_tilt_delta, max_angular_speed=a.max_angular_speed,
         handover_max_tilt=a.handover_max_tilt,
         max_state_age=a.max_state_age, max_target_age=a.max_state_age, output_hz=100,
         history_source=a.history_source,
