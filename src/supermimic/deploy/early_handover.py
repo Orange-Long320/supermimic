@@ -23,7 +23,7 @@ class EarlyHandover:
                  measured_lower, measured_upper, command_lower, command_upper, max_step,
                  *, max_velocity, max_acceleration, minimum_duration, blend_seconds,
                  max_tick_gap, max_tilt, max_angular_speed, policy, tracker_factory,
-                 history_source='executed', max_tilt_delta=None):
+                 history_source='executed', max_tilt_delta=None, handover_max_tilt=None):
         vectors=[np.asarray(x,dtype=float) for x in (start,target,default,scale,prep_kp,prep_kd,policy_kp,policy_kd,
                  measured_lower,measured_upper,command_lower,command_upper,max_step,max_velocity,max_acceleration)]
         n=len(vectors[0]);
@@ -46,6 +46,13 @@ class EarlyHandover:
         # reference attitude, so a statically tilted mount (for example a hanging
         # harness) does not fault every tick. max_tilt stays a hard ceiling.
         self.max_tilt_delta=max_tilt_delta;self.tilt_reference=None
+        # Handover gate: the policy is trained from an upright reference stance.
+        # Entering it from a body that is measurably tilted makes the policy
+        # correct a lean the legs cannot hold, which saturates the target instead
+        # of standing up, so refuse the request while the tilt is too large.
+        if handover_max_tilt is not None and not (math.isfinite(handover_max_tilt) and 0<handover_max_tilt<math.pi):
+            raise ValueError('Invalid explicit control contract')
+        self.handover_max_tilt=handover_max_tilt;self.last_tilt=None
         self.policy=policy;self.tracker_factory=tracker_factory;self.tracker=None
         self.phase=Phase.PREPARE;self.reason=None;self.fault_context=None;self.history=deque(maxlen=10)
         self.history_source=history_source
@@ -60,6 +67,11 @@ class EarlyHandover:
 
     def request_handover(self):
         if self.phase is not Phase.PREPARE or len(self.history)!=10:raise ValueError('Ten fresh observations required')
+        if self.handover_max_tilt is not None:
+            tilt=self.last_tilt
+            if tilt is None or tilt>self.handover_max_tilt:
+                raise ValueError('Handover refused: measured body tilt %.3f rad exceeds the %.3f rad gate'
+                                 %(float('nan') if tilt is None else tilt,self.handover_max_tilt))
         self.requested=True
 
     def step(self, now, position, quat_wxyz, q, qd, omega, gravity):
@@ -76,6 +88,7 @@ class EarlyHandover:
         tilt=math.acos(float(np.clip(-gravity[2]/np.linalg.norm(gravity),-1.,1.)))
         if self.max_tilt_delta is not None and self.tilt_reference is None:self.tilt_reference=tilt
         deviation=0. if self.tilt_reference is None else abs(tilt-self.tilt_reference)
+        self.last_tilt=tilt
         if (tilt>self.max_tilt or deviation>(self.max_tilt_delta if self.max_tilt_delta is not None else 0.)
                 or np.linalg.norm(omega)>self.max_omega):self.fault('Tilt or angular speed outside contract',
             dict(tilt_rad=tilt,max_tilt_rad=self.max_tilt,tilt_deviation_rad=deviation,
@@ -104,6 +117,15 @@ class EarlyHandover:
             except Exception as exc:self.fault('Policy or goal failed: '+str(exc))
             if action.shape!=self.default.shape or not np.isfinite(action).all():self.fault('Invalid policy output')
             desired=self.default+self.scale*action
+            # Diagnostic only: the first policy ticks are what decide whether the
+            # handover is gentle, and a saturated target alone does not say which
+            # joint moved or how far the policy asked to go.
+            self.diagnostics=dict(action=action.copy(),desired=desired.copy(),measured=q.copy())
+            if not hasattr(self,'obs_dump'):
+                self.obs_dump=dict(obs=obs.tolist(),q=q.tolist(),qd=list(map(float,qd)),
+                    omega=list(map(float,omega)),gravity=list(map(float,gravity)),
+                    previous=list(map(float,self.previous)),goal=list(map(float,goal)),
+                    action=action.tolist(),default=self.default.tolist(),scale=self.scale.tolist())
             s=float(np.clip((now-self.blend_started)/self.blend_seconds,0.,1.));blend=10*s**3-15*s**4+6*s**5
             target=(1-blend)*self.blend_start+blend*desired;velocity=np.zeros_like(q)
             kp=(1-blend)*self.prep_kp+blend*self.policy_kp;kd=(1-blend)*self.prep_kd+blend*self.policy_kd

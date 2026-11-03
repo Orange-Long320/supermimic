@@ -91,7 +91,7 @@ def main():
     if state_publishers!=1 or target_subscribers!=1:
         raise ValueError(f'Expected one state producer and one motor publisher; '
                          f'got state publishers {state_publishers} and target subscribers {target_subscribers}')
-    pub=node.create_publisher(String,target_topic,qos);controller=None;session=None;seq=0;last_receipt=None;dropped=0;seen=None
+    pub=node.create_publisher(String,target_topic,qos);controller=None;session=None;seq=0;last_receipt=None;dropped=0;seen=None;diag_prints=[0]
     def request(msg):
         if controller is not None and msg.data==plan_hash:
             try:controller.request_handover();print('policy handover requested',flush=True)
@@ -136,7 +136,8 @@ def main():
                     max_acceleration=plan['max_acceleration'],minimum_duration=plan['minimum_duration'],
                     blend_seconds=plan['blend_seconds'],max_tick_gap=plan['max_tick_gap'],max_tilt=plan['max_tilt'],
                     max_angular_speed=plan['max_angular_speed'],policy=policy,tracker_factory=factory,
-                    history_source=plan['history_source'],max_tilt_delta=plan.get('max_tilt_delta'))
+                    history_source=plan['history_source'],max_tilt_delta=plan.get('max_tilt_delta'),
+                    handover_max_tilt=plan.get('handover_max_tilt'))
                 return  # Reacquire fresh input after setup; no command sent yet.
             out=controller.step(row['state_stamp'],row['position'],quat,q,qd,row['angular_velocity_body'],gravity)
             generated=time.monotonic();state_sampled=generated-(time.time()-row['state_stamp'])
@@ -144,11 +145,25 @@ def main():
                     'measured_position':q.tolist(),'phase':out['phase'],
                     **{k:out[k].tolist() for k in ('position','velocity','effort','stiffness','damping')}}
             m=String();m.data=json.dumps(packet,allow_nan=False);pub.publish(m);seq+=1;last_receipt=now_mono
-            if seq%50==0:
-                print('phase %s seq %d saturated %d max_over %.3f rate_limited %d max_step_over %.3f'
+            diag=getattr(controller,'diagnostics',None)
+            if diag is not None:diag_prints[0]+=1
+            dump_path=os.environ.get('SM_DIAG_OBS')
+            if dump_path and getattr(controller,'obs_dump',None) is not None:
+                Path(dump_path).write_text(json.dumps(controller.obs_dump,allow_nan=False))
+                controller.obs_dump=None
+            if seq%50==0 or (diag is not None and diag_prints[0]<=6):
+                sat=[names[i] for i in getattr(controller,'saturation_joints',[])][:4]
+                print('phase %s seq %d saturated %d max_over %.3f rate_limited %d max_step_over %.3f sat_joints %s'
                       % (out['phase'],seq,getattr(controller,'saturated',0),
                          getattr(controller,'saturation_max',0.),getattr(controller,'rate_limited',0),
-                         getattr(controller,'rate_limit_max',0.)),flush=True)
+                         getattr(controller,'rate_limit_max',0.),','.join(sat) or '-'),flush=True)
+                if diag is not None:
+                    gap=np.abs(diag['desired']-diag['measured'])
+                    worst=np.argsort(-gap)[:5]
+                    print('  policy tick %d: desired-measured '%diag_prints[0]
+                          +', '.join('%s %+.3f'%(names[i],diag['desired'][i]-diag['measured'][i]) for i in worst),
+                          flush=True)
+
         except Exception as exc:
             # No target has been sent yet, so a stale startup packet carries no
             # control history: wait for a fresh one instead of latching a fault

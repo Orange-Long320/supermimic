@@ -75,7 +75,11 @@ def validated_contract(plan_path,consent_path,now,*,isolated=False):
         # emergency stop as automatic protection against a dead host/network.
         supervision=plan.get('manual_supervision',{})
         seconds=supervision.get('max_trial_seconds')
-        if (type(seconds) not in (int,float) or not math.isfinite(seconds) or not 0<seconds<=30
+        # A removed window is accepted only when the plan says so explicitly, so a
+        # missing or malformed value can never be read as "no limit".
+        unbounded=supervision.get('max_trial_seconds') is None and plan.get('unbounded') is True
+        if ((not unbounded and (type(seconds) not in (int,float) or not math.isfinite(seconds)
+                                or not 0<seconds<=30))
                 or supervision.get('support_condition')!='feet_loaded_fall_arrest'
                 or supervision.get('automatic_host_loss_protection') is not False):
             raise ValueError('Invalid bounded manual-supervision plan')
@@ -170,7 +174,8 @@ def main():
     validated_contract(a.plan,a.consent,time.time(),isolated=bool(a.isolated_prefix))
     supervisor=TargetLeaseSupervisor(plan['joint_names'],plan['fallback_damping'],
         max_state_age=plan['max_state_age'],max_target_age=plan['max_target_age'],
-        max_active_seconds=(plan['manual_supervision']['max_trial_seconds']
+        outage_grace=plan['max_tick_gap'],
+        max_active_seconds=(plan['manual_supervision'].get('max_trial_seconds')
                             if plan.get('safety_mode') in ('manual_supervised_trial',
                                                            'manual_supervised_unvalidated_trial') else None))
     publishers={g:node.create_publisher(JointCommandArray,t,qos) for g,t in topics.items()}

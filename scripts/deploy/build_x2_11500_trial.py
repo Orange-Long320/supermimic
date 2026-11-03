@@ -7,6 +7,7 @@ work failed to pass is recorded as False, and the plan names it as unvalidated.
 import argparse
 import hashlib
 import json
+import math
 import time
 from pathlib import Path
 
@@ -35,6 +36,9 @@ def main():
     p.add_argument('--release', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--max-trial-seconds', type=float, default=30.)
+    p.add_argument('--unbounded', action='store_true',
+                   help='Explicitly drop the bounded manual-trial window. The supervisor stops'
+                        ' enforcing max_active_seconds, so the operator alone ends the trial.')
     p.add_argument('--prep-seconds', type=float, default=6.)
     p.add_argument('--max-tick-gap', type=float, default=.35)
     p.add_argument('--max-target-step', type=float, default=.15)
@@ -63,6 +67,16 @@ def main():
                         ' defined around, so preparing there keeps the handover step small.')
     p.add_argument('--extend-margin', type=float, default=.05,
                    help='Radians added beyond a measured pose that falls outside the file bounds')
+    p.add_argument('--prep-leg-kp-scale', type=float, default=1.,
+                   help='Multiplier on the preparation stiffness of the hip, knee and ankle'
+                        ' joints (kd scales with it, so the damping ratio is unchanged). The'
+                        ' SDK leg gains hold the nominal stance with a steady-state sag:'
+                        ' kp 40 on the ankle left it 0.25-0.35 rad below the reference, which'
+                        ' leaned the body ~20 deg going into the handover.')
+    p.add_argument('--handover-max-tilt', type=float,
+                   help='Refuse the policy handover while the measured body tilt exceeds this'
+                        ' many radians. The policy starts from an upright reference stance;'
+                        ' handed over from a lean it saturates trying to correct it.')
     a = p.parse_args()
 
     release = a.release.resolve()
@@ -83,6 +97,17 @@ def main():
     prep_kd = [float(special.get(name, {}).get('kd', gains['default_kd'])) for name in names]
     policy_kp = [float(profile['stiffness'][name]) for name in names]
     policy_kd = [float(profile['damping'][name]) for name in names]
+    if a.prep_leg_kp_scale != 1.:
+        if not (math.isfinite(a.prep_leg_kp_scale) and 1. <= a.prep_leg_kp_scale <= 8.):
+            raise ValueError('prep-leg-kp-scale must be within 1..8')
+        scaled = []
+        for i, name in enumerate(names):
+            if any(token in name for token in ('_hip_', '_knee_', '_ankle_')):
+                prep_kp[i] *= a.prep_leg_kp_scale
+                prep_kd[i] *= a.prep_leg_kp_scale
+                scaled.append(name)
+        if not scaled:
+            raise ValueError('No leg joint matched the stiffness scale')
 
     # Mechanical limits from the device URDF. NOT a validated HAL command range:
     # this is the disclosed substitution for the missing command contract.
@@ -103,8 +128,18 @@ def main():
     # by a fixed margin, and record every extension in the plan and the evidence.
     extensions = []
     unvalidated = list(UNVALIDATED)
+    if a.unbounded:
+        unvalidated.append('bounded manual-trial window removed: the policy runs until the operator stops it'
+                           ' and there is no automatic host-loss protection')
     unvalidated.append(f'state packet and target lease bound widened to {a.max_state_age:.2f} s '
                        'to cover measured state gaps of up to 244 ms; a 50 ms bound latched a fault')
+    if a.prep_leg_kp_scale != 1.:
+        unvalidated.append(f'preparation hip/knee/ankle stiffness scaled by {a.prep_leg_kp_scale:.2f}'
+                           ' (kd scaled with kp) above the SDK table to stop the stance sagging;'
+                           ' this gain set is not the vendor default and is not validated')
+    if a.handover_max_tilt is not None:
+        unvalidated.append(f'policy handover refused while the measured body tilt exceeds '
+                           f'{a.handover_max_tilt:.3f} rad; the reference deployment has no such gate')
     if a.snapshot is not None:
         snapshot = json.loads(a.snapshot.read_text())
         if snapshot['names'] != names:
@@ -187,15 +222,17 @@ def main():
         prep_target_source=a.prep_target,
         minimum_duration=a.prep_seconds, blend_seconds=a.blend_seconds,
         max_tick_gap=a.max_tick_gap, max_tilt=.70, max_tilt_delta=a.max_tilt_delta, max_angular_speed=a.max_angular_speed,
+        handover_max_tilt=a.handover_max_tilt,
         max_state_age=a.max_state_age, max_target_age=a.max_state_age, output_hz=100,
         history_source=a.history_source,
         safety_mode='manual_supervised_unvalidated_trial',
         unvalidated_items=unvalidated,
         bound_extensions=extensions,
-        manual_supervision=dict(max_trial_seconds=a.max_trial_seconds,
+        manual_supervision=dict(max_trial_seconds=(None if a.unbounded else a.max_trial_seconds),
                                support_condition='feet_loaded_fall_arrest',
                                automatic_host_loss_protection=False,
                                explicitly_unvalidated=True),
+        unbounded=bool(a.unbounded),
     )
     plan_path = a.out / 'plan.json'
     plan_path.write_text(json.dumps(plan, indent=2) + '\n')
@@ -218,7 +255,8 @@ def main():
         dict(joint_names=names, position=startup), indent=2) + '\n')
 
     summary = dict(plan_sha256=plan_hash, evidence_sha256=digest(evidence_path),
-                   max_trial_seconds=a.max_trial_seconds, prep_seconds=a.prep_seconds,
+                   max_trial_seconds=(None if a.unbounded else a.max_trial_seconds),
+                   prep_seconds=a.prep_seconds, unbounded=bool(a.unbounded),
                    max_tick_gap=a.max_tick_gap, max_target_step=a.max_target_step,
                    prep_kp_range=[min(prep_kp), max(prep_kp)],
                    policy_kp_range=[min(policy_kp), max(policy_kp)],

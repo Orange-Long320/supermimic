@@ -49,7 +49,7 @@ stamp() { printf '[%s] ' "$(date +%H:%M:%S)"; echo "$*"; }
 stamp "start IMU state producer"
 nohup flock -n -F "$base/online-pelvis.lock" env PYTHONPATH="$PYTHONPATH_RELEASE" /usr/bin/python3 \
   "$base/publish_pelvis_packet.py" --profile "$release/fk-only/profile.json" \
-  --model "$release/fk-only/fk-only.xml" --src "$base/producer-src/src" --out "$trial/state" --seconds 75 \
+  --model "$release/fk-only/fk-only.xml" --src "$base/producer-src/src" --out "$trial/state" --seconds $((prep_seconds + active_seconds + 40)) \
   --init-bias-seconds 3 --assume-initial-rest --imu-only-zupt --subscribe-depth 3 --max-age 0.035 \
   > "$trial/state.log" 2>&1 &
 state_pid=$!
@@ -65,7 +65,7 @@ sleep 3
 stamp "record joint states (read only)"
 # End the recording before cleanup so it writes its file: killed early it produced
 # no trajectory at all, which left the last five runs without joint evidence.
-nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/record_joints.py" --seconds 30 \
+nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/record_joints.py" --seconds $((prep_seconds + active_seconds)) \
   --startup "$trial/contract/startup.json" --out "$trial/joint-recording.json" \
   > "$trial/joints.log" 2>&1 &
 monitor_pid=$!

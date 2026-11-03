@@ -228,3 +228,80 @@ observation-assembly error.
 Until that offset is explained (trained default pose, joint sign convention, or
 exported action scale), a handover will fault on the elbows regardless of the
 preparation pose.
+
+## Session 20261103 afternoon: the handover fault was a bounded-window bug
+
+Runs `run-p26` … `run-q4` in
+`trials/11500_prep_imu_20261102_r1/` on PC2 (container `lxh`). Every run below
+is an explicitly unvalidated manual trial with the operator at the e-stop.
+
+### What actually stopped the earlier policy runs
+
+`run-p26`, `run-p28` and `run-p29` did not fail on the policy. The publisher hit
+`target lease fault: Bounded manually supervised trial ended` 30 s after its
+first command, fell back to zero stiffness, and the joints sagged. `--unbounded`
+only cleared the contract log line: `plan.json` still carried
+`manual_supervision.max_trial_seconds = 30`, which is what the publisher reads.
+Fixed in `build_x2_11500_trial.py` (the plan now carries `None` plus
+`unbounded: true`) and accepted in `x2_hardware_publisher.validated_contract`
+only for that explicit combination. `run-q4` confirms it: 7150 policy ticks with
+no fallback.
+
+### The policy is not the problem
+
+- `goal[:31] + action_default` equals the preparation target to 6e-4 rad, so the
+  goal construction matches the exported policy.
+- Re-running the policy offline on the observation the live worker dumped
+  (`run-p30/obs.json`) reproduces the live action bit for bit (max diff 0.0).
+- The reference trajectory frame is upright (0.0 deg); the fitted dataset is not
+  leaning, so a lean on the robot is a robot-side condition.
+
+### The robot-side condition: the reference stance sags under load
+
+With the SDK preparation gains the ankle sits 0.25–0.35 rad below its target and
+the body leans ~20 deg. Scaling the hip/knee/ankle preparation stiffness by 3.5
+(kd with kp, `--prep-leg-kp-scale`) moves it to:
+
+| quantity | SDK gains | scaled 3.5 |
+| --- | --- | --- |
+| worst joint error at end of preparation | 0.45 rad | 0.178 rad |
+| ankle pitch error | 0.40 rad | 0.11–0.18 rad |
+| body tilt after preparation | 20.0 deg | 19.3 deg |
+| peak joint rate | 1.25 rad/s | 0.43 rad/s |
+
+The tilt does not follow the joint error: the remaining lean is the PD
+steady-state sag, so an I-term (or much higher gains) is still needed to reach
+the reference attitude. Not implemented yet.
+
+### `run-q4`: the policy does straighten the body
+
+`SM_PREP_SECONDS=20 SM_ACTIVE_SECONDS=180`, contract with
+`--prep-leg-kp-scale 3.5 --handover-max-tilt 0.40 --max-tilt-delta 0.6
+--blend-seconds 6 --max-target-step 0.03 --unbounded`. Handover acknowledged at
+14:09:43 and the policy stayed in `phase active` with no tilt, angular-speed,
+state-age or lease fault:
+
+| time under policy | body tilt |
+| --- | --- |
+| 0 s (handover) | 19.4 deg |
+| ~40 s | 7.5 deg |
+| ~120 s | 4–5 deg (last 10 s mean 5.0, max 14.7) |
+
+The policy still saturates the ankle by up to 3.2 rad, which is expected: the
+policy-phase ankle stiffness is 14.3 (soft, so the policy asks past the limit to
+produce torque) and the reference deployment performs no range check at all.
+Saturation is a normal actuator condition here, not a contract violation.
+
+The joint recorder was stopped before writing (`run-q4/joints.log` is empty);
+the pelvis attitude above comes from `state/packets.jsonl`. A joint-level record
+of a long policy run is still missing.
+
+### Standing caveats
+
+- The operator stopped the run at ~145 s of policy time, so this is one run, not
+  a repeatable result.
+- Encoder zero remains unverified; the shoulder-roll residual (0.13–0.45) is the
+  largest one and it is the joint whose zero is not confirmed.
+- `handover_max_tilt` exists in the plan but was set to 0.40 rad, i.e. above the
+  0.34 rad the preparation actually reaches, so it did not gate anything in this
+  run.
