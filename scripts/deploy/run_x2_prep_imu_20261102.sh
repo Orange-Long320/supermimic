@@ -29,7 +29,7 @@ nohup flock -n -F "$base/online-pelvis.lock" env PYTHONPATH="$PYTHONPATH_RELEASE
   "$base/publish_pelvis_packet.py" --profile "$release/fk-only/profile.json" \
   --model "$release/fk-only/fk-only.xml" --src "$base/producer-src/src" --out "$trial/state" --seconds 70 \
   --init-bias-seconds 3 --assume-initial-rest --imu-only-zupt \
-  --subscribe-depth 3 \
+  --subscribe-depth 3 --max-age 0.035 \
   > "$trial/state.log" 2>&1 &
 state_pid=$!
 sleep 8

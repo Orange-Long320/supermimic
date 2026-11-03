@@ -181,3 +181,50 @@ Next attempt needs the robot out of the squat first: unload the feet (raise the
 harness) so the legs can extend, or use the native motion controller to stand it
 up before the trial. Raising `--max-tilt-delta` to 0.35 and preparing to
 `action_default` are already in place.
+
+## Preparation to the policy's starting pose (run-m1 .. run-m4)
+
+The policy's action offset `action_default` is the stance its observations are
+defined around, so the preparation now targets it (`--prep-target action_default`).
+
+Two failures happened before the pose was reached, both in the trial harness
+rather than the robot:
+
+* run-m2: the publisher latched `Source state lease expired` because packet age
+  reached 56 ms, above the 50 ms lease, and every later command was rejected as
+  `Command step outside contract`. The arms and waist therefore never moved.
+* run-m3: the ad-hoc preflight used `pgrep -f '<pattern>'`, whose own command line
+  contains the pattern, so it matched itself and aborted before anything ran.
+
+Fix: the producer now publishes only packets up to 35 ms old (`--max-age 0.035`),
+leaving the publisher's 10 ms tick inside the 50 ms lease. That is a tightening
+on the producer side; no gate was widened.
+
+run-m4 (plan `ce638b2c1e9efa4f`) reached the pose with no publisher fault at all:
+
+| joint | start | end | target | residual |
+| --- | ---: | ---: | ---: | ---: |
+| left knee | +0.528 | +0.610 | +0.669 | -0.059 |
+| right knee | +0.586 | +0.609 | +0.669 | -0.060 |
+| left ankle pitch | -0.338 | -0.386 | -0.363 | -0.023 |
+| right ankle pitch | -0.437 | -0.407 | -0.363 | -0.044 |
+| left hip pitch | -0.358 | -0.390 | -0.312 | -0.078 |
+| left elbow | -0.129 | -0.602 | -0.600 | -0.002 |
+| left shoulder pitch | -0.488 | +0.110 | +0.200 | -0.090 |
+| waist pitch | +0.349 | +0.063 | +0.000 | +0.063 |
+
+Worst residual over all 31 joints is the shoulder roll (0.135 / 0.113), the joint
+whose encoder zero is still unverified. Peak measured rate 0.45 rad/s.
+
+## Open blocker for handover: the policy's elbow baseline
+
+Offline, with the nominal observation and the real `SkillGoal`, the policy asks
+for an elbow action of about +4.5, i.e. target -2.50 rad, against a command
+lower bound of -2.356. This does not depend on the goal: a zero goal gives
++4.50, a quarter-magnitude goal +4.52, the real goal +4.67, the synthetic fixture
+goal +4.87. So it is a baseline offset in the policy output, not a goal or
+observation-assembly error.
+
+Until that offset is explained (trained default pose, joint sign convention, or
+exported action scale), a handover will fault on the elbows regardless of the
+preparation pose.

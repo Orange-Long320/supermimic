@@ -50,7 +50,7 @@ stamp "start IMU state producer"
 nohup flock -n -F "$base/online-pelvis.lock" env PYTHONPATH="$PYTHONPATH_RELEASE" /usr/bin/python3 \
   "$base/publish_pelvis_packet.py" --profile "$release/fk-only/profile.json" \
   --model "$release/fk-only/fk-only.xml" --src "$base/producer-src/src" --out "$trial/state" --seconds 75 \
-  --init-bias-seconds 3 --assume-initial-rest --imu-only-zupt --subscribe-depth 3 \
+  --init-bias-seconds 3 --assume-initial-rest --imu-only-zupt --subscribe-depth 3 --max-age 0.035 \
   > "$trial/state.log" 2>&1 &
 state_pid=$!
 sleep 8
