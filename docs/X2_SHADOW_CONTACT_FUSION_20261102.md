@@ -174,3 +174,23 @@ startup_max_delta_from_urdf_bound   2.460847
 高度 0.6208 m 与独立雷达记录吻合，是这次修正正确的旁证。
 
 **范围说明**：修正目前只落在 `publish_pelvis_packet.py`。`shadow_imu_kalman.py`、`shadow_contact_fusion.py`、`shadow_imu_integration.py` 仍带同一缺陷；它们的水平漂移结论自洽（偏置状态吸收了固定旋转），但任何涉及姿态输出或 FK 的量都不可用。
+
+## 11-03 续：契约拒绝的根因与当前阻塞
+
+### `Invalid explicit control contract` 的根因
+
+`EarlyHandover` 的第一个入参是**当前实测关节角**（worker 里传 `q`），不是启动姿态。校验要求实测姿态落在计划的 `measured_lower/upper` 内。此前我用旧构建器、不带实测快照生成计划，边界就是文件范围，而当前实测姿态越界，于是 worker 在构造控制器时直接拒绝。
+
+两轮安全门也确实生效：consent 过期（>300 s）与就绪证据过期（>120 s）各自独立拦住过启动，**期间没有任何电机指令**（关节记录最大速率 0.00–0.0096 rad/s，最大行程全 0.0）。
+
+改用 `build_x2_11500_trial.py --snapshot <实测快照> --extend-margin 0.05` 重建后，实测姿态落在全部边界内（越界关节 0），计划哈希 **fd8e81ce12740185**。该哈希取代用户先前引用的 `3720f4ec`：计划内嵌了就绪证据路径与哈希、以及按实测快照扩展的边界，每次重建都会变。
+
+扩展项（按 `extend-margin` 记录在计划中）：`left_shoulder_roll_joint` 下限、`right_shoulder_roll_joint` 上限、`left_shoulder_yaw_joint` 上限。
+
+### 当前阻塞：主机负载导致状态链降级
+
+重启后复测状态生产者：发布 **8.7 Hz**、181 次因五路时间跨度被跳过、包年龄最大 **55.6 ms**，已超过 worker 的 `max_state_age=50 ms`。此前负载约 6 时是 45.9 Hz / 6.3 ms。
+
+占用来源（只读观测）：`/home/agi/.vscode-server` 的 node 进程约 386% CPU，另有相机、感知、nvargus 等厂商进程；主机 load average 17.78。VS Code 服务进程不属于本项目，未停止。
+
+结论：在这个负载下启动，worker 大概率因状态包年龄超限而锁存，属于可预见的无效尝试。需要先降低负载或等待，再复测生产者达到约 45 Hz、年龄 <10 ms 后再上电。
