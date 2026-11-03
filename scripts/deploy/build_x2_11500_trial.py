@@ -50,6 +50,10 @@ def main():
                    help='What the observation feeds back as the previous action. The reference'
                         ' deployment feeds the raw policy action; deriving it from the executed'
                         ' (clamped) target turns joint saturation into a growing bias.')
+    p.add_argument('--zero-stand-anchor-xy', action='store_true',
+                   help='Experimental: replace only the standing anchor translation x/y inputs with zero')
+    p.add_argument('--operator-confirms-support-and-estop', action='store_true',
+                   help='Operator confirmed feet loaded, fall arrest and checked emergency stop')
     p.add_argument('--max-angular-speed', type=float, default=2.,
                    help='Body angular-speed fault limit (rad/s). The policy drives the body to'
                         ' 2.74 rad/s during handover on hardware.')
@@ -82,6 +86,8 @@ def main():
                         ' many radians. The policy starts from an upright reference stance;'
                         ' handed over from a lean it saturates trying to correct it.')
     a = p.parse_args()
+    if a.zero_stand_anchor_xy and not a.operator_confirms_support_and_estop:
+        raise ValueError('Zero-XY hardware trial requires explicit operator confirmation of support and emergency stop')
 
     release = a.release.resolve()
     candidate = json.loads((release / 'startup-candidate.json').read_text())
@@ -132,6 +138,8 @@ def main():
     # by a fixed margin, and record every extension in the plan and the evidence.
     extensions = []
     unvalidated = list(UNVALIDATED)
+    if a.zero_stand_anchor_xy:
+        unvalidated.append('stand anchor x/y are forced to zero as an unvalidated control intervention; position hold is removed')
     if a.unbounded:
         unvalidated.append('bounded manual-trial window removed: the policy runs until the operator stops it'
                            ' and there is no automatic host-loss protection')
@@ -191,7 +199,7 @@ def main():
         preparation_and_handover_validated=False,
         command_limits_validated=False,
         state_pipeline_validated=False,
-        native_mc_stopped_verified=True,
+        native_mc_stopped_verified=False,
         independent_hardware_failsafe_validated=False,
         manual_supervised_trial_validated=False,
         source='software preflight reports/preflight-r1 plus live read-only measurement this session',
@@ -229,6 +237,7 @@ def main():
         handover_max_tilt=a.handover_max_tilt,
         max_state_age=a.max_state_age, max_target_age=a.max_state_age, output_hz=100,
         history_source=a.history_source,
+        zero_stand_anchor_xy=bool(a.zero_stand_anchor_xy),
         safety_mode='manual_supervised_unvalidated_trial',
         unvalidated_items=unvalidated,
         bound_extensions=extensions,

@@ -338,3 +338,29 @@ angular-speed checks, effectively no target-step limit or handover ramp, and an
 unbounded publisher window. Preparation/command limits, state estimation,
 hardware fault response and encoder zero remain unvalidated. No new hardware
 control or startup was performed in this follow-up.
+
+## Standing anchor x/y zero experiment (unvalidated)
+
+At the user's request an isolated launcher can set exactly the first two of the
+final nine goal values (anchor-frame relative translation x/y) to zero on each
+standing policy inference. Height, six orientation values and the future motion
+window are retained. The plan binds and reports `zero_stand_anchor_xy=true`;
+the default controller path leaves the goal intact. This is not the existing
+`zero-xy` world-root intervention and it removes horizontal position feedback.
+
+Offline replay of the recorded `run-p30` first policy observation reproduced the
+logged action within 9.54e-7. With the recorded observation and goal except for
+the two zeroed components, seven unclamped targets were outside the model file
+ranges both before and after; maximum excess changed from 2.0126 to 2.0149 rad.
+This is one fixed input, not a closed-loop prediction or hardware validation.
+Result: server `logs/x2_handover_forward_20261103_r1/zero-xy-validation-r1.json`.
+
+The trial uses the same earlier simulator-semantics hardware gains and guards,
+including an effectively disabled attitude guard and step limit, a 1 ms blend,
+and an unbounded publisher window; it is not a verified forward-surge fix.
+The launcher requires the operator to confirm loaded feet, fall-arrest support
+and the checked emergency stop, and does not stop another publisher. The prior
+native MC publisher was observed on all four command topics; its current state
+must be rechecked, and this project does not make a control-mode change.
+Software tests verify only the intended indices, unchanged input, rejection of
+wrong dimensions, and a synthetic plan. No new physical test was run.

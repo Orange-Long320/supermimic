@@ -15,6 +15,8 @@ release=${1:?release directory}
 trial=${2:?new trial directory}
 base=/home/agi/lxh-supermimic
 script=/home/agi/lxh-supermimic/trials/11500_unvalidated_20261102_r1
+worker_script=${SM_WORKER_SCRIPT:-$script/x2_11500_worker.py}
+recorder_script=${SM_RECORDER_SCRIPT:-$script/record_joints.py}
 prep_seconds=${SM_PREP_SECONDS:-6}
 active_seconds=${SM_ACTIVE_SECONDS:-12}
 source /opt/ros/humble/setup.bash
@@ -37,10 +39,10 @@ consent=$trial/contract/consent.json
 # occupied, so the new publisher exits with "Another motor command publisher
 # exists" and the *old* one silently absorbs the new targets under the old
 # contract. Refuse to start instead of running a trial nobody is driving.
-stray=$(pgrep -f 'x2_hardware_publisher.py|publish_pelvis_packet.py|x2_11500_worker.py' || true)
+stray=$(pgrep -f 'x2_hardware_publisher[.]py|publish_pelvis_packet[.]py|x2_11500_worker[^ ]*[.]py' || true)
 if [ -n "$stray" ]; then
   echo "stray trial process still running; refusing to start:" >&2
-  pgrep -af 'x2_hardware_publisher.py|publish_pelvis_packet.py|x2_11500_worker.py' >&2
+  pgrep -af 'x2_hardware_publisher[.]py|publish_pelvis_packet[.]py|x2_11500_worker[^ ]*[.]py' >&2
   exit 1
 fi
 
@@ -65,13 +67,13 @@ sleep 3
 stamp "record joint states (read only)"
 # End the recording before cleanup so it writes its file: killed early it produced
 # no trajectory at all, which left the last five runs without joint evidence.
-nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/record_joints.py" --seconds $((prep_seconds + active_seconds)) \
+nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$recorder_script" --seconds $((prep_seconds + active_seconds)) \
   --startup "$trial/contract/startup.json" --out "$trial/joint-recording.json" \
   > "$trial/joints.log" 2>&1 &
 monitor_pid=$!
 
 stamp "start policy worker"
-nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/x2_11500_worker.py" \
+nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$worker_script" \
   --plan "$plan" --consent "$consent" > "$trial/worker.log" 2>&1 &
 worker_pid=$!
 
@@ -123,7 +125,7 @@ sleep "$prep_seconds"
 handover_acknowledged=false
 for attempt in 1 2 3 4; do
   stamp "policy handover request, attempt $attempt"
-  if env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/x2_11500_worker.py" \
+  if env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$worker_script" \
     --plan "$plan" --consent "$consent" --request-policy > "$trial/request-$attempt.log" 2>&1; then
     request_ok=true
   else

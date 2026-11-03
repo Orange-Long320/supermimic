@@ -59,13 +59,17 @@ class EarlyHandoverTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'latched'):
             self.tick(c,.051489)
 
-    def test_bad_policy_target_and_jump_are_faults(self):
+    def test_finite_policy_target_is_clamped_but_nonfinite_faults(self):
         c=self.make();
         for i in range(10):self.tick(c,i*.02)
-        c.request_handover();self.tick(c,.2);c.policy.infer=lambda obs,goal:np.array([99.])
-        with self.assertRaisesRegex(ValueError,'command contract'):self.tick(c,.22)
-        self.assertEqual(c.fault_context['indices'],[0])
-        self.assertEqual(c.fault_context['raw_policy_desired'],[99.])
+        c.request_handover();self.tick(c,.2);previous=c.last_target.copy();c.policy.infer=lambda obs,goal:np.array([99.])
+        command=self.tick(c,.22)
+        self.assertLessEqual(abs(command['position'][0]-previous[0]),.5)
+        self.assertEqual(c.saturated,1)
+        self.assertEqual(c.rate_limited,1)
+        c.policy.infer=lambda obs,goal:np.array([np.nan])
+        with self.assertRaisesRegex(ValueError,'Invalid policy output'):self.tick(c,.24)
+        self.assertEqual(c.phase,Phase.FAULT)
 
     def test_policy_history_uses_clean_output_during_blending(self):
         c=self.make(history_source='policy')

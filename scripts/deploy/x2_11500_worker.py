@@ -137,7 +137,9 @@ def main():
                     blend_seconds=plan['blend_seconds'],max_tick_gap=plan['max_tick_gap'],max_tilt=plan['max_tilt'],
                     max_angular_speed=plan['max_angular_speed'],policy=policy,tracker_factory=factory,
                     history_source=plan['history_source'],max_tilt_delta=plan.get('max_tilt_delta'),
-                    handover_max_tilt=plan.get('handover_max_tilt'))
+                    handover_max_tilt=plan.get('handover_max_tilt'),
+                    zero_stand_anchor_xy=plan.get('zero_stand_anchor_xy',False))
+                print('stand anchor XY forced to zero:',controller.zero_stand_anchor_xy,flush=True)
                 return  # Reacquire fresh input after setup; no command sent yet.
             out=controller.step(row['state_stamp'],row['position'],quat,q,qd,row['angular_velocity_body'],gravity)
             generated=time.monotonic();state_sampled=generated-(time.time()-row['state_stamp'])

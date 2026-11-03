@@ -23,7 +23,8 @@ class EarlyHandover:
                  measured_lower, measured_upper, command_lower, command_upper, max_step,
                  *, max_velocity, max_acceleration, minimum_duration, blend_seconds,
                  max_tick_gap, max_tilt, max_angular_speed, policy, tracker_factory,
-                 history_source='executed', max_tilt_delta=None, handover_max_tilt=None):
+                 history_source='executed', max_tilt_delta=None, handover_max_tilt=None,
+                 zero_stand_anchor_xy=False):
         vectors=[np.asarray(x,dtype=float) for x in (start,target,default,scale,prep_kp,prep_kd,policy_kp,policy_kd,
                  measured_lower,measured_upper,command_lower,command_upper,max_step,max_velocity,max_acceleration)]
         n=len(vectors[0]);
@@ -52,6 +53,8 @@ class EarlyHandover:
         # of standing up, so refuse the request while the tilt is too large.
         if handover_max_tilt is not None and not (math.isfinite(handover_max_tilt) and 0<handover_max_tilt<math.pi):
             raise ValueError('Invalid explicit control contract')
+        if not isinstance(zero_stand_anchor_xy, bool):raise ValueError('Invalid stand anchor option')
+        self.zero_stand_anchor_xy=zero_stand_anchor_xy
         self.handover_max_tilt=handover_max_tilt;self.last_tilt=None
         self.policy=policy;self.tracker_factory=tracker_factory;self.tracker=None
         self.phase=Phase.PREPARE;self.reason=None;self.fault_context=None;self.history=deque(maxlen=10)
@@ -112,7 +115,12 @@ class EarlyHandover:
             # checks.
             obs=np.concatenate([h[term] for term in range(5) for h in self.history])
             try:
-                goal=self.tracker.goal(position,quat,q,'stand');action=np.asarray(self.policy.infer(obs,goal),dtype=float)
+                goal=self.tracker.goal(position,quat,q,'stand')
+                if self.zero_stand_anchor_xy:
+                    goal=np.asarray(goal).copy()
+                    if goal.shape!=(729,):raise ValueError('Zero-XY experiment requires the 729-element anchor goal')
+                    goal[-9:-7]=0.
+                action=np.asarray(self.policy.infer(obs,goal),dtype=float)
                 self.tracker.advance()
             except Exception as exc:self.fault('Policy or goal failed: '+str(exc))
             if action.shape!=self.default.shape or not np.isfinite(action).all():self.fault('Invalid policy output')
