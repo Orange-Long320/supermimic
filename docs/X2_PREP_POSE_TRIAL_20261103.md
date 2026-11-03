@@ -129,3 +129,55 @@ what the joint would reach.
 * No automatic host-loss protection; a human holds the e-stop.
 * The 500 Hz state chain is a diagnostic producer; its pose is not a verified
   estimate.
+
+## Policy handover attempts (run-p1 .. run-p5)
+
+The handover chain itself works: `/supermimic/x2/policy_request` with the plan
+hash is accepted by the worker, the phase moves to `handover`, and the publisher
+acknowledges. Four attempts reached that point; none reached `active`.
+
+What each attempt faulted on, and what it taught:
+
+| run | fault | meaning |
+| --- | --- | --- |
+| p1 | `Measured joint outside contract` | shoulder roll sits 0.05 rad from its bound; arm swing crossed it |
+| p2 | `Tilt ... deviation 0.2013 > 0.200` | body attitude changes 0.20 rad during the arm swing |
+| p3 | `Target step exceeds command contract` (+0.1502, -0.1703 vs 0.15) | preparation pose is not the policy's stance |
+| p4 | `Tilt ... deviation 0.20036 > 0.200` | same sway, 0.0004 rad over |
+| p5 | `Measured joint outside contract` (right ankle -0.8106 vs lower -0.803) | leg is pinned at the model limit in a deep squat |
+
+Two real findings:
+
+1. **The preparation pose was not the policy's stance.** `startup.position`
+   (knees 0.100, ankles -0.050, elbows -1.200) differs from `action_default`
+   (knees 0.669, ankles -0.363, elbows -0.600) by up to 0.600 rad. The policy's
+   observations and actions are defined around `action_default`, so handing over
+   from the startup pose asks for a 0.57 rad knee move at handover. The contract
+   builder now takes `--prep-target action_default` and records the choice as
+   `prep_target` / `prep_target_source` in the plan.
+2. **The robot has been squatting since the first fallback.** Zero-stiffness
+   fallback at the end of run-p1 let the legs sag; every later run started from
+   that pose and the preparation could not lift it back:
+
+   | run | knees L/R (rad) | ankle pitch L/R (rad) |
+   | --- | --- | --- |
+   | r15 | +0.015 / +0.136 | +0.167 / -0.019 |
+   | r17 | +0.147 / +0.144 | +0.011 / -0.036 |
+   | p1 | +0.163 / +0.175 | -0.010 / -0.071 |
+   | p2 | +1.115 / +1.202 | -0.797 / -0.804 |
+   | p3-p5 | ~+1.0 / ~+1.1 | -0.804 / -0.799 |
+
+   The ankles sit on the model limit (-0.803), and the measured ankle stayed
+   there while the preparation target asked for -0.363: with the body's weight on
+   the feet, the preparation gains cannot extend the legs, so the loaded joints
+   do not track while the unloaded arms do. The evidence file now records this
+   start pose as an unvalidated item.
+
+Correction to an earlier reading: the ankle is 0.0015 rad outside its modelled
+range, not 0.15. `-0.803` is the model's own lower limit, so the joint is at the
+limit rather than through it.
+
+Next attempt needs the robot out of the squat first: unload the feet (raise the
+harness) so the legs can extend, or use the native motion controller to stand it
+up before the trial. Raising `--max-tilt-delta` to 0.35 and preparing to
+`action_default` are already in place.

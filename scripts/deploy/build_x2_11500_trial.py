@@ -42,6 +42,14 @@ def main():
                    help='Packet and target lease bound; must exceed the measured state gaps')
     p.add_argument('--snapshot', type=Path,
                    help='Fresh read-only joint snapshot; required to contain the measured pose')
+    p.add_argument('--max-tilt-delta', type=float, default=.20,
+                   help='Allowed change of body attitude from the first sample. Measured'
+                        ' sway under a fall-arrest harness reaches 0.20 rad during the'
+                        ' preparation swing, so the default fires on the motion itself.')
+    p.add_argument('--prep-target', choices=('startup', 'action_default'), default='startup',
+                   help='Pose the preparation path drives to before handover. The policy\'s'
+                        ' action offset is the stance its observations and actions are'
+                        ' defined around, so preparing there keeps the handover step small.')
     p.add_argument('--extend-margin', type=float, default=.05,
                    help='Radians added beyond a measured pose that falls outside the file bounds')
     a = p.parse_args()
@@ -71,7 +79,8 @@ def main():
     command_upper = [float(v) for v in candidate['pc2_urdf_upper']]
     measured_lower = list(command_lower)
     measured_upper = list(command_upper)
-    startup = [float(v) for v in candidate['startup']['position']]
+    startup = [float(v) for v in (candidate['action_default'] if a.prep_target == 'action_default'
+                                    else candidate['startup']['position'])]
 
     # The declared file ranges are unvalidated, and the measured pose can sit
     # outside them (unverified encoder zero). Widen ONLY the joints that need it,
@@ -95,14 +104,18 @@ def main():
                 extensions.append(dict(joint=name, side='upper', file=measured_upper[i],
                                        measured=q, extended=q + a.extend_margin))
                 measured_upper[i] = q + a.extend_margin
-        # EarlyHandover requires the measured pose to be inside the command range
-        # as well; the published target stays inside the original file range.
         for i, name in enumerate(names):
             q = measured_q[i]
             if q < command_lower[i]:
                 command_lower[i] = q - a.extend_margin
             if q > command_upper[i]:
                 command_upper[i] = q + a.extend_margin
+        # The starting stance is part of the record: a deep squat at the preparation
+        # start means the leg gains may not be able to lift the body back up, and
+        # that is invisible in a joint-range check.
+        unvalidated.append('measured preparation start pose: ' + ', '.join(
+            f'{n} {measured_q[names.index(n)]:+.3f}' for n in
+            ('left_knee_joint', 'right_knee_joint', 'left_ankle_pitch_joint', 'right_ankle_pitch_joint')))
         if extensions:
             detail = ', '.join(f"{row['joint']} {row['side']} {row['file']:.4f}->{row['extended']:.4f}"
                                f" (measured {row['measured']:.4f})" for row in extensions)
@@ -154,8 +167,10 @@ def main():
         max_damping=[max(x, y) for x, y in zip(prep_kd, policy_kd)],
         fallback_damping=list(policy_kd),
         max_velocity=[.35] * n, max_acceleration=[.4] * n,
+        prep_target=[float(v) for v in startup],
+        prep_target_source=a.prep_target,
         minimum_duration=a.prep_seconds, blend_seconds=.5,
-        max_tick_gap=a.max_tick_gap, max_tilt=.70, max_tilt_delta=.20, max_angular_speed=2.,
+        max_tick_gap=a.max_tick_gap, max_tilt=.70, max_tilt_delta=a.max_tilt_delta, max_angular_speed=2.,
         max_state_age=a.max_state_age, max_target_age=a.max_state_age, output_hz=100,
         history_source='executed',
         safety_mode='manual_supervised_unvalidated_trial',

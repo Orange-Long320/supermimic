@@ -129,7 +129,8 @@ def main():
                     tracker.position=np.asarray(position).copy()
                     tracker.yaw=tracker.rotation(orientation).as_euler('xyz')[2]
                     return tracker
-                controller=EarlyHandover(q,candidate['startup']['position'],candidate['action_default'],candidate['action_scale'],
+                prep_target=np.asarray(plan.get('prep_target') or candidate['startup']['position'],dtype=float)
+                controller=EarlyHandover(q,prep_target,candidate['action_default'],candidate['action_scale'],
                     plan['prep_kp'],plan['prep_kd'],plan['policy_kp'],plan['policy_kd'],plan['measured_lower'],plan['measured_upper'],
                     plan['command_lower'],plan['command_upper'],plan['max_target_step'],max_velocity=plan['max_velocity'],
                     max_acceleration=plan['max_acceleration'],minimum_duration=plan['minimum_duration'],
@@ -152,6 +153,10 @@ def main():
                 print('dropped stale startup packet: '+str(exc),flush=True);return
             if controller is not None:controller.phase=Phase.FAULT;controller.reason=str(exc)
             print('policy worker fault: '+str(exc),flush=True)
+            # The contract refuses to say which joint, so record the context: the
+            # controller keeps the offending indices and values on every fault.
+            if controller is not None and controller.fault_context:
+                print('fault context: '+json.dumps(controller.fault_context),flush=True)
             # The independent publisher lease detects the absence of fresh targets.
     # History requires every real sample. KEEP_LAST(1) discards an intervening
     # sample whenever dispatch is briefly delayed, turning regular 20 ms source
