@@ -264,7 +264,14 @@ def main():
             return
         dt = now - state['last']
         if not 0. < dt <= .03:
-            raise ValueError('IMU acquisition timestamp rollback or gap')
+            # A rollback or a gap longer than 30 ms cannot be integrated as if the
+            # stream were continuous. Skip this sample, count it, and resume from
+            # the next one instead of terminating the producer. The discontinuity
+            # is recorded, not hidden.
+            counters['imu_discontinuity_skipped'] = counters.get('imu_discontinuity_skipped', 0) + 1
+            state['last'] = now
+            state['last_world_accel'] = world
+            return
         state['last'] = now
         previous = state['last_world_accel']
         state['last_world_accel'] = world
