@@ -160,7 +160,7 @@ def main():
                             if plan.get('safety_mode') in ('manual_supervised_trial',
                                                            'manual_supervised_unvalidated_trial') else None))
     publishers={g:node.create_publisher(JointCommandArray,t,qos) for g,t in topics.items()}
-    previous=None;sent=False
+    previous=None;sent=False;reported=None
     def receive(msg):
         nonlocal previous
         try:
@@ -169,9 +169,13 @@ def main():
         except (KeyError,TypeError,ValueError) as exc:supervisor.fault_reason='Invalid command: '+str(exc)
     node.create_subscription(String,target_topic,receive,qos)
     def tick():
-        nonlocal sent
+        nonlocal sent,reported
         now=time.monotonic()
         packet=supervisor.tick(now)
+        # A latched lease fault otherwise stops every command silently; record it
+        # once so an operator can tell "nothing was sent" from "nothing was needed".
+        if supervisor.fault_reason is not None and supervisor.fault_reason!=reported:
+            reported=supervisor.fault_reason;print('target lease fault: '+reported,flush=True)
         if packet is None or (packet['fallback'] and not sent):return
         for group,rows in group_command(packet).items():
             msg=JointCommandArray()

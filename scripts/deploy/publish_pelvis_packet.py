@@ -66,6 +66,11 @@ def main():
     p.add_argument('--mount-xyz', type=float, nargs=3, default=[0., 0., 0.])
     p.add_argument('--mount-rpy', type=float, nargs=3, default=[0., 0., 0.], help='Radians, torso-to-IMU')
     p.add_argument('--max-joint-extrapolation', type=float, default=.005)
+    p.add_argument('--subscribe-depth', type=int, default=20,
+                   help='Per-stream receive queue depth. The five device streams arrive at'
+                        ' ~2500 messages/s, so a deep queue turns into a fixed receive lag'
+                        ' (depth x 2 ms) instead of fresh data; a shallow queue keeps the'
+                        ' sample the estimator sees current.')
     a = p.parse_args()
     if a.sim_flat_ground_height and not a.sim_support_xml:
         raise SystemExit('Flat-ground height requires sim-only support')
@@ -167,7 +172,7 @@ def main():
     class Producer(Node):
         def __init__(self):
             super().__init__('supermimic_imu_state_producer')
-            qos = QoSProfile(depth=20, reliability=ReliabilityPolicy.BEST_EFFORT,
+            qos = QoSProfile(depth=a.subscribe_depth, reliability=ReliabilityPolicy.BEST_EFFORT,
                              durability=DurabilityPolicy.VOLATILE)
             self.imu = None
             self.imu_history = deque(maxlen=128)
@@ -442,11 +447,31 @@ def main():
             if age > a.max_age:
                 counters['skipped_age'] += 1
                 continue
+            if moving_mount is not None:
+                groups = chosen
+            else:
+                # The five acquisitions must land inside the consumer's 30 ms
+                # window. The IMU stream is the slowest to reach this process, so
+                # pairing the *newest* joint samples with an older IMU sample put
+                # a third of the cycles outside the gate. Use the IMU sample as
+                # the observation instant and take each group's nearest sample to
+                # it: the spread is then one joint sample period (~2 ms) and all
+                # five streams describe the same instant.
+                target = int(imu['stamp_ns'])
+                snapshot = {g: min(node.history[g],
+                                   key=lambda r: abs(int(r['stamp_ns']) - target))
+                            for g in ('leg', 'waist', 'head', 'arm') if node.history[g]}
+                if len(snapshot) != 4:
+                    counters['skipped_age'] += 1
+                    continue
+                groups = snapshot
+                packet_age = time.time() - max(int(imu['stamp_ns']),
+                    *[int(r['stamp_ns']) for r in snapshot.values()]) * 1e-9
+                timing['age_max'] = max(timing['age_max'], packet_age)
+                if packet_age > a.max_age:
+                    counters['skipped_age'] += 1
+                    continue
             try:
-                if moving_mount is not None:
-                    groups = chosen
-                else:
-                    groups = node.groups
                 position_by_name, velocity_by_name = {}, {}
                 for group in groups.values():
                     position_by_name.update(group['position'])
@@ -480,6 +505,11 @@ def main():
             # Skipping here keeps the publish slot for a coherent observation.
             if state_stamp_ns - min([int(t) for t in group_stamps]) > 25_000_000:
                 counters['skipped_skew'] += 1
+                continue
+            # Two publishes carrying the same observation instant are not a new
+            # observation: the consumer treats a repeated stamp as a timing gap.
+            if state_stamp_ns <= state['last_published_stamp']:
+                counters['skipped_duplicate'] = counters.get('skipped_duplicate', 0) + 1
                 continue
             packet = {
                 'schema': 2, 'joint_names': list(names), 'session_id': session,

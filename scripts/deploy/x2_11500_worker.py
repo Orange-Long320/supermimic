@@ -91,18 +91,36 @@ def main():
     if state_publishers!=1 or target_subscribers!=1:
         raise ValueError(f'Expected one state producer and one motor publisher; '
                          f'got state publishers {state_publishers} and target subscribers {target_subscribers}')
-    pub=node.create_publisher(String,target_topic,qos);controller=None;session=None;seq=0;last_receipt=None
+    pub=node.create_publisher(String,target_topic,qos);controller=None;session=None;seq=0;last_receipt=None;dropped=0;seen=None
     def request(msg):
         if controller is not None and msg.data==plan_hash:
             try:controller.request_handover();print('policy handover requested',flush=True)
             except ValueError as exc:print('handover rejected: '+str(exc),flush=True)
     node.create_subscription(String,trigger,request,qos)
     def receive(msg):
-        nonlocal controller,session,seq,last_receipt
+        nonlocal controller,session,seq,last_receipt,dropped,seen
         if controller is not None and controller.phase is Phase.FAULT:return
         try:
             now_wall=time.time();now_mono=time.monotonic()
-            row=validate_policy_packet(json.loads(msg.data),names,now_wall,max_age=plan['max_state_age'])
+            row=json.loads(msg.data)
+            # A packet that was already late when dispatch resumed carries no
+            # control history: drop it and step on the next fresh one. No stale
+            # state is ever used, and the controller's tick-gap guard stays the
+            # hard limit, so one late packet no longer aborts the whole trial.
+            late=[now_wall-row['state_stamp'],*[now_wall-t for t in row['joint_stamps']],
+                  now_wall-row['published_wall'],*[now_wall-t for t in row['joint_received_wall']]]
+            if any(t>plan['max_state_age'] for t in late):
+                dropped+=1
+                if dropped<4:print('dropped late packet: age %.4f s'%late[0],flush=True)
+                return
+            # A repeated observation instant carries no new state and would read as
+            # a zero timing gap in the controller; drop it the same way.
+            if seen is not None and row['state_stamp']<=seen:
+                dropped+=1
+                if dropped<4:print('dropped duplicate packet',flush=True)
+                return
+            seen=row['state_stamp']
+            row=validate_policy_packet(row,names,now_wall,max_age=plan['max_state_age'])
             if session is not None and row['session_id']!=session:raise ValueError('State session changed')
             session=row['session_id'];q=np.asarray(row['joint_position']);qd=row['joint_velocity'];quat=np.asarray(row['quat_wxyz'])
             w,x,y,z=quat;gravity=[2*(w*y-x*z),-2*(w*x+y*z),-1+2*(x*x+y*y)]
