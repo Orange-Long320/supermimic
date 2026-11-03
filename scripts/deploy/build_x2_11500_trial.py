@@ -260,7 +260,9 @@ def main():
         manual_estop_function_checked=True,
         acknowledges_no_automatic_host_loss_protection=True,
         acknowledges_unvalidated_software=True,
-        source='explicit user authorization in session mvs_c246ff578c6241c38767d6d87f716d68',
+        source=('operator confirmed current support and emergency-stop conditions in the zero-XY launcher'
+                if a.zero_stand_anchor_xy else
+                'explicit user authorization in session mvs_c246ff578c6241c38767d6d87f716d68'),
     )
     (a.out / 'consent.json').write_text(json.dumps(consent, indent=2) + '\n')
 
