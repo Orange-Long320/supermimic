@@ -66,6 +66,9 @@ def main():
     p.add_argument('--mount-xyz', type=float, nargs=3, default=[0., 0., 0.])
     p.add_argument('--mount-rpy', type=float, nargs=3, default=[0., 0., 0.], help='Radians, torso-to-IMU')
     p.add_argument('--max-joint-extrapolation', type=float, default=.005)
+    p.add_argument('--calibration-attempts', type=int, default=4,
+                   help='Whole calibration windows to try before giving up; a startup'
+                        ' burst loss should not end the run.')
     p.add_argument('--subscribe-depth', type=int, default=20,
                    help='Per-stream receive queue depth. The five device streams arrive at'
                         ' ~2500 messages/s, so a deep queue turns into a fixed receive lag'
@@ -354,20 +357,31 @@ def main():
     # A threshold-passing window does not prove rest: the caller must declare it.
     # The estimated bias is conditional on that declaration and trusted attitude.
     if a.init_bias_seconds > 0.:
-        state['calibration'] = []
-        end = time.monotonic() + a.init_bias_seconds
-        while time.monotonic() < end:
-            rclpy.spin_once(node, timeout_sec=.01)
-        samples = state['calibration']
-        state['calibration'] = None
-        stamps = np.array([s['stamp_ns'] for s in samples], dtype=np.int64)
-        acc = np.array([s['a'] for s in samples])
-        gyro = np.array([s['w'] for s in samples])
-        try:
-            check_static_window(stamps, acc, gyro, a.init_bias_seconds,
-                                a.still_accel_tol, a.still_gyro_tol)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
+        # A dropped burst at process start leaves a >30 ms stamp gap inside the
+        # window, which used to abort the run before any packet was published (two
+        # of six trials lost that way). The gate itself is unchanged: keep
+        # collecting whole windows until one passes, and only then exit.
+        samples = None
+        for attempt in range(1, a.calibration_attempts + 1):
+            state['calibration'] = []
+            end = time.monotonic() + a.init_bias_seconds
+            while time.monotonic() < end:
+                rclpy.spin_once(node, timeout_sec=.01)
+            candidate_samples = state['calibration']
+            state['calibration'] = None
+            stamps = np.array([s['stamp_ns'] for s in candidate_samples], dtype=np.int64)
+            acc = np.array([s['a'] for s in candidate_samples])
+            gyro = np.array([s['w'] for s in candidate_samples])
+            try:
+                check_static_window(stamps, acc, gyro, a.init_bias_seconds,
+                                    a.still_accel_tol, a.still_gyro_tol)
+                samples = candidate_samples
+                break
+            except ValueError as exc:
+                print('calibration attempt %d/%d rejected: %s'
+                      % (attempt, a.calibration_attempts, exc), flush=True)
+        if samples is None:
+            raise SystemExit('Calibration window is moving, invalid, or has an IMU timestamp gap')
         window = np.array([mount @ rot_of(s['q']).apply(np.array(s['a'])) for s in samples])
         if a.auto_mount:
             mean = window.mean(axis=0)

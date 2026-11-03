@@ -33,6 +33,17 @@ plan=$trial/contract/plan.json
 consent=$trial/contract/consent.json
 [ -f "$plan" ] || { echo "plan missing: $plan" >&2; exit 1; }
 
+# A publisher left over from an earlier trial keeps the motor command topics
+# occupied, so the new publisher exits with "Another motor command publisher
+# exists" and the *old* one silently absorbs the new targets under the old
+# contract. Refuse to start instead of running a trial nobody is driving.
+stray=$(pgrep -f 'x2_hardware_publisher.py|publish_pelvis_packet.py|x2_11500_worker.py' || true)
+if [ -n "$stray" ]; then
+  echo "stray trial process still running; refusing to start:" >&2
+  pgrep -af 'x2_hardware_publisher.py|publish_pelvis_packet.py|x2_11500_worker.py' >&2
+  exit 1
+fi
+
 stamp() { printf '[%s] ' "$(date +%H:%M:%S)"; echo "$*"; }
 
 stamp "start IMU state producer"
@@ -52,7 +63,9 @@ publisher_pid=$!
 sleep 3
 
 stamp "record joint states (read only)"
-nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/record_joints.py" --seconds 45 \
+# End the recording before cleanup so it writes its file: killed early it produced
+# no trajectory at all, which left the last five runs without joint evidence.
+nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$script/record_joints.py" --seconds 30 \
   --startup "$trial/contract/startup.json" --out "$trial/joint-recording.json" \
   > "$trial/joints.log" 2>&1 &
 monitor_pid=$!
@@ -67,20 +80,39 @@ cleanup() {
   kill -TERM "$worker_pid" 2>/dev/null || true
   kill -TERM "$publisher_pid" 2>/dev/null || true
   kill -TERM "$state_pid" 2>/dev/null || true
-  kill -TERM "$monitor_pid" 2>/dev/null || true
   wait "$worker_pid" 2>/dev/null || true
   wait "$publisher_pid" 2>/dev/null || true
   wait "$state_pid" 2>/dev/null || true
+  # Let the read-only recorder reach its own deadline and write the file.
   wait "$monitor_pid" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# Worker setup (policy fixture, tracker, ten warm inferences) takes about ten
-# seconds before the first state packet is accepted; the preparation path then
-# runs for prep_seconds. Requesting earlier is rejected by the contract.
-setup_wait=$((prep_seconds + 11))
-stamp "wait ${setup_wait}s for setup and the preparation path"
-sleep "$setup_wait"
+# Anchor on the first command the worker actually issues instead of a fixed
+# delay: worker setup and any calibration retry both shift it. The preparation
+# path runs for prep_seconds from that instant, and requesting earlier is
+# rejected by the contract.
+# The worker requires exactly one subscriber on the target topic, so this probe
+# must not subscribe there: it watches the joint command stream instead, which
+# only carries traffic once the publisher has accepted a target.
+stamp "wait for the first joint command"
+python3 - <<'WAITPY'
+import time, rclpy
+from rclpy.node import Node
+from aimdk_msgs.msg import JointCommandArray
+rclpy.init()
+node = Node("command_wait", enable_rosout=False, start_parameter_services=False)
+seen = []
+node.create_subscription(JointCommandArray, "/aima/hal/joint/leg/command",
+                         lambda m: seen.append(time.monotonic()), 10)
+end = time.monotonic() + 60.
+while not seen and time.monotonic() < end:
+    rclpy.spin_once(node, timeout_sec=.05)
+print("first command seen:", bool(seen), flush=True)
+node.destroy_node(); rclpy.try_shutdown()
+WAITPY
+stamp "wait ${prep_seconds}s for the preparation path"
+sleep "$prep_seconds"
 
 for attempt in 1 2 3 4; do
   stamp "policy handover request, attempt $attempt"
