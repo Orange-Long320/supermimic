@@ -9,7 +9,9 @@
 
 ## Scope and Workflow
 
-- 项目隔离入口见 `projects/README.md` 与 `projects/workspaces.json`。当前根工作区维护键盘控制/实机准备；ACP 上楼梯开发必须在独立 `codex/x2-stairs` 工作区进行，不在当前工作区修改训练、策略、世界模型、机器人模型或部署运行行为以实现楼梯功能。
+- 项目隔离入口见 `projects/README.md` 与 `projects/workspaces.json`。当前工作区仅开发 ACP 式 X2 双脚上楼梯，分支必须为 `codex/x2-stairs`。键盘控制、状态估计及实机准备在登记的键盘工作区维护，不在此处继续键盘实验。
+- 楼梯新增任务代码放 `src/supermimic_stairs/`，入口放 `scripts/stairs/`，配置放 `configs/stairs/`，测试放 `tests/stairs/`。地形、接触观测、奖励、终止与规划器属于楼梯任务，不塞入键盘模块。公共算法优先组合复用，必要变更留在本分支，未经接收项目回归不整分支合并回键盘。
+- 仓库中的历史键盘/部署脚本是来源快照，不是本项目入口；楼梯代码禁止导入 `supermimic.control`、`supermimic.deploy`、`supermimic.locomotion` 或 `scripts/experiments/*keyboard*` 的补丁安装器，不通过 monkey patch 替换全局 Trainer 或配置来接入任务。
 - 键盘速度训练保留已有 `codex/x2-velocity-control` 工作区；其训练实现不在当前主目录，不能仅凭同名启动脚本认定可在 `main` 上运行。修改前确认当前工作区、分支和实际导入源码。
 - 工作区之间不共享可写源码、editable 安装、环境、任务配置、replay、优化器或检查点输出目录。不用 `PYTHONPATH` 或源码符号链接跨工作区导入，不整分支合并实验改动；复用修复须逐提交/补丁移植，在接收方完成回归并单独提交。
 - 楼梯环境规划为 `/home/2025-Long.xh/HHD/venvs/supermimic-stairs`，创建前检查现有路径；不得修改键盘现用环境来满足楼梯依赖。服务器任务从固定提交的独立源码发布目录运行，按 `keyboard` / `stairs` 分隔数据、缓存和产物。规划路径不表示已部署。
@@ -41,7 +43,7 @@
 
 - 机器人 PC2（SSH 别名 `x2-robot`）上的本项目机载程序，包括只读传感器订阅、影子推理和后续实机控制，统一在现有的 rootless Podman 容器 `lxh` 内运行，不直接在宿主系统安装或运行本项目依赖与程序。操作前阅读 `docs/X2_LXH_PC2_PREPARATION_20261031.md`，核验实际主机、容器和挂载状态；不覆盖或清理其他用户的容器、SDK 或数据。
 - 容器内外同名的 `/home/agi/lxh-supermimic/` 目录不视为自动同步，读写前核验实际挂载关系。使用 `lxh` 的要求不构成电机控制授权；控制权切换、机器人模式变更和电机命令发布须获得用户明确授权，不能将只读检查或影子推理授权扩大为实机运动授权。
-- 主训练环境规划为 `/home/2025-Long.xh/HHD/venvs/supermimic`，根目录 `.venv` 必须链接至该专用环境。
+- 本项目训练环境规划为 `/home/2025-Long.xh/HHD/venvs/supermimic-stairs`，根目录 `.venv` 必须链接至此；环境尚未创建。禁止链接到键盘现用 `/home/2025-Long.xh/HHD/venvs/supermimic` 来安装或运行楼梯依赖。
 - SOMA 环境规划为 `/home/2025-Long.xh/HHD/venvs/supermimic-soma`，`vendor/soma-retargeter/.venv` 链接至此；与主环境隔离安装和运行。
 - 环境和链接创建前检查现有路径；不覆盖已有目录，不复用或修改 G-WAM 等其他项目环境，不向系统 Python 安装项目依赖。
 - `HHD` 可能是符号链接，比较路径使用 canonical path，磁盘检查以实际挂载点为准。
