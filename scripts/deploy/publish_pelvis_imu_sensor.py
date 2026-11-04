@@ -16,6 +16,7 @@ GROUPS = ('leg', 'waist', 'head', 'arm')
 # Operator requested modest transport-jitter tolerance on 2026-11-04.
 MAX_IMU_GAP_S = .040
 MAX_IMU_RECEIVE_GAP_S = .050
+ENCODER_PERIOD_NS = 10_000_000  # 100 Hz encoders for 50 Hz policy states.
 
 
 def pelvis_mount(urdf):
@@ -79,6 +80,7 @@ def main():
         encoder_stationary_gate=False, max_gap_seconds=MAX_IMU_GAP_S) if processing else None
     session = 'pelvis-raw-imu-'+uuid.uuid4().hex
     history = {g: deque(maxlen=32) for g in GROUPS}
+    joint_seen_stamps = {}
     window = deque()
     started = time.monotonic()
     stats = {'imu': 0, 'packets': 0, 'joints': 0, 'calibrated': False,
@@ -86,7 +88,7 @@ def main():
              'calibration_compute_ms': None, 'startup_waiting_fresh': 0,
              'withheld_stale_candidates': 0, 'max_imu_callback_ms': 0.,
              'max_joint_callback_ms': 0., 'max_heartbeat_work_ms': 0., 'alignment_checks': 0,
-             'startup_stale_imu': 0}
+             'startup_stale_imu': 0, 'joints_received': 0, 'joint_decimated': 0}
     last_stamp = None
     origin_ns = None
     last_publish = None
@@ -102,7 +104,6 @@ def main():
         calibration = json.loads(a.diagnostic_calibration.read_text())
         estimator.filter.initialize(calibration)
         stats['calibrated'] = True
-        calibrated_at = time.monotonic()
     rclpy.init()
     try:
         node = Node('supermimic_pelvis_raw_imu', enable_rosout=False, start_parameter_services=False)
@@ -112,6 +113,17 @@ def main():
 
         def on_joint(group, msg):
             stamp = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
+            stats['joints_received'] += 1
+            if stamp <= joint_seen_stamps.get(group, 0):
+                raise ValueError('Joint timestamp duplicate/rollback')
+            joint_seen_stamps[group] = stamp
+            if int(msg.state.value) != 0:
+                raise ValueError('Joint state domain is not position')
+            # IMU propagation remains full rate. Encoder parsing/logging only
+            # needs two observations per 50 Hz state; keep causal header times.
+            if stats['calibrated'] and history[group] and stamp-history[group][-1]['stamp_ns'] < ENCODER_PERIOD_NS:
+                stats['joint_decimated'] += 1
+                return
             row = {'event': 'joint', 'group': group, 'stamp_ns': stamp, 'recv': time.time(),
                    'domain': int(msg.state.value),
                    'position': {j.name: float(j.position) for j in msg.joints},
@@ -152,6 +164,10 @@ def main():
                 stats['aligned_imu'] += 1
             if not processing:
                 return
+            # This mode skips the normal three-second calibration acquisition.
+            # Give its subscriptions the same warm-up before timing processing.
+            if a.diagnostic_calibration and time.monotonic()-started < 3.:
+                return
             if origin_ns is None and age > .035:
                 # No integration/calibration has begun. Discovery can initially
                 # deliver an old sample; wait for fresh input, never retimestamp it.
@@ -165,6 +181,7 @@ def main():
                 origin_ns = stamp
                 if a.diagnostic_calibration:
                     calibration_stamp = stamp
+                    calibrated_at = time.monotonic()
             sample['time_s'] = (stamp-origin_ns)*1e-9
             if not stats['calibrated']:
                 if aligned is None:
@@ -275,7 +292,7 @@ def main():
         executor.add_node(node)
         while rclpy.ok() and (a.seconds <= 0 or time.monotonic()-started < a.seconds):
             executor.spin_once(timeout_sec=.005)
-            if processing:
+            if processing and (not a.diagnostic_calibration or origin_ns is not None):
                 if time.monotonic()-started > 20 and not stats['calibrated']:
                     raise ValueError('No valid three-second stationary window within 20 seconds')
                 if calibrated_at is not None and last_publish is None and time.monotonic()-calibrated_at > .5:

@@ -167,6 +167,10 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     if fault != 'transport_delay':
         assert summary['startup_waiting_fresh'] > 0
     assert bool(summary['fault']) == fails
+    assert summary['joints_received'] == summary['joints']+summary['joint_decimated']
+    assert summary['joint_decimated'] > 0
+    if not fails:
+        assert len(updates) == 251  # Every post-calibration IMU is still integrated.
     if fault in ('joint_delayed_once', 'joint_delayed_forever'):
         assert summary['withheld_stale_candidates'] > 0
 
