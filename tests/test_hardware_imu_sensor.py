@@ -32,7 +32,7 @@ def test_mount_requires_fixed_pelvis_and_known_axes(tmp_path):
         bridge.pelvis_mount(path)
 
 
-@pytest.mark.parametrize('fault', [None, 'stale_input', 'timestamp_gap', 'joint_delayed_once', 'joint_delayed_forever', 'transport_delay', 'buffered_delay'])
+@pytest.mark.parametrize('fault', [None, 'future_input', 'imu_stopped', 'buffered_110ms', 'timestamp_gap', 'joint_delayed_once', 'joint_delayed_forever', 'transport_delay', 'buffered_delay', 'processing_delay'])
 def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_path, monkeypatch, fault):
     """A 20 ms fit must not publish its aged window as the first live frame."""
     import sys
@@ -66,8 +66,10 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
             stream.append((wall, '/aima/hal/joint/'+group+'/state', NS(
                 header=NS(stamp=NS(sec=jt//10**9, nanosec=jt%10**9)),
                 state=NS(value=0), joints=[NS(name=name, position=0., velocity=0.)])))
-        if fault == 'stale_input' and i == 1700:
-            wall += .11
+        if fault == 'imu_stopped' and i >= 1700:
+            continue
+        if fault == 'future_input' and i == 1700:
+            stamp += 200_000_000
         if fault == 'timestamp_gap' and i == 1700:
             stamp += 40_000_000
         stream.append((wall, '/aima/hal/imu/torso/state', NS(
@@ -119,6 +121,9 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
 
         def update(self, stamp, gyro, acc):
             updates.append(stamp)
+            if fault == 'processing_delay' and stamp >= 3.4 and not delayed_once[0]:
+                clock.value += .060
+                delayed_once[0] = True
 
         def state(self, joints):
             return np.array([0., 0., .8]), np.array([1., 0., 0., 0.]), np.zeros(3), np.array([0., 0., -1.])
@@ -151,10 +156,14 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
             self.handle = handle
 
         def wait(self, timeout):
-            if fault == 'buffered_delay' and clock.value >= 103.4 and not delayed_once[0]:
-                clock.value += .060
+            if fault in ('buffered_delay', 'buffered_110ms') and clock.value >= 103.4 and not delayed_once[0]:
+                clock.value += .110 if fault == 'buffered_110ms' else .060
                 delayed_once[0] = True
+            end = clock.value+timeout*1e-9
             while not self.handle.messages:
+                if pending and pending[0][0] > end:
+                    clock.value = end
+                    return
                 deliver_event()
             while pending and pending[0][0] <= clock.value:
                 deliver_event()
@@ -180,7 +189,7 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     monkeypatch.setattr(diagnostic, 'AsyncDiagnosticLog', Log)
     monkeypatch.setattr(sys, 'argv', ['bridge', '--profile', str(profile), '--model', 'fake-model',
                                     '--urdf', str(urdf), '--out', str(out), '--assume-initial-rest'])
-    fails = fault in ('stale_input', 'timestamp_gap')
+    fails = fault in ('future_input', 'timestamp_gap', 'imu_stopped')
     if fails:
         with pytest.raises(ValueError, match='IMU|output timeout'):
             bridge.main()
@@ -200,7 +209,7 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     if fault == 'joint_delayed_forever':
         assert summary['max_output_silence_s'] > .1
         assert packets[-1]['published_wall'] < 103.45
-    if fault == 'buffered_delay':
+    if fault in ('buffered_delay', 'buffered_110ms', 'processing_delay'):
         assert summary['max_imu_batch'] > 20
         assert summary['buffered_imu_integrated'] > 0
 

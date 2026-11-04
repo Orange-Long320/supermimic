@@ -5,28 +5,41 @@ import struct
 import subprocess
 from types import SimpleNamespace as NS
 
-FRAME = struct.Struct('<Qqq6d64s')
-MAGIC = 0x5832494D55353030
+FRAME = struct.Struct('<Qqq6d64s31d31d4q4q4iII')
+MAGIC = 0x5832524157303032
 
 
 def decode_frame(data):
-    magic, stamp, received, gx, gy, gz, ax, ay, az, frame = FRAME.unpack(data)
+    values = FRAME.unpack(data)
+    magic, stamp, received, gx, gy, gz, ax, ay, az, frame = values[:10]
     if magic != MAGIC:
         raise ValueError('Raw IMU frame magic/layout mismatch')
+    stamps, receives, domains = values[72:76], values[76:80], values[80:84]
+    groups, joints = values[84:86]
+    if any(groups & (1<<g) and domains[g] != 0 for g in range(4)):
+        raise ValueError('Joint state domain is not position')
+    snapshot = None
+    if groups == 15 and joints == 0x7fffffff:
+        if any(not 0 <= stamp-t <= 25_000_000 for t in stamps):
+            raise ValueError('Native snapshot has future/stale encoders')
+        rows = [dict(stamp_ns=t, recv=r*1e-9, domain=d) for t,r,d in zip(stamps,receives,domains)]
+        snapshot = rows, list(values[10:41]), list(values[41:72])
     sec, ns = divmod(stamp, 10**9)
     return NS(header=NS(stamp=NS(sec=sec, nanosec=ns), frame_id=frame.split(b'\0', 1)[0].decode()),
               angular_velocity=NS(x=gx, y=gy, z=gz), linear_acceleration=NS(x=ax, y=ay, z=az),
-              transport_received_wall_ns=received)
+              transport_received_wall_ns=received, native_joint_snapshot=snapshot)
 
 
 class NativeImuReader:
-    def __init__(self, executable, log_path):
+    def __init__(self, executable, log_path, joint_names):
+        if len(joint_names) != 31 or len(set(joint_names)) != 31 or any(',' in n for n in joint_names):
+            raise ValueError("Expected 31 unique profile joints")
         self.log = log_path.open('x')
         self.buffer = bytearray()
         self.frames = 0
         env = dict(os.environ, RCUTILS_LOGGING_USE_STDOUT='0')
         try:
-            self.process = subprocess.Popen([str(executable)], stdout=subprocess.PIPE,
+            self.process = subprocess.Popen([str(executable), ','.join(joint_names)], stdout=subprocess.PIPE,
                                             stderr=self.log, env=env, bufsize=0)
         except BaseException:
             self.log.close()

@@ -16,7 +16,6 @@ GROUPS = ('leg', 'waist', 'head', 'arm')
 # Operator requested modest transport-jitter tolerance on 2026-11-04.
 MAX_IMU_GAP_S = .040
 MAX_IMU_RECEIVE_GAP_S = .050
-MAX_BUFFERED_IMU_AGE_S = .100
 ENCODER_PERIOD_S = .010  # 100 Hz encoder reads for 50 Hz policy states.
 
 
@@ -49,6 +48,7 @@ def main():
     p.add_argument('--urdf', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--observe-only', action='store_true')
+    p.add_argument('--record-all-raw', action='store_true', help='Full-rate diagnostic capture; default deployment logs at 50 Hz')
     p.add_argument('--imu-reader', type=Path, help='SDK raw reader executable; no fusion or motor output')
     p.add_argument('--diagnostic-calibration', type=Path,
                    help='Exercise full processing with saved calibration; observe-only, no ROS publisher')
@@ -91,13 +91,15 @@ def main():
              'withheld_stale_candidates': 0, 'max_imu_callback_ms': 0.,
              'max_joint_callback_ms': 0., 'max_heartbeat_work_ms': 0., 'alignment_checks': 0,
              'startup_stale_imu': 0, 'joints_received': 0, 'encoder_polls': 0,
-             'max_imu_batch': 0, 'buffered_imu_integrated': 0, 'max_output_silence_s': 0.}
+             'max_imu_batch': 0, 'buffered_imu_integrated': 0, 'max_output_silence_s': 0.,
+             'raw_records': 0}
     last_stamp = None
     origin_ns = None
     last_publish = None
     last_publish_mono = None
     last_heartbeat_mono = None
     last_receive = None
+    last_raw_record_stamp = None
     calibration = None
     calibration_stamp = None
     calibrated_at = None
@@ -139,7 +141,7 @@ def main():
 
         def on_imu(msg, emit_state=True):
             nonlocal last_stamp, origin_ns, last_publish, last_receive, last_publish_mono, last_heartbeat_mono
-            nonlocal calibration, calibration_stamp, calibrated_at
+            nonlocal calibration, calibration_stamp, calibrated_at, last_raw_record_stamp
             stamp = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
             gyro = [msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z]
             acc = [msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z]
@@ -148,7 +150,18 @@ def main():
                       'gyro': gyro, 'acceleration': acc, 'frame': msg.header.frame_id}
             if hasattr(msg, 'transport_received_wall_ns'):
                 sample['transport_received_wall_ns'] = msg.transport_received_wall_ns
-            log.emit('support-events', sample)
+                if msg.native_joint_snapshot is not None:
+                    rows, q, qd = msg.native_joint_snapshot
+                    sample.update(joint_pos=q, joint_vel=qd,
+                                  joint_stamps_ns=[r['stamp_ns'] for r in rows])
+            # Logging every 500 Hz frame adds a serialization thread to the
+            # control hot path. Preserve full calibration data; runtime capture
+            # defaults to the policy rate, without skipping any integration.
+            if (a.record_all_raw or not processing or not stats['calibrated'] or
+                    last_raw_record_stamp is None or stamp-last_raw_record_stamp >= 20_000_000):
+                log.emit('support-events', sample)
+                last_raw_record_stamp = stamp
+                stats['raw_records'] += 1
             stats['imu'] += 1
             age = wall-stamp*1e-9
             stats['max_receive_age_s'] = max(stats['max_receive_age_s'], age)
@@ -158,7 +171,7 @@ def main():
             last_stamp = stamp
             last_receive = time.monotonic()
             needs_encoders = not stats['calibrated'] or (emit_state and (last_publish is None or stamp-last_publish >= 20_000_000))
-            aligned = causal_joints(history, stamp, names) if needs_encoders else None
+            aligned = (msg.native_joint_snapshot if native_reader else causal_joints(history, stamp, names)) if needs_encoders else None
             if needs_encoders:
                 stats['alignment_checks'] += 1
             if aligned is not None:
@@ -174,8 +187,8 @@ def main():
                 # deliver an old sample; wait for fresh input, never retimestamp it.
                 stats['startup_stale_imu'] += 1
                 return
-            if stamp <= 0 or not np.isfinite(gyro+acc).all() or not 0 <= age <= MAX_BUFFERED_IMU_AGE_S:
-                raise ValueError('Invalid/stale/future IMU input')
+            if stamp <= 0 or not np.isfinite(gyro+acc).all() or age < 0:
+                raise ValueError('Invalid/future IMU input')
             if age > .035:
                 if not stats['calibrated']:
                     window.clear()
@@ -298,7 +311,7 @@ def main():
         imu_subscription = None
         if a.imu_reader:
             from supermimic.deploy.native_imu_reader import NativeImuReader
-            native_reader = NativeImuReader(a.imu_reader, a.out/'imu-reader.log')
+            native_reader = NativeImuReader(a.imu_reader, a.out/'imu-reader.log', names)
         else:
             imu_subscription = node.create_subscription(Imu, '/aima/hal/imu/torso/state',
                 lambda msg: None, QoSProfile(depth=64, reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -308,7 +321,7 @@ def main():
                                  durability=DurabilityPolicy.VOLATILE)
         encoder_subscriptions = {g: node.create_subscription(
             JointStateArray, '/aima/hal/joint/'+g+'/state', lambda msg: None, encoder_qos)
-            for g in GROUPS}
+            for g in GROUPS} if not native_reader else {}
         encoder_callbacks = {g: timed_callback(lambda msg, group=g: on_joint(group, msg),
                                                'max_joint_callback_ms') for g in GROUPS}
         wait_set = None if native_reader else ros_impl.WaitSet(1, 0, 0, 0, 0, 0, node.context.handle)
@@ -376,11 +389,12 @@ def main():
         (a.out/'ready.json').unlink(missing_ok=True)
         stats.update(fault=fault, duration_s=time.monotonic()-started, writer=writer,
                      observe_only=a.observe_only, firmware_quaternion_used=False,
+                     record_all_raw=a.record_all_raw, runtime_raw_log_target_hz=500 if a.record_all_raw else 50,
                      diagnostic_calibration=str(a.diagnostic_calibration) if a.diagnostic_calibration else None,
                      stationary_calibration_this_run=stats['calibrated'] and not bool(a.diagnostic_calibration),
                      interval_average=False, point_trapezoid=True, online_zupt=False,
                      max_imu_gap_s=MAX_IMU_GAP_S, max_imu_receive_gap_s=MAX_IMU_RECEIVE_GAP_S,
-                     max_buffered_imu_age_s=MAX_BUFFERED_IMU_AGE_S,
+                     max_buffered_imu_age_s=None,
                      output_progress_timeout_s=None,
                      online_gravity_leveling=False, imu_offset=offset, motor_readiness_approved=False)
         (a.out/'summary.json').write_text(json.dumps(stats, indent=2)+'\n')
