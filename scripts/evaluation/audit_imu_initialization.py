@@ -50,6 +50,8 @@ def main():
                  ('static_encoder_both_gate', True, True, True, True)]
     offset = np.array([.0239465, -.000228682, .04171])
     replay = {}
+    encoder = EncoderQuietWindow()
+    quiet_evidence = [encoder.update(s['time_s'], s['joint_pos'], s['joint_vel']) for s in raw]
     # This whole phase has no access to oracle measurements.
     same_calibration = a.calibration.parent.resolve() == a.run.resolve()
     for name, tilt, bias, leveling, zupt in variants:
@@ -59,16 +61,14 @@ def main():
             continue
         f = ImuDeadReckoning(zupt=zupt, gravity_leveling=leveling, require_initialization=False,
                             interval_average=interval_average)
-        encoder = EncoderQuietWindow()
         if tilt or bias:
             c = dict(calibration)
             if not tilt: c['quat_wxyz'] = [1., 0., 0., 0.]
             if not bias: c['gyro_bias'] = [0., 0., 0.]
             f.initialize(c)
         positions, quats, world, updates, velocity_jumps = [], [], [], [], []
-        for sample in raw:
+        for sample, quiet in zip(raw, quiet_evidence):
             before = f.x[2:].copy()
-            quiet = encoder.update(sample['time_s'], sample['joint_pos'], sample['joint_vel'])
             level_gate = quiet if 'encoder' in name and ('leveling_gate' in name or 'both_gate' in name) else True
             zupt_gate = quiet if 'encoder' in name and ('zupt_gate' in name or 'both_gate' in name) else True
             f.update(sample['time_s'], sample['gyro'], sample['acceleration'],

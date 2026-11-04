@@ -41,10 +41,13 @@ def main():
                    help='Diagnostic only: permit IMU/encoder stillness guesses to modify attitude/velocity')
     p.add_argument('--imu-log-substeps', action='store_true', help='Record every applied 1 ms IMU sample for aliasing diagnosis')
     p.add_argument('--imu-packet-mode', choices=('interval-average', 'point'), default='interval-average')
+    p.add_argument('--imu-injected-gyro-bias', type=float, nargs=3, default=[0., 0., 0.],
+                   help='Simulation sensor fault injection; only raw measurements receive this offset')
     p.add_argument('--schedule', type=Path, help='Headless-only JSON [seconds, mode] pairs')
     a = p.parse_args()
     if a.out.exists() or a.seconds <= 0 or (a.schedule and not a.headless):
         p.error('Require a new output, positive duration, and headless scripted tests')
+    if not np.isfinite(a.imu_injected_gyro_bias).all(): p.error('Nonfinite gyro bias injection')
     assets = a.assets.resolve()
     manifest = json.loads((assets/'manifest.json').read_text())
     for name, expected in manifest['files'].items():
@@ -113,13 +116,16 @@ def main():
     calibration = None; prepared_qpos = None; prepared_qvel = None
     if a.state_source == 'imu' and a.imu_initialization == 'static':
         from supermimic.deploy.native_static_calibration import collect_native_static_calibration
+        (a.out/'as-run-calibration.py').write_bytes(Path(collect_native_static_calibration.__code__.co_filename).read_bytes())
         calibration, prepared_qpos, prepared_qvel = collect_native_static_calibration(
-            assets/'model_info/scene.xml', spec, initial_pos, initial_rot, initial_q, a.out)
+            assets/'model_info/scene.xml', spec, initial_pos, initial_rot, initial_q, a.out,
+            gyro_bias=np.asarray(a.imu_injected_gyro_bias))
 
     def sample_imu(gyro=None, acc=None):
         # Sensor adapter: no framequat, framepos, root velocity, contact or body
         # pose reads. mj_forward has generated these physical IMU channels.
         gyro = data.sensordata[gyro_adr:gyro_adr+3].copy() if gyro is None else gyro
+        gyro = gyro+np.asarray(a.imu_injected_gyro_bias)
         acc = data.sensordata[accel_adr:accel_adr+3].copy() if acc is None else acc
         observer.update(float(data.time), gyro, acc, data.qpos[qadr], data.qvel[vadr])
         imu_log.write(json.dumps({'time_s': float(data.time), 'gyro': gyro.tolist(),
@@ -203,7 +209,7 @@ def main():
                     # solve. Record before mj_forward overwrites that buffer.
                     substep_log.write(json.dumps({'time_s': float(data.time-model.opt.timestep),
                                                    'end_s': float(data.time),
-                                                   'gyro': data.sensordata[gyro_adr:gyro_adr+3].tolist(),
+                                                   'gyro': (data.sensordata[gyro_adr:gyro_adr+3]+a.imu_injected_gyro_bias).tolist(),
                                                    'acceleration': data.sensordata[accel_adr:accel_adr+3].tolist()})+'\n')
                 if observer is not None and (substep+1) % imu_substeps == 0:
                     # Recompute sensors at their acquisition timestamp so their
@@ -342,6 +348,7 @@ def main():
                   'imu_packet_mode': a.imu_packet_mode,
                   'encoder_stationary_gate': calibration is not None,
                   'gyro_bias': observer.filter.gyro_bias.tolist() if observer is not None else None,
+                  'injected_gyro_bias': a.imu_injected_gyro_bias,
                   'gravity_leveling': observer.filter.gravity_leveling if observer is not None else None,
                   'zupt': observer.filter.zupt if observer is not None else None,
                   'imu_samples': observer.filter.samples if observer is not None else 0,

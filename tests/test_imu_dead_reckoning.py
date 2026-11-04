@@ -23,7 +23,7 @@ def test_acceleration_integrates_to_velocity_and_position_without_oracle_initial
 
 
 def test_still_zupt_reduces_unobserved_velocity_under_its_stillness_hypothesis():
-    estimator = ImuDeadReckoning(require_initialization=False)
+    estimator = ImuDeadReckoning(zupt=True, require_initialization=False)
     estimator.x[2:] = [1., -.3]
     for i in range(501):
         estimator.update(i*.002, [0., 0., 0.], [0., 0., 9.81])
@@ -64,8 +64,10 @@ def test_static_tilt_and_nonzero_gyro_bias_are_estimated_only_from_sensors():
 
 
 def test_no_propagation_before_static_initialization():
+    estimator = ImuDeadReckoning()
+    assert not estimator.zupt and not estimator.gravity_leveling
     with pytest.raises(ValueError, match='not passed'):
-        ImuDeadReckoning().update(0., [0., 0., 0.], [0., 0., 9.81])
+        estimator.update(0., [0., 0., 0.], [0., 0., 9.81])
 
 
 def test_static_thresholds_do_not_replace_an_independent_rest_declaration():
@@ -86,7 +88,7 @@ def test_reject_bad_static_window_instead_of_assuming_zero_velocity(change):
 
 def test_moving_encoders_veto_imu_only_gravity_and_zero_velocity_updates():
     quiet = EncoderQuietWindow()
-    estimator = ImuDeadReckoning(require_initialization=False)
+    estimator = ImuDeadReckoning(zupt=True, gravity_leveling=True, require_initialization=False)
     estimator.x[2] = .5
     for i in range(501):
         t = i*.002

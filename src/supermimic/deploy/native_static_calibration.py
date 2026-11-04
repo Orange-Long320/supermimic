@@ -13,7 +13,7 @@ import numpy as np
 from supermimic.deploy.imu_dead_reckoning import fit_static_initialization
 
 
-def collect_native_static_calibration(scene, profile, position, quat, joints, out):
+def collect_native_static_calibration(scene, profile, position, quat, joints, out, *, gyro_bias=(0., 0., 0.)):
     spec = mujoco.MjSpec.from_file(str(scene))
     pelvis = spec.body('pelvis')
     free = [j for j in pelvis.joints if j.type == mujoco.mjtJoint.mjJNT_FREE]
@@ -55,7 +55,7 @@ def collect_native_static_calibration(scene, profile, position, quat, joints, ou
             if (step+1) % sample_steps:
                 continue
             mujoco.mj_forward(model, data)
-            sample = {'time_s': float(data.time), 'gyro': data.sensordata[gyro_adr:gyro_adr+3].tolist(),
+            sample = {'time_s': float(data.time), 'gyro': (data.sensordata[gyro_adr:gyro_adr+3]+gyro_bias).tolist(),
                       'acceleration': data.sensordata[acc_adr:acc_adr+3].tolist(),
                       'joint_pos': data.qpos[qadr].tolist(), 'joint_vel': data.qvel[vadr].tolist()}
             log.write(json.dumps(sample)+'\n'); window.append(sample)

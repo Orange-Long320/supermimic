@@ -1,8 +1,8 @@
 """Sensor-only diagnostic IMU propagation; no simulator pose/velocity inputs.
 
-XY and velocity use the current hardware producer's four-state Kalman/ZUPT
-equations. Attitude is integrated here from gyro with gated gravity leveling;
-this is not a reproduction of the real IMU firmware's attitude fusion.
+Includes the hardware producer's four-state Kalman/ZUPT equations for diagnosis.
+Unsupported online ZUPT/gravity guesses are off by default; attitude propagates
+from a measured static initialization. This is not real IMU firmware fusion.
 """
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -68,7 +68,7 @@ class EncoderQuietWindow:
 
 
 class ImuDeadReckoning:
-    def __init__(self, *, zupt=True, gravity_leveling=True, require_initialization=True,
+    def __init__(self, *, zupt=False, gravity_leveling=False, require_initialization=True,
                  interval_average=False):
         # Declared zero-velocity prior, yaw zero is an arbitrary local heading.
         # Neither prior is obtained from simulator state.
