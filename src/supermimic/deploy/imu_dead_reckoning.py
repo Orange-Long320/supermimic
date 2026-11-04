@@ -6,6 +6,7 @@ this is not a reproduction of the real IMU firmware's attitude fusion.
 """
 import numpy as np
 from scipy.spatial.transform import Rotation
+from collections import deque
 
 
 def fit_static_initialization(samples, *, declared_stationary=False, seconds=3.):
@@ -50,6 +51,22 @@ def fit_static_initialization(samples, *, declared_stationary=False, seconds=3.)
             'yaw_observable': False, 'accelerometer_bias_identified': False}
 
 
+class EncoderQuietWindow:
+    """Causal encoder veto for IMU stillness; never proof of no slip/translation."""
+    def __init__(self):
+        self.rows = deque()
+
+    def update(self, stamp, joints, velocity):
+        q, v = np.asarray(joints, dtype=float), np.asarray(velocity, dtype=float)
+        if q.ndim != 1 or v.shape != q.shape or not np.isfinite(np.r_[stamp, q, v]).all():
+            raise ValueError('Invalid encoder stillness sample')
+        self.rows.append((stamp, q.copy(), float(np.max(np.abs(v)))))
+        while self.rows and self.rows[0][0] < stamp-.2-1e-9:
+            self.rows.popleft()
+        return (stamp-self.rows[0][0] >= .2-1e-6 and max(r[2] for r in self.rows) <= .03
+                and np.max(np.ptp(np.stack([r[1] for r in self.rows]), axis=0)) <= .015)
+
+
 class ImuDeadReckoning:
     def __init__(self, *, zupt=True, gravity_leveling=True, require_initialization=True):
         # Declared zero-velocity prior, yaw zero is an arbitrary local heading.
@@ -82,7 +99,7 @@ class ImuDeadReckoning:
         self.initial_rotation = self.rotation
         self.initialized = True
 
-    def update(self, stamp, gyro, acceleration):
+    def update(self, stamp, gyro, acceleration, *, gravity_static_evidence=True, zupt_static_evidence=True):
         if not self.initialized:
             raise ValueError('Static initialization has not passed')
         gyro, acc = np.asarray(gyro, dtype=float), np.asarray(acceleration, dtype=float)
@@ -101,7 +118,7 @@ class ImuDeadReckoning:
         still = abs(np.linalg.norm(acc)-9.81) <= .5 and np.linalg.norm(gyro) <= .08
         self.still_since = (self.still_since if self.still_since is not None else stamp) if still else None
         settled = still and stamp-self.still_since >= .2
-        if self.gravity_leveling and settled:
+        if self.gravity_leveling and settled and gravity_static_evidence:
             # Accelerometer gravity is only trusted under the same stillness
             # hypothesis as ZUPT. These thresholds cannot establish real rest.
             up = self.rotation.apply(acc/np.linalg.norm(acc))
@@ -115,7 +132,7 @@ class ImuDeadReckoning:
         self.x[:2] += .5*world[:2]*dt**2
         self.x[2:] += world[:2]*dt
         self.P = F@self.P@F.T+self.Q*(dt/.02)
-        if self.zupt and settled:
+        if self.zupt and settled and zupt_static_evidence:
             K = np.linalg.solve(self.H@self.P@self.H.T+self.R, (self.P@self.H.T).T).T
             self.x -= K@(self.H@self.x)
             residual = np.eye(4)-K@self.H
@@ -133,7 +150,7 @@ Only immutable mount geometry, a separate FK model, encoder values and raw IMU
 samples are accepted. There is no simulator-data object or truth-pose argument.
 """
     def __init__(self, fk_model_path, joint_names, imu_offset, *, sole_offset=.05,
-                 require_initialization=True):
+                 require_initialization=True, encoder_stationary_gate=True):
         import mujoco
         self.mj = mujoco
         self.filter = ImuDeadReckoning(require_initialization=require_initialization)
@@ -146,11 +163,22 @@ samples are accepted. There is no simulator-data object or truth-pose argument.
         if self.offset.shape != (3,) or not np.isfinite(self.offset).all():
             raise ValueError('Invalid known pelvis IMU mount')
         self.sole_offset = sole_offset
+        self.encoder_stationary_gate = encoder_stationary_gate
+        self.quiet = EncoderQuietWindow()
 
-    def update(self, stamp, gyro, acceleration):
-        self.filter.update(stamp, gyro, acceleration)
+    def update(self, stamp, gyro, acceleration, joints=None, velocity=None):
+        if self.encoder_stationary_gate:
+            if joints is None or velocity is None:
+                raise ValueError('Encoder evidence required for online stillness updates')
+            quiet = self.quiet.update(stamp, joints, velocity)
+        else:
+            quiet = True
+        self.filter.update(stamp, gyro, acceleration,
+                           gravity_static_evidence=quiet, zupt_static_evidence=quiet)
 
     def state(self, joints):
+        if not self.filter.initialized:
+            raise ValueError('Static initialization has not passed')
         joints = np.asarray(joints, dtype=float)
         if joints.shape != self.qadr.shape or not np.isfinite(joints).all():
             raise ValueError('Invalid encoder sample')

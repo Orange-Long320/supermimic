@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from supermimic.deploy.imu_dead_reckoning import ImuDeadReckoning
+from supermimic.deploy.imu_dead_reckoning import ImuDeadReckoning, EncoderQuietWindow
 
 
 def main():
@@ -22,17 +22,30 @@ def main():
     stamp = np.array([s['time_s'] for s in raw])
     acc = np.array([s['acceleration'] for s in raw])
     variants = [('legacy', False, False, True, True),
+                ('legacy_no_leveling', False, False, False, True),
+                ('legacy_no_zupt', False, False, True, False),
+                ('legacy_no_leveling_no_zupt', False, False, False, False),
                 ('bias_only', False, True, True, True),
                 ('tilt_only', True, False, True, True),
                 ('static_full', True, True, True, True),
                 ('static_no_leveling', True, True, False, True),
                 ('static_no_zupt', True, True, True, False),
                 ('static_no_leveling_no_zupt', True, True, False, False)]
+    variants += [('legacy_encoder_leveling_gate', False, False, True, True),
+                 ('legacy_encoder_zupt_gate', False, False, True, True),
+                 ('legacy_encoder_both_gate', False, False, True, True),
+                 ('static_encoder_both_gate', True, True, True, True)]
     offset = np.array([.0239465, -.000228682, .04171])
     replay = {}
     # This whole phase has no access to oracle measurements.
+    same_calibration = a.calibration.parent.resolve() == a.run.resolve()
     for name, tilt, bias, leveling, zupt in variants:
+        if tilt and not same_calibration:
+            # Tilt from a different physical release pose cannot initialize
+            # this trace. Gyro-bias-only transfer remains a diagnostic.
+            continue
         f = ImuDeadReckoning(zupt=zupt, gravity_leveling=leveling, require_initialization=False)
+        encoder = EncoderQuietWindow()
         if tilt or bias:
             c = dict(calibration)
             if not tilt: c['quat_wxyz'] = [1., 0., 0., 0.]
@@ -41,7 +54,11 @@ def main():
         positions, quats, world, updates, velocity_jumps = [], [], [], [], []
         for sample in raw:
             before = f.x[2:].copy()
-            f.update(sample['time_s'], sample['gyro'], sample['acceleration'])
+            quiet = encoder.update(sample['time_s'], sample['joint_pos'], sample['joint_vel'])
+            level_gate = quiet if 'encoder' in name and ('leveling_gate' in name or 'both_gate' in name) else True
+            zupt_gate = quiet if 'encoder' in name and ('zupt_gate' in name or 'both_gate' in name) else True
+            f.update(sample['time_s'], sample['gyro'], sample['acceleration'],
+                     gravity_static_evidence=level_gate, zupt_static_evidence=zupt_gate)
             position = np.r_[f.x[:2], 0.]-f.rotation.apply(offset)+f.initial_rotation.apply(offset)
             positions.append(position[:2]); quats.append(f.rotation.as_quat())
             world.append(f.last_world_acceleration.copy()); updates.append(f.last_zupt)
@@ -55,6 +72,7 @@ def main():
     tt = np.array([s['time_s'] for s in truth])
     if not np.array_equal(stamp, tt): raise ValueError('Unmatched sensor/scoring acquisitions')
     position = np.array([s['position'] for s in truth])
+    position -= position[0]  # Score local displacement, never feed an origin back.
     rotation = Rotation.from_quat(np.array([s['quat_wxyz'] for s in truth])[:, [1, 2, 3, 0]])
     velocity = np.gradient(position, stamp, axis=0)
     speed = np.linalg.norm(velocity[:, :2], axis=1)
@@ -78,6 +96,13 @@ def main():
             'zupt_updates': int(use.sum()), 'zupt_while_truth_speed_above_005': int(np.sum(use & moving)),
             'truth_speed_at_zupt_max_m_s': float(speed[use].max()) if use.any() else None,
             'early_zupt_time_range_s': [float(stamp[use][0]), float(stamp[use][-1])] if use.any() else None}
+        if not use.any():
+            dt = np.diff(stamp)
+            dv = projection_error[1:]*dt[:, None]
+            v_before = np.vstack([np.zeros(3), np.cumsum(dv, axis=0)[:-1]])
+            contribution = np.sum(v_before*dt[:, None]+.5*projection_error[1:]*dt[:, None]**2, axis=0)
+            report['variants'][name]['attitude_acceleration_position_contribution_m'] = contribution[:2].tolist()
+            report['variants'][name]['remaining_position_error_vector_m'] = (error[-1]-contribution[:2]).tolist()
         for key, value in result.items(): arrays[name+'_'+key] = value
     a.out.mkdir()
     (a.out/'report.json').write_text(json.dumps(report, indent=2)+'\n')

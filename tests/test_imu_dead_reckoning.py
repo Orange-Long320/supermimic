@@ -3,6 +3,7 @@ import pytest
 
 from supermimic.deploy.imu_dead_reckoning import ImuDeadReckoning
 from supermimic.deploy.imu_dead_reckoning import fit_static_initialization
+from supermimic.deploy.imu_dead_reckoning import EncoderQuietWindow
 from scipy.spatial.transform import Rotation
 
 
@@ -81,3 +82,25 @@ def test_reject_bad_static_window_instead_of_assuming_zero_velocity(change):
     elif change == 'freefall': samples[100]['acceleration'] = [0., 0., 0.]
     with pytest.raises(ValueError):
         fit_static_initialization(samples, declared_stationary=True)
+
+
+def test_moving_encoders_veto_imu_only_gravity_and_zero_velocity_updates():
+    quiet = EncoderQuietWindow()
+    estimator = ImuDeadReckoning(require_initialization=False)
+    estimator.x[2] = .5
+    for i in range(501):
+        t = i*.002
+        evidence = quiet.update(t, [t*.1, 0.], [.1, 0.])
+        assert not evidence
+        estimator.update(t, [0., 0., 0.], [0., 0., 9.81],
+                         gravity_static_evidence=evidence, zupt_static_evidence=evidence)
+    assert estimator.zupt_updates == 0
+    np.testing.assert_allclose(estimator.x[2], .5)
+
+
+def test_encoder_gate_requires_a_complete_quiet_window():
+    quiet = EncoderQuietWindow()
+    for i in range(100):
+        assert not quiet.update(i*.002, [0., 0.], [0., 0.])
+    assert quiet.update(.2, [0., 0.], [0., 0.])
+    assert not quiet.update(.202, [.02, 0.], [0., 0.])

@@ -64,6 +64,11 @@ def collect_native_static_calibration(scene, profile, position, quat, joints, ou
             calibration['collection_end_s'] = float(data.time)
             calibration['free_motion_constraints'] = 0
             (out/'calibration.json').write_text(json.dumps(calibration, indent=2)+'\n')
-            return calibration
+            # Physical release state is separate from the sensor calibration.
+            # It initializes the free simulator, never the estimator. Starting
+            # the free body at an unrelated reference pose would invalidate
+            # the just-measured gravity direction.
+            np.savez(out/'calibration-release-state.npz', qpos=data.qpos.copy(), qvel=data.qvel.copy())
+            return calibration, data.qpos.copy(), data.qvel.copy()
     (out/'calibration-failure.json').write_text(json.dumps({'reason': last_error})+'\n')
     raise ValueError('Static initialization refused: '+last_error)

@@ -37,6 +37,7 @@ def main():
     p.add_argument('--imu-initialization', choices=('static', 'legacy-diagnostic'), default='static')
     p.add_argument('--imu-no-zupt', action='store_true')
     p.add_argument('--imu-no-gravity-leveling', action='store_true')
+    p.add_argument('--imu-log-substeps', action='store_true', help='Record every applied 1 ms IMU sample for aliasing diagnosis')
     p.add_argument('--schedule', type=Path, help='Headless-only JSON [seconds, mode] pairs')
     a = p.parse_args()
     if a.out.exists() or a.seconds <= 0 or (a.schedule and not a.headless):
@@ -95,23 +96,29 @@ def main():
     if fixture_error > 1e-4:
         raise ValueError('Policy fixture mismatch')
     a.out.mkdir(parents=True)
+    import supermimic.deploy.imu_dead_reckoning as estimator_module
+    (a.out/'as-run-entry.py').write_bytes(Path(__file__).read_bytes())
+    (a.out/'as-run-estimator.py').write_bytes(Path(estimator_module.__file__).read_bytes())
+    (a.out/'run-config.json').write_text(json.dumps({k: str(v) if isinstance(v, Path) else v
+                                                    for k, v in vars(a).items()}, indent=2)+'\n')
     imu_log = (a.out/'imu.jsonl').open('x')
     truth_log = (a.out/'truth-imu.jsonl').open('x')
+    substep_log = (a.out/'imu-substeps.jsonl').open('x') if a.imu_log_substeps else None
     data = mujoco.MjData(model)
     history = deque(maxlen=10); previous = np.zeros(n); target = initial_q.copy()
     tracker = None; observer = None; resets = 0; failed = None; paused = False
-    calibration = None
+    calibration = None; prepared_qpos = None; prepared_qvel = None
     if a.state_source == 'imu' and a.imu_initialization == 'static':
         from supermimic.deploy.native_static_calibration import collect_native_static_calibration
-        calibration = collect_native_static_calibration(assets/'model_info/scene.xml', spec,
-                                                         initial_pos, initial_rot, initial_q, a.out)
+        calibration, prepared_qpos, prepared_qvel = collect_native_static_calibration(
+            assets/'model_info/scene.xml', spec, initial_pos, initial_rot, initial_q, a.out)
 
     def sample_imu():
         # Sensor adapter: no framequat, framepos, root velocity, contact or body
         # pose reads. mj_forward has generated these physical IMU channels.
         gyro = data.sensordata[gyro_adr:gyro_adr+3].copy()
         acc = data.sensordata[accel_adr:accel_adr+3].copy()
-        observer.update(float(data.time), gyro, acc)
+        observer.update(float(data.time), gyro, acc, data.qpos[qadr], data.qvel[vadr])
         imu_log.write(json.dumps({'time_s': float(data.time), 'gyro': gyro.tolist(),
                                   'acceleration': acc.tolist(), 'joint_pos': data.qpos[qadr].tolist(),
                                   'joint_vel': data.qvel[vadr].tolist(), 'resets': resets})+'\n')
@@ -127,11 +134,16 @@ def main():
             tracker.close()
         mujoco.mj_resetData(model, data)
         data.qpos[:7] = np.r_[initial_pos, initial_rot]; data.qpos[qadr] = initial_q
+        if prepared_qpos is not None:
+            # Simulation setup only: continue from the physical stationary
+            # fixture's release state. Never pass these poses to the observer.
+            data.qpos[:] = prepared_qpos; data.qvel[:] = prepared_qvel
         mujoco.mj_forward(model, data)
         history.clear(); previous = np.zeros(n); target = initial_q.copy(); failed = None
         if a.state_source == 'imu':
             observer = EncoderImuState(assets/'fk-only/fk-only.xml', names, model.site_pos[site],
-                                      require_initialization=calibration is not None)
+                                      require_initialization=calibration is not None,
+                                      encoder_stationary_gate=calibration is not None)
             if calibration is not None:
                 observer.filter.initialize(calibration)
             observer.filter.zupt = not a.imu_no_zupt
@@ -172,6 +184,13 @@ def main():
                 torque = kp*(target-data.qpos[qadr])-kd*data.qvel[vadr]
                 data.ctrl[motors] = np.clip(torque, limits[:, 0], limits[:, 1])
                 mujoco.mj_step(model, data)
+                if substep_log is not None:
+                    # mj_step leaves the sensors from the interval's pre-step
+                    # solve. Record before mj_forward overwrites that buffer.
+                    substep_log.write(json.dumps({'time_s': float(data.time-model.opt.timestep),
+                                                   'end_s': float(data.time),
+                                                   'gyro': data.sensordata[gyro_adr:gyro_adr+3].tolist(),
+                                                   'acceleration': data.sensordata[accel_adr:accel_adr+3].tolist()})+'\n')
                 if observer is not None and (substep+1) % imu_substeps == 0:
                     # Recompute sensors at their acquisition timestamp so their
                     # values are not paired with the previous integration step.
@@ -295,12 +314,14 @@ def main():
         stop.set(); worker.join(timeout=5.)
         if worker.is_alive(): raise RuntimeError("Physics worker did not stop")
         log.close(); imu_log.close(); truth_log.close(); tracker.close()
+        if substep_log is not None: substep_log.close()
         if window is not None:
             context.free(); glfw.destroy_window(window); glfw.terminate()
         result = {'scope': 'native MuJoCo CPU policy diagnostic; not official ROS pipeline or hardware validation',
                   'mujoco': mujoco.__version__, 'frames': frames, 'sim_seconds': float(data.time),
                   'state_source': a.state_source,
                   'imu_initialization': a.imu_initialization,
+                  'encoder_stationary_gate': calibration is not None,
                   'gyro_bias': observer.filter.gyro_bias.tolist() if observer is not None else None,
                   'gravity_leveling': not a.imu_no_gravity_leveling,
                   'zupt': not a.imu_no_zupt,
