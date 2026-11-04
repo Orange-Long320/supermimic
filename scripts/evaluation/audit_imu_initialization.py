@@ -14,9 +14,22 @@ def main():
     p.add_argument('--run', type=Path, required=True)
     p.add_argument('--calibration', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--substep-means', action='store_true', help='Aggregate recorded 1 ms samples into 500 Hz interval means')
     a = p.parse_args()
     if a.out.exists(): raise ValueError('New output required')
     raw = [json.loads(line) for line in (a.run/'imu.jsonl').open()]
+    interval_average = raw[-1].get('packet_mode') == 'interval-average'
+    if a.substep_means:
+        substeps = [json.loads(line) for line in (a.run/'imu-substeps.jsonl').open()]
+        if len(substeps) != 2*(len(raw)-1): raise ValueError('Incomplete substep acquisition trace')
+        averaged = [raw[0]]
+        for i in range(len(raw)-1):
+            block = substeps[2*i:2*i+2]
+            if abs(block[-1]['end_s']-raw[i+1]['time_s']) > 1e-9: raise ValueError('Packet timing mismatch')
+            sample = dict(raw[i+1], gyro=np.mean([s['gyro'] for s in block], axis=0).tolist(),
+                          acceleration=np.mean([s['acceleration'] for s in block], axis=0).tolist())
+            averaged.append(sample)
+        raw = averaged; interval_average = True
     calibration = json.loads(a.calibration.read_text())
     if any(s['resets'] for s in raw): raise ValueError('Use a no-reset trace')
     stamp = np.array([s['time_s'] for s in raw])
@@ -44,7 +57,8 @@ def main():
             # Tilt from a different physical release pose cannot initialize
             # this trace. Gyro-bias-only transfer remains a diagnostic.
             continue
-        f = ImuDeadReckoning(zupt=zupt, gravity_leveling=leveling, require_initialization=False)
+        f = ImuDeadReckoning(zupt=zupt, gravity_leveling=leveling, require_initialization=False,
+                            interval_average=interval_average)
         encoder = EncoderQuietWindow()
         if tilt or bias:
             c = dict(calibration)
@@ -79,6 +93,7 @@ def main():
     true_world = rotation.apply(acc)-[0., 0., 9.81]
     report = {'scope': 'same raw IMU input; truth loaded after all estimates, scoring only',
               'run': str(a.run), 'calibration': str(a.calibration), 'seconds': float(stamp[-1]-stamp[0]),
+              'interval_average': interval_average,
               'samples': len(raw), 'calibration_gyro_bias': calibration['gyro_bias'], 'variants': {}}
     arrays = {'time': stamp, 'truth_position': position, 'truth_speed': speed}
     for name, result in replay.items():

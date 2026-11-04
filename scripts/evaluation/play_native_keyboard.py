@@ -37,7 +37,10 @@ def main():
     p.add_argument('--imu-initialization', choices=('static', 'legacy-diagnostic'), default='static')
     p.add_argument('--imu-no-zupt', action='store_true')
     p.add_argument('--imu-no-gravity-leveling', action='store_true')
+    p.add_argument('--imu-allow-heuristic-updates', action='store_true',
+                   help='Diagnostic only: permit IMU/encoder stillness guesses to modify attitude/velocity')
     p.add_argument('--imu-log-substeps', action='store_true', help='Record every applied 1 ms IMU sample for aliasing diagnosis')
+    p.add_argument('--imu-packet-mode', choices=('interval-average', 'point'), default='interval-average')
     p.add_argument('--schedule', type=Path, help='Headless-only JSON [seconds, mode] pairs')
     a = p.parse_args()
     if a.out.exists() or a.seconds <= 0 or (a.schedule and not a.headless):
@@ -113,15 +116,16 @@ def main():
         calibration, prepared_qpos, prepared_qvel = collect_native_static_calibration(
             assets/'model_info/scene.xml', spec, initial_pos, initial_rot, initial_q, a.out)
 
-    def sample_imu():
+    def sample_imu(gyro=None, acc=None):
         # Sensor adapter: no framequat, framepos, root velocity, contact or body
         # pose reads. mj_forward has generated these physical IMU channels.
-        gyro = data.sensordata[gyro_adr:gyro_adr+3].copy()
-        acc = data.sensordata[accel_adr:accel_adr+3].copy()
+        gyro = data.sensordata[gyro_adr:gyro_adr+3].copy() if gyro is None else gyro
+        acc = data.sensordata[accel_adr:accel_adr+3].copy() if acc is None else acc
         observer.update(float(data.time), gyro, acc, data.qpos[qadr], data.qvel[vadr])
         imu_log.write(json.dumps({'time_s': float(data.time), 'gyro': gyro.tolist(),
                                   'acceleration': acc.tolist(), 'joint_pos': data.qpos[qadr].tolist(),
-                                  'joint_vel': data.qvel[vadr].tolist(), 'resets': resets})+'\n')
+                                  'joint_vel': data.qvel[vadr].tolist(),
+                                  'packet_mode': a.imu_packet_mode, 'resets': resets})+'\n')
         # Separate, write-only oracle recorder. Never read by the state observer
         # or controller; used after the run to score individual error sources.
         truth_log.write(json.dumps({'time_s': float(data.time), 'position': data.qpos[:3].tolist(),
@@ -143,11 +147,17 @@ def main():
         if a.state_source == 'imu':
             observer = EncoderImuState(assets/'fk-only/fk-only.xml', names, model.site_pos[site],
                                       require_initialization=calibration is not None,
-                                      encoder_stationary_gate=calibration is not None)
+                                      encoder_stationary_gate=calibration is not None,
+                                      interval_average=a.imu_packet_mode == 'interval-average')
             if calibration is not None:
                 observer.filter.initialize(calibration)
-            observer.filter.zupt = not a.imu_no_zupt
-            observer.filter.gravity_leveling = not a.imu_no_gravity_leveling
+            # Quiet encoders/IMU do not establish zero world velocity, or that
+            # specific force is gravity during free motion. Use static gravity
+            # only in the independently restrained calibration. Unsupported
+            # online constraints remain explicit diagnostic ablations.
+            heuristic = a.imu_allow_heuristic_updates or a.imu_initialization == 'legacy-diagnostic'
+            observer.filter.zupt = heuristic and not a.imu_no_zupt
+            observer.filter.gravity_leveling = heuristic and not a.imu_no_gravity_leveling
             sample_imu()
             estimated_pos, estimated_quat, _, _ = observer.state(data.qpos[qadr])
             tracker = SkillGoal(assets/'dataset', profile, estimated_pos, estimated_quat)
@@ -180,10 +190,14 @@ def main():
                 inference_times.append(time.perf_counter()-before)
                 target = default+scale*action; previous = action; tracker.advance()
         if failed is None:
+            gyro_sum = np.zeros(3); acc_sum = np.zeros(3)
             for substep in range(substeps):
                 torque = kp*(target-data.qpos[qadr])-kd*data.qvel[vadr]
                 data.ctrl[motors] = np.clip(torque, limits[:, 0], limits[:, 1])
                 mujoco.mj_step(model, data)
+                if observer is not None and a.imu_packet_mode == 'interval-average':
+                    gyro_sum += data.sensordata[gyro_adr:gyro_adr+3]
+                    acc_sum += data.sensordata[accel_adr:accel_adr+3]
                 if substep_log is not None:
                     # mj_step leaves the sensors from the interval's pre-step
                     # solve. Record before mj_forward overwrites that buffer.
@@ -195,7 +209,11 @@ def main():
                     # Recompute sensors at their acquisition timestamp so their
                     # values are not paired with the previous integration step.
                     mujoco.mj_forward(model, data)
-                    sample_imu()
+                    if a.imu_packet_mode == 'interval-average':
+                        sample_imu(gyro_sum/imu_substeps, acc_sum/imu_substeps)
+                        gyro_sum.fill(0.); acc_sum.fill(0.)
+                    else:
+                        sample_imu()
             mujoco.mj_forward(model, data)
             estimated = observer.state(data.qpos[qadr])[0] if observer is not None else position
             log.write(json.dumps({'wall_s': tick-started, 'time_s': float(data.time), 'mode': mode,
@@ -321,10 +339,11 @@ def main():
                   'mujoco': mujoco.__version__, 'frames': frames, 'sim_seconds': float(data.time),
                   'state_source': a.state_source,
                   'imu_initialization': a.imu_initialization,
+                  'imu_packet_mode': a.imu_packet_mode,
                   'encoder_stationary_gate': calibration is not None,
                   'gyro_bias': observer.filter.gyro_bias.tolist() if observer is not None else None,
-                  'gravity_leveling': not a.imu_no_gravity_leveling,
-                  'zupt': not a.imu_no_zupt,
+                  'gravity_leveling': observer.filter.gravity_leveling if observer is not None else None,
+                  'zupt': observer.filter.zupt if observer is not None else None,
                   'imu_samples': observer.filter.samples if observer is not None else 0,
                   'zupt_updates': observer.filter.zupt_updates if observer is not None else 0,
                   'wall_seconds': time.monotonic()-started, 'resets': resets, 'failure': failed,

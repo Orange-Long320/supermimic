@@ -104,3 +104,22 @@ def test_encoder_gate_requires_a_complete_quiet_window():
         assert not quiet.update(i*.002, [0., 0.], [0., 0.])
     assert quiet.update(.2, [0., 0.], [0., 0.])
     assert not quiet.update(.202, [.02, 0.], [0., 0.])
+
+
+def test_interval_mean_gyro_is_not_averaged_with_the_previous_packet_again():
+    estimator = ImuDeadReckoning(zupt=False, gravity_leveling=False,
+                                  require_initialization=False, interval_average=True)
+    estimator.update(0., [0., 0., 0.], [0., 0., 9.81])
+    estimator.update(.002, [0., 0., 1.], [0., 0., 9.81])
+    np.testing.assert_allclose(estimator.rotation.as_rotvec(), [0., 0., .002], atol=1e-12)
+
+
+def test_interval_specific_force_uses_midpoint_attitude_without_gravity_leak():
+    estimator = ImuDeadReckoning(zupt=False, gravity_leveling=False,
+                                  require_initialization=False, interval_average=True)
+    estimator.update(0., [1., 0., 0.], [0., 0., 9.81])
+    for i in range(1, 501):
+        midpoint = Rotation.from_rotvec([(i-.5)*.002, 0., 0.])
+        estimator.update(i*.002, [1., 0., 0.], midpoint.inv().apply([0., 0., 9.81]))
+    np.testing.assert_allclose(estimator.rotation.as_rotvec(), [1., 0., 0.], atol=1e-12)
+    np.testing.assert_allclose(estimator.x, 0., atol=1e-12)

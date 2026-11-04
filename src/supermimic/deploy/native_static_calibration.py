@@ -29,6 +29,11 @@ def collect_native_static_calibration(scene, profile, position, quat, joints, ou
     weld.name1 = 'pelvis'; weld.name2 = 'world'
     weld.solref[:] = [.005, 1.]
     model = spec.compile(); data = mujoco.MjData(model)
+    # Hanging fixture: do not simultaneously load the feet against a floor.
+    # Competing floor/weld constraints cause slow hip/ankle creep and pollute
+    # the bias window. This affects this separate calibration model only.
+    floor = model.geom('floor').id
+    model.geom_contype[floor] = 0; model.geom_conaffinity[floor] = 0
     names = profile['joint_names']
     ids = [model.joint(name).id for name in names]
     qadr, vadr = model.jnt_qposadr[ids], model.jnt_dofadr[ids]
@@ -44,7 +49,7 @@ def collect_native_static_calibration(scene, profile, position, quat, joints, ou
     window = deque(maxlen=1501)
     last_error = 'No complete static window'
     with (out/'calibration-imu.jsonl').open('x') as log:
-        for step in range(round(10./model.opt.timestep)):
+        for step in range(round(45./model.opt.timestep)):
             data.ctrl[motors] = np.clip(kp*(joints-data.qpos[qadr])-kd*data.qvel[vadr], lo, hi)
             mujoco.mj_step(model, data)
             if (step+1) % sample_steps:
@@ -56,13 +61,20 @@ def collect_native_static_calibration(scene, profile, position, quat, joints, ou
             log.write(json.dumps(sample)+'\n'); window.append(sample)
             if data.time < 5. or (step+1) % 100:
                 continue
+            # The fixture's arms settle slowly. A mean gyro taken while their
+            # reaction torque is still changing includes actual base creep.
+            # Require a genuinely settled encoder window, not a convenient
+            # elapsed timeout, before fitting the bias.
+            if max(max(abs(v) for v in row['joint_vel']) for row in window) > .0001:
+                last_error = 'Fixture mechanical settling incomplete'; continue
             try:
                 calibration = fit_static_initialization(list(window), declared_stationary=True)
             except ValueError as exc:
                 last_error = str(exc); continue
-            calibration['fixture'] = 'independent fixed-pelvis model; free-motion model unchanged'
+            calibration['fixture'] = 'independent hanging pelvis fixture; no floor contact; free-motion model unchanged'
             calibration['collection_end_s'] = float(data.time)
             calibration['free_motion_constraints'] = 0
+            calibration['fixture_encoder_speed_limit'] = .0001
             (out/'calibration.json').write_text(json.dumps(calibration, indent=2)+'\n')
             # Physical release state is separate from the sensor calibration.
             # It initializes the free simulator, never the estimator. Starting

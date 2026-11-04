@@ -68,7 +68,8 @@ class EncoderQuietWindow:
 
 
 class ImuDeadReckoning:
-    def __init__(self, *, zupt=True, gravity_leveling=True, require_initialization=True):
+    def __init__(self, *, zupt=True, gravity_leveling=True, require_initialization=True,
+                 interval_average=False):
         # Declared zero-velocity prior, yaw zero is an arbitrary local heading.
         # Neither prior is obtained from simulator state.
         self.rotation = Rotation.identity()
@@ -86,6 +87,7 @@ class ImuDeadReckoning:
         self.initial_rotation = self.rotation
         self.last_world_acceleration = np.zeros(3)
         self.last_zupt = False
+        self.interval_average = interval_average
 
     def initialize(self, calibration):
         if self.samples:
@@ -114,7 +116,8 @@ class ImuDeadReckoning:
         dt = float(stamp-self.stamp)
         if not 0. < dt <= .03:
             raise ValueError('IMU duplicate/rollback or gap above 30 ms')
-        self.rotation *= Rotation.from_rotvec(.5*(self.previous_gyro+gyro)*dt)
+        increment = gyro if self.interval_average else .5*(self.previous_gyro+gyro)
+        self.rotation *= Rotation.from_rotvec(increment*dt)
         still = abs(np.linalg.norm(acc)-9.81) <= .5 and np.linalg.norm(gyro) <= .08
         self.still_since = (self.still_since if self.still_since is not None else stamp) if still else None
         settled = still and stamp-self.still_since >= .2
@@ -124,7 +127,11 @@ class ImuDeadReckoning:
             up = self.rotation.apply(acc/np.linalg.norm(acc))
             correction = np.cross(up, [0., 0., 1.])
             self.rotation = Rotation.from_rotvec((1.-np.exp(-dt/.5))*correction)*self.rotation
-        world = self.rotation.apply(acc)-[0., 0., 9.81]
+        # Interval means belong to the just-completed interval, rather than its
+        # endpoint. Rotate their specific force using the midpoint attitude.
+        acceleration_rotation = (self.rotation*Rotation.from_rotvec(-.5*gyro*dt)
+                                 if self.interval_average else self.rotation)
+        world = acceleration_rotation.apply(acc)-[0., 0., 9.81]
         self.last_world_acceleration = world.copy()
         self.last_zupt = False
         F = np.eye(4); F[0, 2] = F[1, 3] = dt
@@ -150,10 +157,11 @@ Only immutable mount geometry, a separate FK model, encoder values and raw IMU
 samples are accepted. There is no simulator-data object or truth-pose argument.
 """
     def __init__(self, fk_model_path, joint_names, imu_offset, *, sole_offset=.05,
-                 require_initialization=True, encoder_stationary_gate=True):
+                 require_initialization=True, encoder_stationary_gate=True, interval_average=True):
         import mujoco
         self.mj = mujoco
-        self.filter = ImuDeadReckoning(require_initialization=require_initialization)
+        self.filter = ImuDeadReckoning(require_initialization=require_initialization,
+                                       interval_average=interval_average)
         self.model = mujoco.MjModel.from_xml_path(str(fk_model_path))
         self.data = mujoco.MjData(self.model)
         ids = [self.model.joint(name).id for name in joint_names]
