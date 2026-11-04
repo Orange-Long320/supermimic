@@ -17,7 +17,6 @@ GROUPS = ('leg', 'waist', 'head', 'arm')
 MAX_IMU_GAP_S = .040
 MAX_IMU_RECEIVE_GAP_S = .050
 MAX_BUFFERED_IMU_AGE_S = .100
-MAX_OUTPUT_PROGRESS_GAP_S = .100
 ENCODER_PERIOD_S = .010  # 100 Hz encoder reads for 50 Hz policy states.
 
 
@@ -91,11 +90,12 @@ def main():
              'withheld_stale_candidates': 0, 'max_imu_callback_ms': 0.,
              'max_joint_callback_ms': 0., 'max_heartbeat_work_ms': 0., 'alignment_checks': 0,
              'startup_stale_imu': 0, 'joints_received': 0, 'encoder_polls': 0,
-             'max_imu_batch': 0, 'buffered_imu_integrated': 0}
+             'max_imu_batch': 0, 'buffered_imu_integrated': 0, 'max_output_silence_s': 0.}
     last_stamp = None
     origin_ns = None
     last_publish = None
     last_publish_mono = None
+    last_heartbeat_mono = None
     last_receive = None
     calibration = None
     calibration_stamp = None
@@ -136,7 +136,7 @@ def main():
             stats['joints'] += 1
 
         def on_imu(msg, emit_state=True):
-            nonlocal last_stamp, origin_ns, last_publish, last_receive, last_publish_mono
+            nonlocal last_stamp, origin_ns, last_publish, last_receive, last_publish_mono, last_heartbeat_mono
             nonlocal calibration, calibration_stamp, calibrated_at
             stamp = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
             gyro = [msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z]
@@ -153,7 +153,7 @@ def main():
                 stats['max_header_gap_s'] = max(stats['max_header_gap_s'], gap)
             last_stamp = stamp
             last_receive = time.monotonic()
-            needs_encoders = not stats['calibrated'] or last_publish is None or stamp-last_publish >= 20_000_000
+            needs_encoders = not stats['calibrated'] or (emit_state and (last_publish is None or stamp-last_publish >= 20_000_000))
             aligned = causal_joints(history, stamp, names) if needs_encoders else None
             if needs_encoders:
                 stats['alignment_checks'] += 1
@@ -255,7 +255,7 @@ def main():
                 # A stale combination can be replaced by the next causal
                 # encoder/IMU snapshot. Propagation above is never skipped.
                 # Published packets still pass the unchanged 35 ms validator;
-                # the existing 50 ms output lease bounds any wait for freshness.
+                # consumers enforce their own state freshness and target leases.
                 if str(exc) == 'policy packet stale or future':
                     values = [packet['state_stamp'], *packet['joint_stamps'],
                               packet['published_wall'], *packet['joint_received_wall']]
@@ -271,11 +271,12 @@ def main():
             last_publish_mono = time.monotonic()
             stats['packets'] += 1
             # A live heartbeat, not hardware accuracy or motor readiness approval.
-            if stats['packets'] == 1 or stats['packets'] % 10 == 0:
+            if last_heartbeat_mono is None or time.monotonic()-last_heartbeat_mono >= .2:
                 heartbeat_start = time.monotonic()
                 log.emit('support-events', {'event': 'state_heartbeat', 'wall': time.time(),
                          'session_id': session, 'packets': stats['packets'],
                          'motor_readiness_approved': False})
+                last_heartbeat_mono = time.monotonic()
                 stats['max_heartbeat_work_ms'] = max(stats['max_heartbeat_work_ms'],
                                                     (time.monotonic()-heartbeat_start)*1000)
 
@@ -336,8 +337,12 @@ def main():
                     raise ValueError('No fresh post-calibration state within 500 ms')
                 if last_receive is not None and time.monotonic()-last_receive > MAX_IMU_RECEIVE_GAP_S:
                     raise ValueError('IMU receive timeout')
-                if last_publish_mono is not None and time.monotonic()-last_publish_mono > MAX_OUTPUT_PROGRESS_GAP_S:
-                    raise ValueError('Coherent state output timeout')
+                if last_publish_mono is not None:
+                    # This process publishes measurements, not motor commands.
+                    # Missing coherent encoders withholds output; consumer packet
+                    # freshness and publisher target leases own control stop logic.
+                    stats['max_output_silence_s'] = max(stats['max_output_silence_s'],
+                                                        time.monotonic()-last_publish_mono)
     except KeyboardInterrupt:
         pass
     except Exception as exc:
@@ -360,7 +365,7 @@ def main():
                      interval_average=False, point_trapezoid=True, online_zupt=False,
                      max_imu_gap_s=MAX_IMU_GAP_S, max_imu_receive_gap_s=MAX_IMU_RECEIVE_GAP_S,
                      max_buffered_imu_age_s=MAX_BUFFERED_IMU_AGE_S,
-                     output_progress_timeout_s=MAX_OUTPUT_PROGRESS_GAP_S,
+                     output_progress_timeout_s=None,
                      online_gravity_leveling=False, imu_offset=offset, motor_readiness_approved=False)
         (a.out/'summary.json').write_text(json.dumps(stats, indent=2)+'\n')
         print(json.dumps(stats), flush=True)

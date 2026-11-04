@@ -180,7 +180,7 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     monkeypatch.setattr(diagnostic, 'AsyncDiagnosticLog', Log)
     monkeypatch.setattr(sys, 'argv', ['bridge', '--profile', str(profile), '--model', 'fake-model',
                                     '--urdf', str(urdf), '--out', str(out), '--assume-initial-rest'])
-    fails = fault in ('stale_input', 'timestamp_gap', 'joint_delayed_forever')
+    fails = fault in ('stale_input', 'timestamp_gap')
     if fails:
         with pytest.raises(ValueError, match='IMU|output timeout'):
             bridge.main()
@@ -197,6 +197,9 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     assert summary['encoder_polls'] > 0
     if not fails:
         assert len(updates) == 301  # Every post-calibration IMU is still integrated.
+    if fault == 'joint_delayed_forever':
+        assert summary['max_output_silence_s'] > .1
+        assert packets[-1]['published_wall'] < 103.45
     if fault == 'buffered_delay':
         assert summary['max_imu_batch'] > 20
         assert summary['buffered_imu_integrated'] > 0
