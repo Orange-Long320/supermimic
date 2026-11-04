@@ -32,7 +32,7 @@ def test_mount_requires_fixed_pelvis_and_known_axes(tmp_path):
         bridge.pelvis_mount(path)
 
 
-@pytest.mark.parametrize('fault', [None, 'stale_input', 'timestamp_gap', 'joint_delayed_once', 'joint_delayed_forever'])
+@pytest.mark.parametrize('fault', [None, 'stale_input', 'timestamp_gap', 'joint_delayed_once', 'joint_delayed_forever', 'transport_delay'])
 def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_path, monkeypatch, fault):
     """A 20 ms fit must not publish its aged window as the first live frame."""
     import sys
@@ -56,10 +56,10 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     stream = []
     for i in range(1751):
         wall = 100.+i*.002
-        stamp = int(round((wall-.004)*1e9))
+        stamp = int(round((wall-(.034 if fault == 'transport_delay' else .004))*1e9))
         for group, name in zip(bridge.GROUPS, names):
             # Oldest joint is 17 ms old when the IMU callback begins.
-            jt = stamp-13_000_000
+            jt = stamp-(0 if fault == 'transport_delay' else 13_000_000)
             delayed = fault in ('joint_delayed_once', 'joint_delayed_forever') and i >= 1700 and (fault == 'joint_delayed_forever' or i < 1708)
             if fault in ('joint_delayed_once', 'joint_delayed_forever') and group == 'leg':
                 jt -= 8_000_000
@@ -111,8 +111,8 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     def fit(samples, **kwargs):
         # The measured sensors are fresh on entry, but no longer form a fresh
         # packet after the CPU work. Keep the actual packet validator in place.
-        calibration_end.append(int(round((99.996+samples[-1]['time_s'])*1e9)))
-        clock.value += .020
+        calibration_end.append(int(round(((99.966 if fault == 'transport_delay' else 99.996)+samples[-1]['time_s'])*1e9)))
+        clock.value += 0. if fault == 'transport_delay' else .020
         return {'gyro_bias': [0., 0., 0.], 'quat_wxyz': [1., 0., 0., 0.]}
 
     class Log:
@@ -125,7 +125,18 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
         def close(self):
             return {'success': True}
 
+    class Executor:
+        def add_node(self, node):
+            self.node = node
+
+        def spin_once(self, timeout_sec):
+            spin_once(self.node, timeout_sec)
+
+        def shutdown(self):
+            pass
+
     modules = {
+        'rclpy.executors': dict(SingleThreadedExecutor=Executor),
         'rclpy': dict(init=lambda: None, ok=lambda: True, spin_once=spin_once, try_shutdown=lambda: None),
         'rclpy.node': dict(Node=Node),
         'rclpy.qos': dict(QoSProfile=lambda **kw: kw, ReliabilityPolicy=NS(BEST_EFFORT=1), DurabilityPolicy=NS(VOLATILE=1)),
@@ -153,7 +164,8 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     assert abs(updates[0]-3.) < .003  # Integration still bootstraps at calibration end.
     assert all(b > a for a, b in zip(updates, updates[1:]))
     summary = json.loads((out/'summary.json').read_text())
-    assert summary['startup_waiting_fresh'] > 0
+    if fault != 'transport_delay':
+        assert summary['startup_waiting_fresh'] > 0
     assert bool(summary['fault']) == fails
     if fault in ('joint_delayed_once', 'joint_delayed_forever'):
         assert summary['withheld_stale_candidates'] > 0
@@ -210,3 +222,13 @@ def test_first_command_probe_exits_when_children_or_state_fail(tmp_path, monkeyp
     assert {'dead_worker': 'policy worker exited', 'stale_heartbeat': 'heartbeat expired',
             'interrupt': 'Operator interrupted startup'}[failure] in text
     assert bool(spins) == (failure == 'interrupt')
+
+
+def test_saved_calibration_cannot_be_selected_for_live_state_publication(monkeypatch):
+    import sys
+    monkeypatch.setattr(sys, 'argv', ['bridge', '--profile', 'profile', '--model', 'model',
+                                    '--urdf', 'urdf', '--out', 'out', '--assume-initial-rest',
+                                    '--diagnostic-calibration', 'old-calibration.json'])
+    with pytest.raises(SystemExit) as exc:
+        bridge.main()
+    assert exc.value.code == 2

@@ -23,6 +23,12 @@ def _writer(out, records, delay):
                 time.sleep(delay)
             files[key].write(json.dumps(value, allow_nan=False)+'\n')
             counts[key] += 1
+            if key == 'support-events' and value.get('event') == 'state_heartbeat':
+                # Hardware producer heartbeat shares this existing bounded writer.
+                # Its timestamp comes from the producer, never from delayed disk I/O.
+                temporary = Path(out)/'ready.tmp'
+                temporary.write_text(json.dumps(value, allow_nan=False)+'\n')
+                temporary.replace(Path(out)/'ready.json')
     finally:
         for handle in files.values():
             handle.close()

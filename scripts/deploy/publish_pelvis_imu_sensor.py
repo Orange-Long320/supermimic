@@ -6,6 +6,7 @@ an operator declaration of physical rest; thresholds alone cannot prove rest.
 import argparse
 from collections import deque
 import json
+from math import isfinite
 from pathlib import Path
 import time
 import uuid
@@ -46,9 +47,13 @@ def main():
     p.add_argument('--urdf', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--observe-only', action='store_true')
+    p.add_argument('--diagnostic-calibration', type=Path,
+                   help='Exercise full processing with saved calibration; observe-only, no ROS publisher')
     p.add_argument('--assume-initial-rest', action='store_true')
     p.add_argument('--seconds', type=float, default=0.)
     a = p.parse_args()
+    if a.diagnostic_calibration and not a.observe_only:
+        p.error('Saved calibration is allowed only for bounded --observe-only diagnostics')
     if not a.observe_only and not a.assume_initial_rest:
         p.error('State output requires --assume-initial-rest after physical rest is confirmed')
     if a.observe_only and a.seconds <= 0:
@@ -56,6 +61,7 @@ def main():
     import numpy as np
     import rclpy
     from rclpy.node import Node
+    from rclpy.executors import SingleThreadedExecutor
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
     from sensor_msgs.msg import Imu
     from std_msgs.msg import String
@@ -67,26 +73,36 @@ def main():
     offset = pelvis_mount(a.urdf)
     a.out.mkdir(parents=True, exist_ok=False)
     log = AsyncDiagnosticLog(a.out)
-    estimator = None if a.observe_only else EncoderImuState(
+    processing = not a.observe_only or a.diagnostic_calibration is not None
+    estimator = EncoderImuState(
         a.model, names, offset, interval_average=False, point_trapezoid=True,
-        encoder_stationary_gate=False, max_gap_seconds=MAX_IMU_GAP_S)
+        encoder_stationary_gate=False, max_gap_seconds=MAX_IMU_GAP_S) if processing else None
     session = 'pelvis-raw-imu-'+uuid.uuid4().hex
-    history = {g: deque(maxlen=128) for g in GROUPS}
+    history = {g: deque(maxlen=32) for g in GROUPS}
     window = deque()
     started = time.monotonic()
     stats = {'imu': 0, 'packets': 0, 'joints': 0, 'calibrated': False,
              'max_header_gap_s': 0., 'max_receive_age_s': 0., 'aligned_imu': 0,
              'calibration_compute_ms': None, 'startup_waiting_fresh': 0,
-             'withheld_stale_candidates': 0}
+             'withheld_stale_candidates': 0, 'max_imu_callback_ms': 0.,
+             'max_joint_callback_ms': 0., 'max_heartbeat_work_ms': 0., 'alignment_checks': 0,
+             'startup_stale_imu': 0}
     last_stamp = None
     origin_ns = None
     last_publish = None
+    last_publish_mono = None
     last_receive = None
     calibration = None
     calibration_stamp = None
     calibrated_at = None
     fault = None
     node = None
+    executor = None
+    if a.diagnostic_calibration:
+        calibration = json.loads(a.diagnostic_calibration.read_text())
+        estimator.filter.initialize(calibration)
+        stats['calibrated'] = True
+        calibrated_at = time.monotonic()
     rclpy.init()
     try:
         node = Node('supermimic_pelvis_raw_imu', enable_rosout=False, start_parameter_services=False)
@@ -105,13 +121,13 @@ def main():
                 raise ValueError('Joint timestamp duplicate/rollback')
             if len(row['position']) != len(msg.joints):
                 raise ValueError('Duplicate joint names')
-            if not all(np.isfinite(v) for key in ('position', 'velocity') for v in row[key].values()):
+            if not all(isfinite(v) for key in ('position', 'velocity') for v in row[key].values()):
                 raise ValueError('Nonfinite encoders')
             history[group].append(row)
             stats['joints'] += 1
 
         def on_imu(msg):
-            nonlocal last_stamp, origin_ns, last_publish, last_receive
+            nonlocal last_stamp, origin_ns, last_publish, last_receive, last_publish_mono
             nonlocal calibration, calibration_stamp, calibrated_at
             stamp = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
             gyro = [msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z]
@@ -128,10 +144,18 @@ def main():
                 stats['max_header_gap_s'] = max(stats['max_header_gap_s'], gap)
             last_stamp = stamp
             last_receive = time.monotonic()
-            aligned = causal_joints(history, stamp, names)
+            needs_encoders = not stats['calibrated'] or last_publish is None or stamp-last_publish >= 20_000_000
+            aligned = causal_joints(history, stamp, names) if needs_encoders else None
+            if needs_encoders:
+                stats['alignment_checks'] += 1
             if aligned is not None:
                 stats['aligned_imu'] += 1
-            if a.observe_only:
+            if not processing:
+                return
+            if origin_ns is None and age > .035:
+                # No integration/calibration has begun. Discovery can initially
+                # deliver an old sample; wait for fresh input, never retimestamp it.
+                stats['startup_stale_imu'] += 1
                 return
             if stamp <= 0 or not np.isfinite(gyro+acc).all() or not 0 <= age <= .035:
                 raise ValueError('Invalid/stale/future IMU input')
@@ -139,6 +163,8 @@ def main():
                 raise ValueError(f'IMU duplicate/rollback or gap {gap*1000:.3f} ms exceeds {MAX_IMU_GAP_S*1000:g} ms')
             if origin_ns is None:
                 origin_ns = stamp
+                if a.diagnostic_calibration:
+                    calibration_stamp = stamp
             sample['time_s'] = (stamp-origin_ns)*1e-9
             if not stats['calibrated']:
                 if aligned is None:
@@ -164,6 +190,7 @@ def main():
                                                'fit_ms': stats['calibration_compute_ms'],
                                                'calibration': calibration})
                     stats['calibrated'] = True
+                    window.clear()
                     print('Stationary initialization passed; gyro bias:', calibration['gyro_bias'], flush=True)
                     # Bootstrap at the exact end of the measured rest window.
                     # Fitting takes wall time: this observation must never become
@@ -214,31 +241,48 @@ def main():
                         stats['withheld_stale_candidates'] += 1
                         return
                 raise
+            encoded = json.dumps(packet, allow_nan=False)
             log.emit('packets', packet)
-            pub.publish(String(data=json.dumps(packet, allow_nan=False)))
+            if pub is not None:
+                pub.publish(String(data=encoded))
             last_publish = stamp
+            last_publish_mono = time.monotonic()
             stats['packets'] += 1
             # A live heartbeat, not hardware accuracy or motor readiness approval.
-            ready = a.out/'ready.json'
-            temporary = a.out/'ready.tmp'
             if stats['packets'] == 1 or stats['packets'] % 10 == 0:
-                temporary.write_text(json.dumps({'wall': time.time(), 'session_id': session,
-                                            'packets': stats['packets'], 'motor_readiness_approved': False}))
-                temporary.replace(ready)
+                heartbeat_start = time.monotonic()
+                log.emit('support-events', {'event': 'state_heartbeat', 'wall': time.time(),
+                         'session_id': session, 'packets': stats['packets'],
+                         'motor_readiness_approved': False})
+                stats['max_heartbeat_work_ms'] = max(stats['max_heartbeat_work_ms'],
+                                                    (time.monotonic()-heartbeat_start)*1000)
 
-        subscriptions = [node.create_subscription(Imu, '/aima/hal/imu/torso/state', on_imu, qos)]
+        def timed_callback(callback, key):
+            def invoke(msg):
+                begin = time.monotonic()
+                try:
+                    return callback(msg)
+                finally:
+                    stats[key] = max(stats[key], (time.monotonic()-begin)*1000)
+            return invoke
+
+        subscriptions = [node.create_subscription(Imu, '/aima/hal/imu/torso/state',
+                         timed_callback(on_imu, 'max_imu_callback_ms'), qos)]
         subscriptions += [node.create_subscription(JointStateArray, '/aima/hal/joint/'+g+'/state',
-                           lambda msg, group=g: on_joint(group, msg), qos) for g in GROUPS]
+                           timed_callback(lambda msg, group=g: on_joint(group, msg),
+                                          'max_joint_callback_ms'), qos) for g in GROUPS]
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
         while rclpy.ok() and (a.seconds <= 0 or time.monotonic()-started < a.seconds):
-            rclpy.spin_once(node, timeout_sec=.005)
-            if not a.observe_only:
+            executor.spin_once(timeout_sec=.005)
+            if processing:
                 if time.monotonic()-started > 20 and not stats['calibrated']:
                     raise ValueError('No valid three-second stationary window within 20 seconds')
                 if calibrated_at is not None and last_publish is None and time.monotonic()-calibrated_at > .5:
                     raise ValueError('No fresh post-calibration state within 500 ms')
                 if last_receive is not None and time.monotonic()-last_receive > MAX_IMU_RECEIVE_GAP_S:
                     raise ValueError('IMU receive timeout')
-                if last_publish is not None and time.time()-last_publish*1e-9 > .05:
+                if last_publish_mono is not None and time.monotonic()-last_publish_mono > .05:
                     raise ValueError('Coherent state output timeout')
     except KeyboardInterrupt:
         pass
@@ -249,12 +293,18 @@ def main():
         (a.out/'ready.json').unlink(missing_ok=True)
         if calibration is not None:
             (a.out/'calibration.json').write_text(json.dumps(calibration, indent=2)+'\n')
+        if executor is not None:
+            executor.shutdown()
         if node is not None:
             node.destroy_node()
         rclpy.try_shutdown()
         writer = log.close()
+        # The writer can drain an already queued heartbeat during shutdown.
+        (a.out/'ready.json').unlink(missing_ok=True)
         stats.update(fault=fault, duration_s=time.monotonic()-started, writer=writer,
                      observe_only=a.observe_only, firmware_quaternion_used=False,
+                     diagnostic_calibration=str(a.diagnostic_calibration) if a.diagnostic_calibration else None,
+                     stationary_calibration_this_run=stats['calibrated'] and not bool(a.diagnostic_calibration),
                      interval_average=False, point_trapezoid=True, online_zupt=False,
                      max_imu_gap_s=MAX_IMU_GAP_S, max_imu_receive_gap_s=MAX_IMU_RECEIVE_GAP_S,
                      online_gravity_leveling=False, imu_offset=offset, motor_readiness_approved=False)

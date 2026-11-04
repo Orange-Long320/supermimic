@@ -47,3 +47,14 @@ def test_interrupt_does_not_kill_writer_before_queue_drain(tmp_path):
         if log.process.is_alive():
             log.process.terminate()
             log.process.join(timeout=2.)
+
+
+def test_state_heartbeat_is_written_by_existing_writer_with_original_timestamp(tmp_path):
+    log = AsyncDiagnosticLog(tmp_path, writer_delay=.03)
+    heartbeat = {'event': 'state_heartbeat', 'wall': 10., 'session_id': 'sensor-test',
+                 'packets': 10, 'motor_readiness_approved': False}
+    log.emit('support-events', heartbeat)
+    status = log.close(timeout=5.)
+    assert status['success']
+    assert json.loads((tmp_path/'ready.json').read_text()) == heartbeat
+    assert status['written'] == {'packets': 0, 'support-events': 1}

@@ -41,7 +41,11 @@ def run():
   else:
    msg=NS(header=header,state=NS(value=r['domain']),joints=[NS(name=n,position=v,velocity=r['velocity'][n]) for n,v in r['position'].items()])
    callbacks['/aima/hal/joint/'+r['group']+'/state'](msg)
- modules={'rclpy':dict(init=lambda:None,ok=lambda:True,spin_once=spin,try_shutdown=lambda:None),
+ class Executor:
+  def add_node(self,node):self.node=node
+  def spin_once(self,timeout_sec):sys.modules['rclpy'].spin_once(self.node,timeout_sec=timeout_sec)
+  def shutdown(self):pass
+ modules={'rclpy.executors':dict(SingleThreadedExecutor=Executor),'rclpy':dict(init=lambda:None,ok=lambda:True,spin_once=spin,try_shutdown=lambda:None),
           'rclpy.node':dict(Node=Node),'rclpy.qos':dict(QoSProfile=lambda **kw:kw,ReliabilityPolicy=NS(BEST_EFFORT=1),DurabilityPolicy=NS(VOLATILE=1)),
           'sensor_msgs.msg':dict(Imu=object),'std_msgs.msg':dict(String=lambda **kw:NS(**kw)),
           'aimdk_msgs.msg':dict(JointStateArray=object)}
