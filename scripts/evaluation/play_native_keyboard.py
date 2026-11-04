@@ -8,7 +8,11 @@ from collections import deque
 import hashlib
 import json
 from pathlib import Path
+import struct
 import time
+import threading
+import traceback
+import zlib
 
 import mujoco
 import numpy as np
@@ -89,6 +93,39 @@ def main():
         tracker = SkillGoal(assets/'dataset', profile, initial_pos, initial_rot)
 
     reset()
+    def control_step(current_mode, tick):
+        nonlocal failed, previous, target, frames
+        mode = current_mode
+        q = data.qpos[qadr].copy(); velocity = data.qvel[vadr].copy()
+        w, x, y, z = data.xquat[imu_body]
+        gravity = np.array([2*(w*y-x*z), -2*(w*x+y*z), -1+2*(x*x+y*y)])
+        spatial = np.zeros(6)
+        mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, imu_body, spatial, 1)
+        history.append((q-default, velocity, spatial[:3].copy(), gravity, previous.copy()))
+        if len(history) == 10:
+            goal = tracker.goal(data.qpos[:3].copy(), data.qpos[3:7].copy(), q, mode)
+            if abs(float(goal[2*n+9])-data.qpos[2]) > .25 or abs(float(goal[2*n+2])-gravity[2]) > .8:
+                failed = {'time_s': float(data.time), 'reason': 'root height or tilt termination'}
+            else:
+                obs = np.concatenate([frame[term] for term in range(5) for frame in history])
+                before = time.perf_counter(); action = policy.infer(obs, goal)
+                inference_times.append(time.perf_counter()-before)
+                target = default+scale*action; previous = action; tracker.advance()
+        if failed is None:
+            for _ in range(substeps):
+                torque = kp*(target-data.qpos[qadr])-kd*data.qvel[vadr]
+                data.ctrl[motors] = np.clip(torque, limits[:, 0], limits[:, 1])
+                mujoco.mj_step(model, data)
+            mujoco.mj_forward(model, data)
+            log.write(json.dumps({'wall_s': tick-started, 'time_s': float(data.time), 'mode': mode,
+                                  'root': data.qpos[:3].tolist(), 'reference': tracker.position.tolist(),
+                                  'resets': resets})+'\n')
+            frames += 1
+
+    snapshot_lock = threading.Lock()
+    snapshot_qpos = data.qpos.copy(); snapshot_qvel = data.qvel.copy(); snapshot_time = 0.
+    stop = threading.Event(); reset_requested = False
+    render_data = mujoco.MjData(model)
     window = None
     if not a.headless:
         import glfw
@@ -105,83 +142,96 @@ def main():
         glfw.set_scroll_callback(window, lambda w, x, y: setattr(camera, 'distance', float(np.clip(camera.distance-y*.15, .7, 8.))))
 
         def key_event(w, key, scancode, action, mods):
-            nonlocal resets, paused
+            nonlocal reset_requested, paused
             if action == glfw.PRESS:
                 if key == glfw.KEY_ESCAPE: glfw.set_window_should_close(w, True)
                 elif key == glfw.KEY_SPACE: paused = not paused
                 elif key == glfw.KEY_R:
-                    reset(); resets += 1
+                    reset_requested = True
         glfw.set_key_callback(window, key_event)
 
     schedule = json.loads(a.schedule.read_text()) if a.schedule else [[0., 'stand']]
     inference_times = []; tick_times = deque(maxlen=100)
-    started = time.monotonic(); frames = 0; mode = 'stand'
+    started = time.monotonic(); frames = 0; mode = 'stand'; screenshot_written = False
+    next_render = started
     print(json.dumps({'event': 'ready', 'local': True, 'policy_fixture_error': fixture_error,
                       'mujoco': mujoco.__version__, 'keyboard': 'W/S/A/D, Shift+W, space pause, R reset, Esc close'}), flush=True)
     log = (a.out/'frames.jsonl').open('x')
+    def control_loop():
+        nonlocal frames, resets, reset_requested, failed
+        nonlocal snapshot_qpos, snapshot_qvel, snapshot_time
+        deadline = time.monotonic()
+        try:
+            while not stop.is_set() and time.monotonic()-started < a.seconds:
+                tick = time.monotonic()
+                if reset_requested:
+                    reset(); resets += 1; reset_requested = False
+                current_mode = mode if window is not None else next(m for t, m in reversed(schedule) if data.time >= t)
+                if not paused and failed is None:
+                    control_step(current_mode, tick)
+                with snapshot_lock:
+                    snapshot_qpos = data.qpos.copy(); snapshot_qvel = data.qvel.copy(); snapshot_time = float(data.time)
+                tick_times.append(time.monotonic()-tick)
+                if frames and frames % 100 == 0: log.flush()
+                if failed and a.headless: break
+                deadline += .02
+                if time.monotonic()-deadline > .5: deadline = time.monotonic()
+                stop.wait(max(0., deadline-time.monotonic()))
+        except Exception as exc:
+            failed = {'time_s': float(data.time), 'reason': str(exc)}
+            traceback.print_exc()
+        finally:
+            stop.set()
+
+    worker = threading.Thread(target=control_loop, name='native-physics-policy')
+    worker.start()
     try:
-        while time.monotonic()-started < a.seconds:
-            tick = time.monotonic()
-            if window is not None:
-                glfw.poll_events()
-                if glfw.window_should_close(window): break
-                pressed = lambda key: glfw.get_key(window, key) == glfw.PRESS
-                focused = glfw.get_window_attrib(window, glfw.FOCUSED)
-                mode = ('turn_left_inplace' if pressed(glfw.KEY_A) else
-                        'turn_right_inplace' if pressed(glfw.KEY_D) else
-                        'backward' if pressed(glfw.KEY_S) else
-                        ('jog' if pressed(glfw.KEY_LEFT_SHIFT) or pressed(glfw.KEY_RIGHT_SHIFT) else 'walk')
-                        if pressed(glfw.KEY_W) else 'stand') if focused else 'stand'
-            else:
-                mode = next(m for t, m in reversed(schedule) if data.time >= t)
-            if not paused and failed is None:
-                q = data.qpos[qadr].copy(); velocity = data.qvel[vadr].copy()
-                w, x, y, z = data.xquat[imu_body]
-                gravity = np.array([2*(w*y-x*z), -2*(w*x+y*z), -1+2*(x*x+y*y)])
-                spatial = np.zeros(6)
-                mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, imu_body, spatial, 1)
-                history.append((q-default, velocity, spatial[:3].copy(), gravity, previous.copy()))
-                if len(history) == 10:
-                    goal = tracker.goal(data.qpos[:3].copy(), data.qpos[3:7].copy(), q, mode)
-                    if abs(float(goal[2*n+9])-data.qpos[2]) > .25 or abs(float(goal[2*n+2])-gravity[2]) > .8:
-                        failed = {'time_s': float(data.time), 'reason': 'root height or tilt termination'}
-                    else:
-                        obs = np.concatenate([frame[term] for term in range(5) for frame in history])
-                        before = time.perf_counter(); action = policy.infer(obs, goal)
-                        inference_times.append(time.perf_counter()-before)
-                        target = default+scale*action; previous = action; tracker.advance()
-                if failed is None:
-                    for _ in range(substeps):
-                        torque = kp*(target-data.qpos[qadr])-kd*data.qvel[vadr]
-                        data.ctrl[motors] = np.clip(torque, limits[:, 0], limits[:, 1])
-                        mujoco.mj_step(model, data)
-                    mujoco.mj_forward(model, data)
-                    log.write(json.dumps({'wall_s': tick-started, 'time_s': float(data.time), 'mode': mode,
-                                          'root': data.qpos[:3].tolist(), 'reference': tracker.position.tolist(),
-                                          'resets': resets})+'\n')
-                    frames += 1
-            if window is not None:
-                camera.lookat[:] = data.qpos[:3]+[0., 0., .05]
-                width, height = glfw.get_framebuffer_size(window)
-                viewport = mujoco.MjrRect(0, 0, width, height)
-                mujoco.mjv_updateScene(model, data, option, None, camera, mujoco.mjtCatBit.mjCAT_ALL, scene)
-                mujoco.mjr_render(viewport, scene, context)
-                status = 'FAILED - R to reset' if failed else 'PAUSED' if paused else mode
-                mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                                   viewport, 'LOCAL X2 - '+status, 'W/S walk | A/D turn | Shift+W jog\nSpace pause | R reset | Esc exit', context)
-                glfw.swap_buffers(window)
-            tick_times.append(time.monotonic()-tick)
-            if frames and frames % 100 == 0:
-                log.flush()
-                if window is not None:
-                    glfw.set_window_title(window, f'X2 LOCAL | {mode} | tick {np.median(tick_times)*1000:.1f} ms | sim {data.time:.1f}s')
-            if failed and a.headless: break
-            remaining = .02-(time.monotonic()-tick)
-            if remaining > 0: time.sleep(remaining)
+        if window is None:
+            worker.join()
+        while window is not None and not stop.is_set():
+            glfw.poll_events()
+            if glfw.window_should_close(window): break
+            pressed = lambda key: glfw.get_key(window, key) == glfw.PRESS
+            focused = glfw.get_window_attrib(window, glfw.FOCUSED)
+            mode = ('turn_left_inplace' if pressed(glfw.KEY_A) else
+                    'turn_right_inplace' if pressed(glfw.KEY_D) else
+                    'backward' if pressed(glfw.KEY_S) else
+                    ('jog' if pressed(glfw.KEY_LEFT_SHIFT) or pressed(glfw.KEY_RIGHT_SHIFT) else 'walk')
+                    if pressed(glfw.KEY_W) else 'stand') if focused else 'stand'
+            with snapshot_lock:
+                render_data.qpos[:] = snapshot_qpos; render_data.qvel[:] = snapshot_qvel; render_data.time = snapshot_time
+            mujoco.mj_forward(model, render_data)
+            camera.lookat[:] = render_data.qpos[:3]+[0., 0., .05]
+            width, height = glfw.get_framebuffer_size(window)
+            viewport = mujoco.MjrRect(0, 0, width, height)
+            mujoco.mjv_updateScene(model, render_data, option, None, camera, mujoco.mjtCatBit.mjCAT_ALL, scene)
+            mujoco.mjr_render(viewport, scene, context)
+            status = 'FAILED - R to reset' if failed else 'PAUSED' if paused else mode
+            mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                               viewport, 'LOCAL X2 - '+status, 'W/S walk | A/D turn | Shift+W jog\nSpace pause | R reset | Esc exit', context)
+            if not screenshot_written:
+                pixels = np.zeros((height, width, 3), dtype=np.uint8)
+                mujoco.mjr_readPixels(pixels, None, viewport, context)
+                def chunk(kind, payload):
+                    return (struct.pack('!I', len(payload))+kind+payload
+                            +struct.pack('!I', zlib.crc32(kind+payload)))
+                scanlines = b''.join(b'\0'+row.tobytes() for row in pixels[::-1])
+                png = (b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR', struct.pack('!2I5B', width, height, 8, 2, 0, 0, 0))
+                       +chunk(b'IDAT', zlib.compress(scanlines))+chunk(b'IEND', b''))
+                (a.out/'initial-window.png').write_bytes(png)
+                screenshot_written = True
+                print(json.dumps({'event': 'window_rendered', 'width': width, 'height': height}), flush=True)
+            glfw.swap_buffers(window)
+            if frames:
+                glfw.set_window_title(window, f'X2 LOCAL | {mode} | physics {np.median(tick_times)*1000:.1f} ms | sim {render_data.time:.1f}s')
+            next_render = max(next_render+1/30., time.monotonic())
+            stop.wait(max(0., next_render-time.monotonic()))
     finally:
+        stop.set(); worker.join(timeout=5.)
+        if worker.is_alive(): raise RuntimeError("Physics worker did not stop")
         log.close(); tracker.close()
         if window is not None:
-            context.free(); scene.free(); glfw.destroy_window(window); glfw.terminate()
+            context.free(); glfw.destroy_window(window); glfw.terminate()
         result = {'scope': 'native MuJoCo CPU policy diagnostic; not official ROS pipeline or hardware validation',
                   'mujoco': mujoco.__version__, 'frames': frames, 'sim_seconds': float(data.time),
                   'wall_seconds': time.monotonic()-started, 'resets': resets, 'failure': failed,
