@@ -9,8 +9,8 @@
 | 工作区标识 | 职责 | 本机位置 | 分支 |
 | --- | --- | --- | --- |
 | `keyboard` | 现有参考动作键盘控制、状态估计、部署准备 | 当前目录 | `main` |
-| `keyboard-training` | 现有速度接口、五动作训练与停止修复 | `~/.codex/worktrees/x2-velocity-control/supermimic` | `codex/x2-velocity-control` |
-| `stairs` | 不同尺寸楼梯、仅双脚、ACP 式规划与世界模型训练 | `../supermimic-stairs` | `codex/x2-stairs` |
+| `keyboard-training` | 现有速度接口、五动作训练与停止修复 | `~/.codex/worktrees/x2-velocity-control/supermimic` | `x2-velocity-control` |
+| `stairs` | 不同尺寸楼梯、仅双脚、ACP 式规划与世界模型训练 | `../supermimic-stairs` | `x2-stairs` |
 
 已有键盘训练工作区保持原位。其 `locomotion/` 实现与主目录不同；主目录中的部分
 历史训练脚本通过 `--source` 指向该版本。不能把这些脚本当作主目录上已接通的训练入口。

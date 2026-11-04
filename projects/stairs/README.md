@@ -4,7 +4,7 @@
 路线：地形观测 → ACP 式双脚接触规划 → SuperMimic 世界模型和可微想象策略更新。
 不启动 PPO，不包含实机运动授权。
 
-开发工作区：`../supermimic-stairs`，分支 `codex/x2-stairs`。
+开发工作区：`../supermimic-stairs`，分支 `x2-stairs`。
 当前管理目录仅保留项目索引；实际实现和后续实验记录在楼梯工作区推进。
 
 新代码：`src/supermimic_stairs/`；入口：`scripts/stairs/`；配置：`configs/stairs/`；

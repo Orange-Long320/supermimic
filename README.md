@@ -1,6 +1,6 @@
 # SuperMimic：X2 双脚上楼梯
 
-本工作区仅开发 **不同尺寸楼梯上的 X2 双脚上楼策略**，分支为 `codex/x2-stairs`。
+本工作区仅开发 **不同尺寸楼梯上的 X2 双脚上楼策略**，分支为 `x2-stairs`。
 使用 ACP 式接触规划与 SuperMimic 世界模型/可微想象训练。当前处于开发准备阶段，
 尚无可运行的楼梯训练入口或已验收策略。
 
@@ -17,7 +17,7 @@
 
 当前目录维护 **ACP 上楼梯**。**键盘控制与实机准备**在独立的
 `../supermimic` 工作区维护；当前源码修改不会改变键盘工作区。
-键盘速度训练保留原有 `codex/x2-velocity-control` 工作区，不把它和当前部署版本混为一套源码。
+键盘速度训练保留原有 `x2-velocity-control` 工作区，不把它和当前部署版本混为一套源码。
 
 项目入口、版本、环境与产物隔离规则见 [项目管理](projects/README.md)。
 [键盘项目](projects/keyboard/README.md) · [楼梯项目](projects/stairs/README.md)。
