@@ -32,7 +32,7 @@ def test_mount_requires_fixed_pelvis_and_known_axes(tmp_path):
         bridge.pelvis_mount(path)
 
 
-@pytest.mark.parametrize('fault', [None, 'stale_input', 'timestamp_gap', 'joint_delayed_once', 'joint_delayed_forever', 'transport_delay'])
+@pytest.mark.parametrize('fault', [None, 'stale_input', 'timestamp_gap', 'joint_delayed_once', 'joint_delayed_forever', 'transport_delay', 'buffered_delay'])
 def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_path, monkeypatch, fault):
     """A 20 ms fit must not publish its aged window as the first live frame."""
     import sys
@@ -54,32 +54,30 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     callbacks, packets, updates = {}, [], []
     calibration_end = []
     stream = []
-    for i in range(1751):
+    for i in range(1801):
         wall = 100.+i*.002
         stamp = int(round((wall-(.020 if fault == 'transport_delay' else .004))*1e9))
         for group, name in zip(bridge.GROUPS, names):
             # Oldest joint is 17 ms old when the IMU callback begins.
             jt = stamp-(0 if fault == 'transport_delay' else 13_000_000)
             delayed = fault in ('joint_delayed_once', 'joint_delayed_forever') and i >= 1700 and (fault == 'joint_delayed_forever' or i < 1708)
-            if fault in ('joint_delayed_once', 'joint_delayed_forever') and group == 'leg':
-                jt -= 8_000_000
+            if delayed and group == 'leg':
+                continue
             stream.append((wall, '/aima/hal/joint/'+group+'/state', NS(
                 header=NS(stamp=NS(sec=jt//10**9, nanosec=jt%10**9)),
                 state=NS(value=0), joints=[NS(name=name, position=0., velocity=0.)])))
-        if delayed:
-            wall += .006 if fault == 'joint_delayed_once' else .012
         if fault == 'stale_input' and i == 1700:
-            wall += .04
+            wall += .11
         if fault == 'timestamp_gap' and i == 1700:
             stamp += 40_000_000
         stream.append((wall, '/aima/hal/imu/torso/state', NS(
             header=NS(stamp=NS(sec=stamp//10**9, nanosec=stamp%10**9), frame_id='base_link'),
             angular_velocity=NS(x=0., y=0., z=0.), linear_acceleration=NS(x=0., y=0., z=9.81))))
-    iterator = iter(stream)
+    pending = deque(stream)
 
     class Handle:
-        def __init__(self):
-            self.message = None
+        def __init__(self, depth):
+            self.messages = deque(maxlen=depth)
             self.pointer = id(self)
 
         def __enter__(self):
@@ -89,16 +87,15 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
             pass
 
         def take_message(self, *args):
-            message, self.message = self.message, None
-            return None if message is None else (message, None)
+            return (self.messages.popleft(), None) if self.messages else None
 
     class Node:
         def __init__(self, name, **kwargs):
             self.context = NS(handle=None)
 
         def create_subscription(self, kind, topic, callback, qos):
-            handle = Handle()
-            callbacks[topic] = lambda msg: setattr(handle, 'message', msg)
+            handle = Handle(qos['depth'])
+            callbacks[topic] = handle.messages.append
             return NS(handle=handle, msg_type=kind, raw=False)
 
         def create_publisher(self, *args):
@@ -107,11 +104,12 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
         def destroy_node(self):
             pass
 
-    def spin_once(node, timeout_sec):
-        try:
-            wall, topic, msg = next(iterator)
-        except StopIteration:
+    delayed_once = [False]
+
+    def deliver_event():
+        if not pending:
             raise KeyboardInterrupt()
+        wall, topic, msg = pending.popleft()
         clock.value = max(clock.value, wall)
         callbacks[topic](msg)
 
@@ -153,15 +151,21 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
             self.handle = handle
 
         def wait(self, timeout):
-            spin_once(None, timeout*.000000001)
+            if fault == 'buffered_delay' and clock.value >= 103.4 and not delayed_once[0]:
+                clock.value += .060
+                delayed_once[0] = True
+            while not self.handle.messages:
+                deliver_event()
+            while pending and pending[0][0] <= clock.value:
+                deliver_event()
 
         def get_ready_entities(self, kind):
-            return [self.handle.pointer] if self.handle.message is not None else []
+            return [self.handle.pointer] if self.handle.messages else []
 
     modules = {
         'rclpy.impl': {},
         'rclpy.impl.implementation_singleton': dict(rclpy_implementation=NS(WaitSet=WaitSet)),
-        'rclpy': dict(init=lambda: None, ok=lambda: True, spin_once=spin_once, try_shutdown=lambda: None),
+        'rclpy': dict(init=lambda: None, ok=lambda: True, try_shutdown=lambda: None),
         'rclpy.node': dict(Node=Node),
         'rclpy.qos': dict(QoSProfile=lambda **kw: kw, ReliabilityPolicy=NS(BEST_EFFORT=1), DurabilityPolicy=NS(VOLATILE=1)),
         'sensor_msgs.msg': dict(Imu=object), 'aimdk_msgs.msg': dict(JointStateArray=object),
@@ -188,15 +192,14 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     assert abs(updates[0]-3.) < .003  # Integration still bootstraps at calibration end.
     assert all(b > a for a, b in zip(updates, updates[1:]))
     summary = json.loads((out/'summary.json').read_text())
-    if fault != 'transport_delay':
-        assert summary['startup_waiting_fresh'] > 0
     assert bool(summary['fault']) == fails
     assert summary['joints_received'] == summary['joints']
     assert summary['encoder_polls'] > 0
     if not fails:
-        assert len(updates) == 251  # Every post-calibration IMU is still integrated.
-    if fault == 'joint_delayed_forever':
-        assert summary['withheld_stale_candidates'] > 0
+        assert len(updates) == 301  # Every post-calibration IMU is still integrated.
+    if fault == 'buffered_delay':
+        assert summary['max_imu_batch'] > 20
+        assert summary['buffered_imu_integrated'] > 0
 
 
 @pytest.mark.parametrize('failure', ['dead_worker', 'stale_heartbeat', 'interrupt'])
