@@ -92,6 +92,7 @@ def main():
     if fixture_error > 1e-4:
         raise ValueError('Policy fixture mismatch')
     a.out.mkdir(parents=True)
+    imu_log = (a.out/'imu.jsonl').open('x')
     data = mujoco.MjData(model)
     history = deque(maxlen=10); previous = np.zeros(n); target = initial_q.copy()
     tracker = None; observer = None; resets = 0; failed = None; paused = False
@@ -99,8 +100,11 @@ def main():
     def sample_imu():
         # Sensor adapter: no framequat, framepos, root velocity, contact or body
         # pose reads. mj_forward has generated these physical IMU channels.
-        observer.update(float(data.time), data.sensordata[gyro_adr:gyro_adr+3].copy(),
-                        data.sensordata[accel_adr:accel_adr+3].copy())
+        gyro = data.sensordata[gyro_adr:gyro_adr+3].copy()
+        acc = data.sensordata[accel_adr:accel_adr+3].copy()
+        observer.update(float(data.time), gyro, acc)
+        imu_log.write(json.dumps({'time_s': float(data.time), 'gyro': gyro.tolist(),
+                                  'acceleration': acc.tolist(), 'resets': resets})+'\n')
 
     def reset():
         nonlocal tracker, observer, previous, target, failed
@@ -158,6 +162,7 @@ def main():
             log.write(json.dumps({'wall_s': tick-started, 'time_s': float(data.time), 'mode': mode,
                                   'root': data.qpos[:3].tolist(), 'reference': tracker.position.tolist(),
                                   'estimated_root': estimated.tolist(), 'state_source': a.state_source,
+                                  'joint_pos': data.qpos[qadr].tolist(), 'joint_vel': data.qvel[vadr].tolist(),
                                   'truth_scope': 'rendering and offline scoring only',
                                   'resets': resets})+'\n')
             frames += 1
@@ -212,7 +217,7 @@ def main():
                 with snapshot_lock:
                     snapshot_qpos = data.qpos.copy(); snapshot_qvel = data.qvel.copy(); snapshot_time = float(data.time)
                 tick_times.append(time.monotonic()-tick)
-                if frames and frames % 100 == 0: log.flush()
+                if frames and frames % 100 == 0: log.flush(); imu_log.flush()
                 if failed and a.headless: break
                 deadline += .02
                 if time.monotonic()-deadline > .5: deadline = time.monotonic()
@@ -269,7 +274,7 @@ def main():
     finally:
         stop.set(); worker.join(timeout=5.)
         if worker.is_alive(): raise RuntimeError("Physics worker did not stop")
-        log.close(); tracker.close()
+        log.close(); imu_log.close(); tracker.close()
         if window is not None:
             context.free(); glfw.destroy_window(window); glfw.terminate()
         result = {'scope': 'native MuJoCo CPU policy diagnostic; not official ROS pipeline or hardware validation',
