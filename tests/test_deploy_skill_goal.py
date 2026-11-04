@@ -99,3 +99,30 @@ def test_no_anchor_turn_keeps_reference_registration_unchanged():
     goal = obj.goal([2., 3., .65], [1, 0, 0, 0], [0], 'turn_left_inplace')
     assert goal.shape == (120,)
     np.testing.assert_array_equal(obj.position[:2], [8., -4.])
+
+
+def test_world_horizontal_intervention_removes_drift_even_when_body_is_tilted():
+    modes=('stand','turn_left_inplace','turn_right_inplace')
+    for mode in modes:
+        obj=turn_goal_fixture();obj.zero_horizontal_anchor_modes=modes
+        quat=Rotation.from_euler('xyz',[.1,.34,-.2]).as_quat()[[3,0,1,2]]
+        position=np.array([2.,3.,.75])
+        goal=obj.goal(position,quat,[0],mode)
+        moved=obj.goal(position+[11.,-7.,0.],quat,[0],mode)
+        np.testing.assert_allclose(moved,goal,atol=1e-7)
+        expected=Rotation.from_quat(quat[[1,2,3,0]]).inv().apply([0,0,obj.scheduler.window()[0,-1]-.75])
+        np.testing.assert_allclose(goal[-9:-6],expected,atol=1e-7)
+        # Nonzero body-frame XY from a height difference must be preserved.
+        assert np.linalg.norm(goal[-9:-7])>0
+        plain=turn_goal_fixture();baseline=plain.goal(position,quat,[0],mode)
+        np.testing.assert_array_equal(goal[:-9],baseline[:-9])
+        np.testing.assert_allclose(goal[-6:],baseline[-6:],atol=1e-7)
+
+
+def test_horizontal_intervention_keeps_walking_feedback_and_mode_transition():
+    obj=turn_goal_fixture();obj.zero_horizontal_anchor_modes=('stand','turn_left_inplace','turn_right_inplace')
+    obj.goal([2,3,.65],[1,0,0,0],[0],'turn_left_inplace')
+    stand=obj.goal([4,5,.65],[1,0,0,0],[0],'stand')
+    np.testing.assert_array_equal(stand[-9:-7],[0,0])
+    walking=obj.goal([4,5,.65],[1,0,0,0],[0],'walk')
+    np.testing.assert_allclose(walking[-9:-7],[-2,-2],atol=1e-7)

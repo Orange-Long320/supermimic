@@ -21,10 +21,17 @@ class SkillGoal:
                  stand_gain_quiet_time=0., stand_gain_speed_limit=.08, planner='baseline',
                  planner_ablation='none', idle_join_frames=None, idle_entry_offset=None,
                  idle_anchor_mode='fixed', idle_velocity_feedback=False, foot_aligned_scene=None,
-                 foot_registration_only=False, anchor_obs=True):
+                 foot_registration_only=False, anchor_obs=True, zero_horizontal_anchor_modes=()):
         if not anchor_obs and (planner != 'baseline' or idle_anchor_mode != 'fixed' or idle_velocity_feedback
                                or stand_anchor_gain != 1. or stand_gain_quiet_time != 0. or foot_aligned_scene is not None):
             raise ValueError('No-anchor candidate requires the unchanged baseline skill scheduler')
+        allowed_zero_modes = {'stand', 'turn_left_inplace', 'turn_right_inplace'}
+        if (not isinstance(zero_horizontal_anchor_modes, (tuple, list)) or
+                any(m not in allowed_zero_modes for m in zero_horizontal_anchor_modes) or
+                len(set(zero_horizontal_anchor_modes)) != len(zero_horizontal_anchor_modes) or
+                (zero_horizontal_anchor_modes and (not anchor_obs or idle_velocity_feedback))):
+            raise ValueError('Invalid horizontal anchor intervention')
+        self.zero_horizontal_anchor_modes = tuple(zero_horizontal_anchor_modes)
         self.anchor_obs = anchor_obs
         dataset, profile = Path(dataset), Path(profile)
         spec = json.loads(profile.read_text())
@@ -167,7 +174,13 @@ class SkillGoal:
             # while preserving pose, height, heading and all future features.
             # This follows the actual root and cannot qualify as position hold.
             target_pos[:2] += np.asarray(position)[:2]-self.position[:2]
-        delta_pos = actual_rot.inv().apply(target_pos-actual_pos)
+        world_delta = target_pos-actual_pos
+        self.raw_world_anchor_translation = world_delta.copy()
+        if mode in getattr(self, 'zero_horizontal_anchor_modes', ()):
+            # Remove world-horizontal feedback before rotating into the anchor
+            # frame: a tilted body otherwise leaks XY drift into local Z.
+            world_delta[:2] = 0.
+        delta_pos = actual_rot.inv().apply(world_delta)
         self.raw_anchor_translation = delta_pos.copy()
         self.idle_lookahead = self.scheduler.horizon*self.scheduler.dt if (
             self.idle_velocity_feedback and stable_reference and self.has_motion_request) else 0.

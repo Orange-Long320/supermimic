@@ -20,6 +20,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--plan',type=Path,required=True)
     p.add_argument('--consent',type=Path,required=True);p.add_argument('--request-policy',action='store_true')
     p.add_argument('--keyboard-port',type=int,help='Loopback-only keyboard page; no motor failsafe')
+    p.add_argument('--zero-horizontal-anchor-feedback',action='store_true',
+                   help='Remove world XY anchor errors only for stand and in-place turns')
     p.add_argument('--isolated-prefix');p.add_argument('--startup-ready-file',type=Path);a=p.parse_args()
     if a.request_policy and a.startup_ready_file:
         raise ValueError('Warmup marker is only valid for the preparation worker')
@@ -82,7 +84,15 @@ def main():
     # Load FK/reference assets and warm inference before subscribing. Doing this
     # in the first callback leaves real sensor packets queued for seconds;
     # they correctly fail the 50 ms age guard when dispatch resumes.
-    tracker=SkillGoal(dataset,profile,candidate['startup']['root_position'],candidate['startup']['root_quat_wxyz'])
+    goal_options = {}
+    if a.zero_horizontal_anchor_feedback:
+        goal_options['zero_horizontal_anchor_modes'] = ('stand','turn_left_inplace','turn_right_inplace')
+    tracker=SkillGoal(dataset,profile,candidate['startup']['root_position'],candidate['startup']['root_quat_wxyz'], **goal_options)
+    print('zero world-horizontal anchor modes:', goal_options.get('zero_horizontal_anchor_modes', ()), flush=True)
+    anchor_config_path=(a.startup_ready_file.parent if a.startup_ready_file else a.plan.parent.parent)/'anchor-feedback.json'
+    anchor_config_path.write_text(json.dumps({
+        'zero_world_horizontal_modes': list(goal_options.get('zero_horizontal_anchor_modes', ())),
+        'height_and_orientation_preserved': True, 'estimator_reset': False})+'\n')
     if a.keyboard_port is not None:
         # SkillPhase appends seam and mode events indefinitely. Keep recent
         # diagnostics bounded; requested mode changes are printed separately.
@@ -170,7 +180,7 @@ def main():
                     zero_stand_anchor_xy=plan.get('zero_stand_anchor_xy',False),
                     unclipped_target_indices=tuple(range(len(names))) if unclipped_all else
                         (names.index('waist_pitch_joint'),) if unclipped_waist else ())
-                print('stand anchor XY forced to zero:',controller.zero_stand_anchor_xy,flush=True)
+                print('legacy body-frame stand XY override:',controller.zero_stand_anchor_xy,flush=True)
                 print('waist pitch target range clipping disabled:',unclipped_waist or unclipped_all,flush=True)
                 print('all-joint target range clipping disabled:',unclipped_all,flush=True)
                 return  # Reacquire fresh input after setup; no command sent yet.

@@ -56,10 +56,16 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+anchor_args=()
+case "${SM_ZERO_HORIZONTAL_ANCHOR_FEEDBACK:-0}" in
+  0) ;;
+  1) anchor_args+=(--zero-horizontal-anchor-feedback) ;;
+  *) echo "SM_ZERO_HORIZONTAL_ANCHOR_FEEDBACK must be 0 or 1" >&2; exit 1 ;;
+esac
 stamp "warm policy worker before starting IMU integration"
 nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$worker_script" \
   --plan "$plan" --consent "$consent" --keyboard-port "$keyboard_port" \
-  --startup-ready-file "$trial/worker-warm.json" > "$trial/worker.log" 2>&1 &
+  --startup-ready-file "$trial/worker-warm.json" "${anchor_args[@]}" > "$trial/worker.log" 2>&1 &
 worker_pid=$!
 if ! /usr/bin/python3 - "$trial/worker-warm.json" "$worker_pid" <<'WARMPY'
 import json,sys,time

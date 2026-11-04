@@ -9,8 +9,9 @@ import numpy as np
 import pytest
 
 
+@pytest.mark.parametrize('zero_horizontal', [False, True])
 @pytest.mark.parametrize('peers_arrive', [True, False])
-def test_worker_announces_warm_models_before_it_can_create_target_publisher(tmp_path, monkeypatch, peers_arrive):
+def test_worker_announces_warm_models_before_it_can_create_target_publisher(tmp_path, monkeypatch, peers_arrive, zero_horizontal):
     release = tmp_path/'release'
     (release/'fk-only').mkdir(parents=True)
     (release/'dataset').mkdir()
@@ -35,8 +36,8 @@ def test_worker_announces_warm_models_before_it_can_create_target_publisher(tmp_
             return np.array([0.])
 
     class Goal:
-        def __init__(self, *args):
-            pass
+        def __init__(self, *args, **kwargs):
+            calls['goal_options'] = kwargs
 
         def goal(self, *args):
             calls['goal'] += 1
@@ -100,7 +101,7 @@ def test_worker_announces_warm_models_before_it_can_create_target_publisher(tmp_
     monkeypatch.delenv('ROS_DOMAIN_ID', raising=False)
     monkeypatch.setattr(sys, 'argv', ['worker', '--plan', str(tmp_path/'plan.json'),
                                     '--consent', str(tmp_path/'consent.json'),
-                                    '--startup-ready-file', str(ready)])
+                                    '--startup-ready-file', str(ready)]+(['--zero-horizontal-anchor-feedback'] if zero_horizontal else []))
     if peers_arrive:
         worker.main()
         assert calls['pub'] == 1
@@ -109,3 +110,6 @@ def test_worker_announces_warm_models_before_it_can_create_target_publisher(tmp_
             worker.main()
         assert calls['pub'] == 0
     assert json.loads(ready.read_text())['model_warm'] is True
+    modes=('stand','turn_left_inplace','turn_right_inplace') if zero_horizontal else ()
+    assert calls['goal_options'].get('zero_horizontal_anchor_modes',())==modes
+    assert json.loads((tmp_path/'anchor-feedback.json').read_text())['zero_world_horizontal_modes']==list(modes)

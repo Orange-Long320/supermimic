@@ -86,7 +86,11 @@ echo
 echo "== operator: hold the emergency stop. No attitude guard, no ramp,"
 echo "   no step limit: this is the simulator's law. The policy may move fast"
 echo "   in the first second because the body starts ~19 deg forward."
-echo "== stand anchor x/y feedback enabled (original reference position hold)"
+if [ "${SM_ZERO_HORIZONTAL_ANCHOR_FEEDBACK:-0}" = 1 ]; then
+  echo "== stand and in-place turns: world XY anchor feedback disabled; height and heading retained"
+else
+  echo "== stand anchor x/y feedback enabled (original reference position hold)"
+fi
 echo "== all joint position targets are not range-clipped; downstream behavior is unverified"
 echo "== preparation ${PREP}s, then keyboard policy until interrupted"
 SM_PREP_SECONDS="$PREP" SM_KEYBOARD_PORT="$KEYBOARD_PORT" SM_WORKER_SCRIPT="$REL/launcher/x2_11500_worker.py" \
