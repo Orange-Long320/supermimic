@@ -331,6 +331,10 @@ def main():
                                 break
                             batch.append(received[0])
             stats['max_imu_batch'] = max(stats['max_imu_batch'], len(batch))
+            # Test transport idleness at the read, not after potentially slow
+            # encoder decoding/integration. A nonempty batch is not a dead IMU.
+            if not batch and processing and last_receive is not None and time.monotonic()-last_receive > MAX_IMU_RECEIVE_GAP_S:
+                raise ValueError('IMU receive timeout')
             now = time.monotonic()
             if not stats['calibrated'] or last_encoder_poll is None or now-last_encoder_poll >= ENCODER_PERIOD_S:
                 last_encoder_poll = now
@@ -347,8 +351,6 @@ def main():
                     raise ValueError('No valid three-second stationary window within 20 seconds')
                 if calibrated_at is not None and last_publish is None and time.monotonic()-calibrated_at > .5:
                     raise ValueError('No fresh post-calibration state within 500 ms')
-                if last_receive is not None and time.monotonic()-last_receive > MAX_IMU_RECEIVE_GAP_S:
-                    raise ValueError('IMU receive timeout')
                 if last_publish_mono is not None:
                     # This process publishes measurements, not motor commands.
                     # Missing coherent encoders withholds output; consumer packet

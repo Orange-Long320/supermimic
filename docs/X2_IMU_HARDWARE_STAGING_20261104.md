@@ -152,3 +152,5 @@ Python 缺少的 4428 个 header 均被 C++ 收到；Python 独有 header 为 0�
 后续 `final-measurement/` 仍未通过：原始 header 间隔只有 2.216 ms，但 Python 处理积压达到 167.67 ms，超出 100 ms 输入年龄限制，证明仅加缓存不能解决吞吐不足。最终复用已有 SDK C++ 订阅段作为主程序拥有的原始 IMU 读取子进程：只读固定骨盆话题，将原始 header、实际接收时间、三轴角速度/加速度与 frame_id 写入有界管道；无姿态融合、真值、关节命令或电机接口。Python 原校准/积分/状态算法不变，主程序结束时关闭子进程，子进程也设置父进程死亡退出，不作为常驻服务。
 
 源码 `scripts/deploy/imu_raw_reader/{reader.cpp,CMakeLists.txt}` 与 `src/supermimic/deploy/native_imu_reader.py`。136 字节定长帧、magic 与大小检查、部分读取和多帧缓冲都有验证；SDK 现有依赖在 lxh 内编译通过，未安装或修改系统依赖。49 项测试通过。编译日志 `r5/reports/imu-reader-build.log`；最终原生接收+真实后端负载测试待记录。
+
+原生接收首次试验 `native-final/` 保留：header 最大间隔 2.077 ms，最后一条数据 header 包龄 9.59 ms、C++ 到 Python 管道延迟 3.06 ms，却在处理之后触发 `IMU receive timeout`。原先在编码器解析和积分之后检查“没有新消息”，把处理时间混入了收包空闲判断。修正为在读取结束时立即检查：仅当本次读取为空、且确实超过 50 ms 无输入时退出；非空批次照常按时间戳积分，发布新鲜度及 100 ms 原始数据上限不变。49 项测试仍通过，最终持续验证待记录。
