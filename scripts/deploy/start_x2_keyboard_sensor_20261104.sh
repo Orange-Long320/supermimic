@@ -86,7 +86,9 @@ echo
 echo "== operator: hold the emergency stop. No attitude guard, no ramp,"
 echo "   no step limit: this is the simulator's law. The policy may move fast"
 echo "   in the first second because the body starts ~19 deg forward."
-if [ "${SM_ZERO_HORIZONTAL_ANCHOR_FEEDBACK:-0}" = 1 ]; then
+if [ "${SM_ZERO_HORIZONTAL_ANCHOR_FEEDBACK:-0}" = 2 ]; then
+  echo "== all keyboard actions: world XY anchor feedback disabled; height and heading retained"
+elif [ "${SM_ZERO_HORIZONTAL_ANCHOR_FEEDBACK:-0}" = 1 ]; then
   echo "== stand and in-place turns: world XY anchor feedback disabled; height and heading retained"
 else
   echo "== stand anchor x/y feedback enabled (original reference position hold)"

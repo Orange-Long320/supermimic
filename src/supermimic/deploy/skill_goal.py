@@ -25,7 +25,7 @@ class SkillGoal:
         if not anchor_obs and (planner != 'baseline' or idle_anchor_mode != 'fixed' or idle_velocity_feedback
                                or stand_anchor_gain != 1. or stand_gain_quiet_time != 0. or foot_aligned_scene is not None):
             raise ValueError('No-anchor candidate requires the unchanged baseline skill scheduler')
-        allowed_zero_modes = {'stand', 'turn_left_inplace', 'turn_right_inplace'}
+        allowed_zero_modes = {'stand', 'walk', 'backward', 'jog', 'turn_left_inplace', 'turn_right_inplace'}
         if (not isinstance(zero_horizontal_anchor_modes, (tuple, list)) or
                 any(m not in allowed_zero_modes for m in zero_horizontal_anchor_modes) or
                 len(set(zero_horizontal_anchor_modes)) != len(zero_horizontal_anchor_modes) or

@@ -44,7 +44,7 @@ def turn_goal_fixture():
     obj.default = np.zeros(1)
     row = np.zeros(12, dtype=np.float32)
     row[4], row[-1] = -1., .65
-    names = ('walk', 'turn_left_inplace', 'turn_right_inplace')
+    names = ('walk', 'backward', 'jog', 'turn_left_inplace', 'turn_right_inplace')
     clips = {n: np.tile(row, (50, 1)) for n in names}
     obj.scheduler = SkillPhase(clips, clips, {n: 0 for n in names}, 1)
     obj.has_motion_request = False
@@ -126,3 +126,17 @@ def test_horizontal_intervention_keeps_walking_feedback_and_mode_transition():
     np.testing.assert_array_equal(stand[-9:-7],[0,0])
     walking=obj.goal([4,5,.65],[1,0,0,0],[0],'walk')
     np.testing.assert_allclose(walking[-9:-7],[-2,-2],atol=1e-7)
+
+
+def test_all_action_intervention_removes_xy_drift_and_keeps_motion_reference():
+    modes=('stand','walk','backward','jog','turn_left_inplace','turn_right_inplace')
+    quat=Rotation.from_euler('xyz',[.1,.34,-.2]).as_quat()[[3,0,1,2]]
+    for mode in modes:
+        obj=turn_goal_fixture();obj.zero_horizontal_anchor_modes=modes
+        position=np.array([2.,3.,.75])
+        goal=obj.goal(position,quat,[0],mode)
+        changed=obj.goal(position+[11.,-7.,0.],quat,[0],mode)
+        np.testing.assert_allclose(changed,goal,atol=1e-7)
+        baseline=turn_goal_fixture().goal(position,quat,[0],mode)
+        np.testing.assert_array_equal(goal[:-9],baseline[:-9])
+        np.testing.assert_allclose(goal[-6:],baseline[-6:],atol=1e-7)

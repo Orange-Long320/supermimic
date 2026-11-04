@@ -22,6 +22,8 @@ def main():
     p.add_argument('--keyboard-port',type=int,help='Loopback-only keyboard page; no motor failsafe')
     p.add_argument('--zero-horizontal-anchor-feedback',action='store_true',
                    help='Remove world XY anchor errors only for stand and in-place turns')
+    p.add_argument('--zero-horizontal-anchor-all-modes',action='store_true',
+                   help='Remove world XY anchor errors for every keyboard action')
     p.add_argument('--isolated-prefix');p.add_argument('--startup-ready-file',type=Path);a=p.parse_args()
     if a.request_policy and a.startup_ready_file:
         raise ValueError('Warmup marker is only valid for the preparation worker')
@@ -85,7 +87,9 @@ def main():
     # in the first callback leaves real sensor packets queued for seconds;
     # they correctly fail the 50 ms age guard when dispatch resumes.
     goal_options = {}
-    if a.zero_horizontal_anchor_feedback:
+    if a.zero_horizontal_anchor_all_modes:
+        goal_options['zero_horizontal_anchor_modes'] = ('stand','walk','backward','jog','turn_left_inplace','turn_right_inplace')
+    elif a.zero_horizontal_anchor_feedback:
         goal_options['zero_horizontal_anchor_modes'] = ('stand','turn_left_inplace','turn_right_inplace')
     tracker=SkillGoal(dataset,profile,candidate['startup']['root_position'],candidate['startup']['root_quat_wxyz'], **goal_options)
     print('zero world-horizontal anchor modes:', goal_options.get('zero_horizontal_anchor_modes', ()), flush=True)

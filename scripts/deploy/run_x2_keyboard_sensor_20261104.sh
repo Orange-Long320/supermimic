@@ -60,7 +60,8 @@ anchor_args=()
 case "${SM_ZERO_HORIZONTAL_ANCHOR_FEEDBACK:-0}" in
   0) ;;
   1) anchor_args+=(--zero-horizontal-anchor-feedback) ;;
-  *) echo "SM_ZERO_HORIZONTAL_ANCHOR_FEEDBACK must be 0 or 1" >&2; exit 1 ;;
+  2) anchor_args+=(--zero-horizontal-anchor-all-modes) ;;
+  *) echo "SM_ZERO_HORIZONTAL_ANCHOR_FEEDBACK must be 0, 1 or 2" >&2; exit 1 ;;
 esac
 stamp "warm policy worker before starting IMU integration"
 nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$worker_script" \
