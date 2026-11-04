@@ -91,7 +91,7 @@ monitor_pid=$!
 
 stamp "start raw pelvis IMU state producer; keep robot physically stationary"
 nohup flock -n -F "$base/online-pelvis.lock" env PYTHONPATH="$PYTHONPATH_RELEASE" /usr/bin/python3 \
-  "$release/launcher/publish_pelvis_imu_sensor.py" --profile "$release/fk-only/profile.json" \
+  "$release/launcher/publish_pelvis_imu_sensor.py" --imu-reader "$release/launcher/imu_raw_reader" --profile "$release/fk-only/profile.json" \
   --model "$release/fk-only/fk-only.xml" --urdf "$release/robot-pc2.urdf" \
   --out "$trial/state" --assume-initial-rest > "$trial/state.log" 2>&1 &
 state_pid=$!

@@ -49,6 +49,7 @@ def main():
     p.add_argument('--urdf', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--observe-only', action='store_true')
+    p.add_argument('--imu-reader', type=Path, help='SDK raw reader executable; no fusion or motor output')
     p.add_argument('--diagnostic-calibration', type=Path,
                    help='Exercise full processing with saved calibration; observe-only, no ROS publisher')
     p.add_argument('--assume-initial-rest', action='store_true')
@@ -102,6 +103,7 @@ def main():
     calibrated_at = None
     fault = None
     node = None
+    native_reader = None
     if a.diagnostic_calibration:
         calibration = json.loads(a.diagnostic_calibration.read_text())
         estimator.filter.initialize(calibration)
@@ -144,6 +146,8 @@ def main():
             wall = time.time()
             sample = {'event': 'imu', 'stamp_ns': stamp, 'recv': wall,
                       'gyro': gyro, 'acceleration': acc, 'frame': msg.header.frame_id}
+            if hasattr(msg, 'transport_received_wall_ns'):
+                sample['transport_received_wall_ns'] = msg.transport_received_wall_ns
             log.emit('support-events', sample)
             stats['imu'] += 1
             age = wall-stamp*1e-9
@@ -291,9 +295,14 @@ def main():
 
         # Use Humble's wait_for_message take/wait API directly. A general
         # executor rebuilds task/waitable machinery for each high-rate packet.
-        imu_subscription = node.create_subscription(Imu, '/aima/hal/imu/torso/state',
-                                                     lambda msg: None, QoSProfile(depth=64, reliability=ReliabilityPolicy.BEST_EFFORT,
-                                                         durability=DurabilityPolicy.VOLATILE))
+        imu_subscription = None
+        if a.imu_reader:
+            from supermimic.deploy.native_imu_reader import NativeImuReader
+            native_reader = NativeImuReader(a.imu_reader, a.out/'imu-reader.log')
+        else:
+            imu_subscription = node.create_subscription(Imu, '/aima/hal/imu/torso/state',
+                lambda msg: None, QoSProfile(depth=64, reliability=ReliabilityPolicy.BEST_EFFORT,
+                                             durability=DurabilityPolicy.VOLATILE))
         receive_imu = timed_callback(on_imu, 'max_imu_callback_ms')
         encoder_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
                                  durability=DurabilityPolicy.VOLATILE)
@@ -302,22 +311,25 @@ def main():
             for g in GROUPS}
         encoder_callbacks = {g: timed_callback(lambda msg, group=g: on_joint(group, msg),
                                                'max_joint_callback_ms') for g in GROUPS}
-        wait_set = ros_impl.WaitSet(1, 0, 0, 0, 0, 0, node.context.handle)
+        wait_set = None if native_reader else ros_impl.WaitSet(1, 0, 0, 0, 0, 0, node.context.handle)
         last_encoder_poll = None
         while rclpy.ok() and (a.seconds <= 0 or time.monotonic()-started < a.seconds):
-            wait_set.clear_entities()
-            wait_set.add_subscription(imu_subscription.handle)
-            wait_set.wait(5_000_000)
-            batch = []
-            if imu_subscription.handle.pointer in wait_set.get_ready_entities('subscription'):
-                # Drain a bounded FIFO. Older samples still matter to integration;
-                # only its newest state is eligible for the live publisher.
-                with imu_subscription.handle:
-                    for _ in range(64):
-                        received = imu_subscription.handle.take_message(imu_subscription.msg_type, imu_subscription.raw)
-                        if received is None:
-                            break
-                        batch.append(received[0])
+            if native_reader:
+                batch = native_reader.read_batch()
+            else:
+                wait_set.clear_entities()
+                wait_set.add_subscription(imu_subscription.handle)
+                wait_set.wait(5_000_000)
+                batch = []
+                if imu_subscription.handle.pointer in wait_set.get_ready_entities('subscription'):
+                    # Drain a bounded FIFO. Older samples still matter to integration;
+                    # only its newest state is eligible for the live publisher.
+                    with imu_subscription.handle:
+                        for _ in range(64):
+                            received = imu_subscription.handle.take_message(imu_subscription.msg_type, imu_subscription.raw)
+                            if received is None:
+                                break
+                            batch.append(received[0])
             stats['max_imu_batch'] = max(stats['max_imu_batch'], len(batch))
             now = time.monotonic()
             if not stats['calibrated'] or last_encoder_poll is None or now-last_encoder_poll >= ENCODER_PERIOD_S:
@@ -349,6 +361,8 @@ def main():
         fault = str(exc)
         raise
     finally:
+        if native_reader is not None:
+            stats['native_reader'] = native_reader.close()
         (a.out/'ready.json').unlink(missing_ok=True)
         if calibration is not None:
             (a.out/'calibration.json').write_text(json.dumps(calibration, indent=2)+'\n')
