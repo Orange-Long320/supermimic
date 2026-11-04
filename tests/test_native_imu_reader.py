@@ -6,11 +6,11 @@ from supermimic.deploy.native_imu_reader import FRAME, MAGIC, NativeImuReader, d
 
 def frame(stamp=1793770000000001234, magic=MAGIC):
     return FRAME.pack(magic, stamp, stamp+1000000, .01, -.02, .03, 1., 2., 9.81, b'base_link',
-                      *range(31), *([0.]*31), *([stamp-1000000]*4), *([stamp]*4), *([0]*4), 15, 0x7fffffff)
+                      *range(31), *([0.]*31), *([stamp-1000000]*4), *([stamp]*4), *([0]*4), 15, 0x7fffffff, *([0.]*11), 0, 0., 0)
 
 
 def test_wire_layout_preserves_raw_units_header_and_receive_time():
-    assert FRAME.size == 720
+    assert FRAME.size == 832
     msg = decode_frame(frame())
     assert msg.header.stamp.sec == 1793770000 and msg.header.stamp.nanosec == 1234
     assert msg.transport_received_wall_ns == 1793770000001001234
@@ -49,3 +49,18 @@ def test_pipe_partial_reads_multiple_frames_and_eof_fail_closed(tmp_path, monkey
         if not closed_writer:
             os.close(write_fd)
         reader.close()
+
+
+def test_integrated_frame_keeps_native_state_and_sample_count():
+    values=list(FRAME.unpack(frame()))
+    values[86:100]=[1.,0.,0.,0., .1,-.2,.3,-.4, .01,.02,.03, 500, .0021, 1]
+    message=decode_frame(FRAME.pack(*values))
+    assert message.native_integration == tuple(values[86:100])
+
+
+def test_calibration_command_preserves_integer_anchor():
+    import io
+    reader=object.__new__(NativeImuReader)
+    reader.process=NS(stdin=io.BytesIO())
+    reader.initialize(dict(gyro_bias=[.01,.02,.03],quat_wxyz=[1.,0.,0.,0.]),1793770000000001234)
+    assert reader.process.stdin.getvalue()==b'1793770000000001234 0.01 0.02 0.03 1.0 0.0 0.0 0.0\n'

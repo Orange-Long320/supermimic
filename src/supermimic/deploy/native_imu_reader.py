@@ -1,12 +1,12 @@
-"""Bounded raw-IMU pipe from the SDK reader; no ROS or motor APIs in this module."""
+"""Bounded raw-sensor/native-point-state pipe from the SDK reader; no ROS or motor APIs in this module."""
 import os
 import select
 import struct
 import subprocess
 from types import SimpleNamespace as NS
 
-FRAME = struct.Struct('<Qqq6d64s31d31d4q4q4iII')
-MAGIC = 0x5832524157303032
+FRAME = struct.Struct('<Qqq6d64s31d31d4q4q4iII4d4d3dQdQ')
+MAGIC = 0x5832524157303033
 
 
 def decode_frame(data):
@@ -27,7 +27,8 @@ def decode_frame(data):
     sec, ns = divmod(stamp, 10**9)
     return NS(header=NS(stamp=NS(sec=sec, nanosec=ns), frame_id=frame.split(b'\0', 1)[0].decode()),
               angular_velocity=NS(x=gx, y=gy, z=gz), linear_acceleration=NS(x=ax, y=ay, z=az),
-              transport_received_wall_ns=received, native_joint_snapshot=snapshot)
+              transport_received_wall_ns=received, native_joint_snapshot=snapshot,
+              native_integration=values[86:100] if values[99] else None)
 
 
 class NativeImuReader:
@@ -39,11 +40,18 @@ class NativeImuReader:
         self.frames = 0
         env = dict(os.environ, RCUTILS_LOGGING_USE_STDOUT='0')
         try:
-            self.process = subprocess.Popen([str(executable), ','.join(joint_names)], stdout=subprocess.PIPE,
+            self.process = subprocess.Popen([str(executable), ','.join(joint_names)], stdout=subprocess.PIPE, stdin=subprocess.PIPE,
                                             stderr=self.log, env=env, bufsize=0)
         except BaseException:
             self.log.close()
             raise
+
+    def initialize(self, calibration, stamp_ns):
+        # Preserve the measured rest-window endpoint; the child replays every
+        # buffered raw sample from that exact anchor before switching to 50 Hz.
+        values = [stamp_ns, *calibration['gyro_bias'], *calibration['quat_wxyz']]
+        self.process.stdin.write((' '.join(map(str, values))+'\n').encode())
+        self.process.stdin.flush()
 
     def read_batch(self, timeout=.005):
         fd = self.process.stdout.fileno()
@@ -61,6 +69,8 @@ class NativeImuReader:
 
     def close(self):
         self.process.stdout.close()
+        if getattr(self.process, "stdin", None) is not None:
+            self.process.stdin.close()
         if self.process.poll() is None:
             self.process.terminate()
         try:

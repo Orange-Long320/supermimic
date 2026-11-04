@@ -1,10 +1,10 @@
 # 2026-11-04：原始 IMU 估计器接入 PC2
 
-状态：r5 已暂存到 `x2-robot` 的现有 rootless Podman `lxh` 容器；修复期间仅执行软件检查与只读负载测试，没有启动电机发布器、策略接管或模式切换。当前仍有 165.606 ms 状态输出空档，时序未通过。**运动精度与实机控制尚未验收，不能声称真机误差低于 50 cm。**
+状态：r6 已暂存到 `x2-robot` 的现有 rootless Podman `lxh` 容器；修复期间仅执行软件检查与只读负载测试，没有启动电机发布器、策略接管或模式切换。r6 单独状态链短测通过 50 ms 间隔要求，叠加策略/记录负载仍有超时，完整控制时序未通过。**运动精度与实机控制尚未验收，不能声称真机误差低于 50 cm。**
 
 ## 安装位置与实际调用链
 
-当前容器内暂存版本 `/home/agi/lxh-supermimic/releases/11500_imu_sensor_20261104_r5`，父版本 `11500_imu_sensor_20261104_r3`、`11500_imu_sensor_20261104_r2`、`11500_imu_sensor_20261104_r1` 及更早的 `11500_turn_center_20261104_r1` 保留。宿主同名目录与容器项目目录不是自动同步；本次明确用 `podman cp` 传入容器。
+当前容器内暂存版本 `/home/agi/lxh-supermimic/releases/11500_imu_sensor_20261104_r6`，父版本 `11500_imu_sensor_20261104_r3`、`11500_imu_sensor_20261104_r2`、`11500_imu_sensor_20261104_r1` 及更早的 `11500_turn_center_20261104_r1` 保留。宿主同名目录与容器项目目录不是自动同步；本次明确用 `podman cp` 传入容器。
 
 `start-keyboard.sh` → `launcher/start_x2_keyboard_sensor_20261104.sh` → `launcher/run_x2_keyboard_sensor_20261104.sh` → `launcher/publish_pelvis_imu_sensor.py`。后者通过 trial/src 载入 `imu_dead_reckoning.py`，不是旧的 `publish_pelvis_packet_keyboard_20261103.py`。保留转弯入口位置登记和站立 XY 反馈。
 
@@ -52,7 +52,7 @@ ssh -t x2-robot 'podman exec -it lxh bash'
 source /opt/ros/humble/setup.bash
 source /home/agi/aimdk/install/setup.bash
 B=/home/agi/lxh-supermimic
-R=$B/releases/11500_imu_sensor_20261104_r5
+R=$B/releases/11500_imu_sensor_20261104_r6
 export PYTHONPATH="$R/source/src:$B/python-cpu:$B/vendor-mjlab-math:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 python3 "$R/launcher/publish_pelvis_imu_sensor.py" \
@@ -61,7 +61,7 @@ python3 "$R/launcher/publish_pelvis_imu_sensor.py" \
   --imu-reader "$R/launcher/imu_raw_reader" --observe-only --seconds 10
 ```
 
-r5 当前仅供只读排查；状态输出时序仍未通过，不作为已验证的电机控制部署指令。旧版本保留，没有自动回退或覆盖。
+r6 当前仅供只读排查；状态输出时序仍未通过，不作为已验证的电机控制部署指令。旧版本保留，没有自动回退或覆盖。
 
 ## 12:36 首包过期故障与 r2 修复
 
@@ -140,3 +140,26 @@ Python 缺少的 4428 个 header 均被 C++ 收到；Python 独有 header 为 0�
 **仍未通过状态输出时序：最大连续无合格状态为 165.606 ms，超过 worker 的 50 ms 要求。** 本次使用历史校准、observe-only，不发布 ROS 状态或控制命令，不构成当前静止初始化、控制稳定性或运动精度验证。不能据此交付“可以部署控制”或“误差小于 50 cm”的结论。
 
 此前所有失败诊断保留在同一 audit 根目录；旧原生 IMU 专用帧为 136 字节，当前 720 字节还包含原始编码器，不能混用二进制与 Python 解码器。未调整 GC 或系统配置，未启动电机、模式切换或接管。
+
+## r6：按用户选择将 500 Hz 积分移入 C++
+
+用户明确选择方案 2。保留既有只读子进程，将逐采样零偏扣除、四元数梯形积分、世界系重力补偿及水平位置/速度积分移入 `point_integrator.hpp`，不使用设备融合姿态、真值、在线调平或零速更新。Python 继续执行三秒物理静止证据检查与校准拟合，将零偏、初始四元数及校准窗口终点的整数时间戳交给 C++。C++ 从缓冲中找到该精确终点并逐条重放后续原始 IMU；不重置运动中的状态，不跳过等待计算时的积分。
+
+初始化前传输原始 IMU/编码器供校准，初始化后只输出约 50 Hz 的积分状态与同一时刻因果编码器快照。Python 不再执行 500 Hz 传播，只做 FK、安装偏移换算、包校验与输出。新协议为 832 字节，必须使用配套二进制与解码器。运行时 `--record-all-raw` 记录所有收到的状态帧，不代表能恢复原始 500 Hz 轨迹。
+
+原始输入 40 ms 时间戳间隔与 50 ms 无输入检查由 C++ 执行；Python 不能把 50 Hz 快照间隔当作 500 Hz 原始输入断流。C++ 状态管道非阻塞，Python 暂停时仅停止传输快照，积分继续；校准原始流管道溢出报错。父进程退出仍终止子进程，无电机接口。状态包 35 ms 新鲜度、worker 50 ms 时效和硬件目标租约不变。
+
+数值回归：编译独立数学头文件，与原 Python 点采样算法逐条比较 5000 个非均匀时间间隔、带非零初始姿态/零偏/三轴转动及加速度变化的样本，四元数、位置、速度、角速度全部在 `atol=rtol=2e-10` 容差内一致；重复、回退和超过 40 ms 时间戳被拒绝。连同协议、校准命令与既有回归共 55 项测试通过。未运行本地机器人仿真。
+
+容器只读对照记录 `/home/agi/lxh-supermimic/trials/imu-native-integration-20261104-r3/timing-comparison.json`：
+
+| 条件 | 时长 | C++ 积分条数 | 最大原始 header 间隔 | 最大相邻候选包生成时间间隔 | 超过 50 ms 次数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| NumPy+SkillGoal 50 Hz 固定输入负载、只读记录器 | 65.24 s | 31001 | 2.159 ms | 207.866 ms | 6 |
+| 仅本任务状态链，保留其他用户原有进程 | 35.33 s | 15999 | 2.133 ms | 37.090 ms | 0 |
+
+两次无源进程故障、日志完整写入；源进程 monotonic 统计的最大无输出分别 201.697 / 39.435 ms，与上表墙钟差值的测量口径不同。负载试验 P99 包间隔 37.373 ms，策略固定输入最大计算耗时 71.463 ms。现场宿主 8 核，检查到 load average 17.33，vmstat 短采样运行队列 13–66、CPU 忙碌 68–84%；另有其他项目面板与系统感知程序运行，未停止或调整它们。并行负载下的计算/调度仍是阻塞；本次对照不能精确区分各进程贡献，不能将全部空档归因于积分。
+
+r1 测试驱动没有保留 ROS PYTHONPATH，缺少 rclpy 导入而失败；r2 首次改造仍在 Python 按原始流门槛检查降频状态，触发错误断流判断。失败目录均保留；修正后的 r3 使用容器 `/usr/bin/python3` 与已安装 ROS 环境，没有安装依赖或修改系统配置。
+
+**方案 2 的迁移已完成，但叠加真实部署计算负载的整体时序仍未通过。** 两次均为历史校准、observe-only，不发布 ROS 状态或控制命令，不构成新静止初始化、运动精度或控制验收。未启动电机、模式切换或接管；未改策略权重和电机参数。r6 保留为 checkpoint，不作为已通过控制验收的版本。

@@ -48,8 +48,8 @@ def main():
     p.add_argument('--urdf', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--observe-only', action='store_true')
-    p.add_argument('--record-all-raw', action='store_true', help='Full-rate diagnostic capture; default deployment logs at 50 Hz')
-    p.add_argument('--imu-reader', type=Path, help='SDK raw reader executable; no fusion or motor output')
+    p.add_argument('--record-all-raw', action='store_true', help='Log every received frame; native propagation still emits at 50 Hz after calibration')
+    p.add_argument('--imu-reader', type=Path, help='Native point integration reader; no firmware attitude or motor output')
     p.add_argument('--diagnostic-calibration', type=Path,
                    help='Exercise full processing with saved calibration; observe-only, no ROS publisher')
     p.add_argument('--assume-initial-rest', action='store_true')
@@ -100,6 +100,7 @@ def main():
     last_heartbeat_mono = None
     last_receive = None
     last_raw_record_stamp = None
+    native_calibration_sent = False
     calibration = None
     calibration_stamp = None
     calibrated_at = None
@@ -141,7 +142,7 @@ def main():
 
         def on_imu(msg, emit_state=True):
             nonlocal last_stamp, origin_ns, last_publish, last_receive, last_publish_mono, last_heartbeat_mono
-            nonlocal calibration, calibration_stamp, calibrated_at, last_raw_record_stamp
+            nonlocal calibration, calibration_stamp, calibrated_at, last_raw_record_stamp, native_calibration_sent
             stamp = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
             gyro = [msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z]
             acc = [msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z]
@@ -195,7 +196,7 @@ def main():
                     stats['startup_stale_imu'] += 1
                     return
                 stats['buffered_imu_integrated'] += 1
-            if gap is not None and not 0 < gap <= MAX_IMU_GAP_S:
+            if gap is not None and not native_reader and not 0 < gap <= MAX_IMU_GAP_S:
                 raise ValueError(f'IMU duplicate/rollback or gap {gap*1000:.3f} ms exceeds {MAX_IMU_GAP_S*1000:g} ms')
             if origin_ns is None:
                 origin_ns = stamp
@@ -233,11 +234,35 @@ def main():
                     # Fitting takes wall time: this observation must never become
                     # the first live packet. Drain subsequent sensor callbacks and
                     # wait for all four encoder groups to advance past this point.
-                    estimator.update(sample['time_s'], gyro, acc)
+                    if native_reader:
+                        native_reader.initialize(calibration, stamp)
+                        native_calibration_sent = True
+                    else:
+                        estimator.update(sample['time_s'], gyro, acc)
                     return
                 else:
                     return
-            estimator.update(sample['time_s'], gyro, acc)
+            if native_reader:
+                if not native_calibration_sent:
+                    native_reader.initialize(calibration, stamp)
+                    native_calibration_sent = True
+                if msg.native_integration is None:
+                    return
+                from scipy.spatial.transform import Rotation
+                values = msg.native_integration
+                quat_native = np.asarray(values[:4])
+                x_native = np.asarray(values[4:8])
+                omega_native = np.asarray(values[8:11])
+                if not np.isfinite(np.r_[quat_native,x_native,omega_native]).all():
+                    raise ValueError('Invalid native integrated state')
+                estimator.filter.rotation = Rotation.from_quat(quat_native[[1,2,3,0]])
+                estimator.filter.x = x_native
+                estimator.filter.gyro = omega_native
+                estimator.filter.samples = int(values[11])
+                stats['native_integrated_samples'] = int(values[11])
+                stats['native_max_header_gap_s'] = values[12]
+            else:
+                estimator.update(sample['time_s'], gyro, acc)
             if not emit_state:
                 return
             if last_publish is not None and stamp-last_publish < 20_000_000:
@@ -285,7 +310,10 @@ def main():
             if pub is not None:
                 pub.publish(String(data=encoded))
             last_publish = stamp
-            last_publish_mono = time.monotonic()
+            published_mono = time.monotonic()
+            if last_publish_mono is not None:
+                stats['max_output_silence_s'] = max(stats['max_output_silence_s'], published_mono-last_publish_mono)
+            last_publish_mono = published_mono
             stats['packets'] += 1
             # A live heartbeat, not hardware accuracy or motor readiness approval.
             if last_heartbeat_mono is None or time.monotonic()-last_heartbeat_mono >= .2:
@@ -346,7 +374,7 @@ def main():
             stats['max_imu_batch'] = max(stats['max_imu_batch'], len(batch))
             # Test transport idleness at the read, not after potentially slow
             # encoder decoding/integration. A nonempty batch is not a dead IMU.
-            if not batch and processing and last_receive is not None and time.monotonic()-last_receive > MAX_IMU_RECEIVE_GAP_S:
+            if not native_reader and not batch and processing and last_receive is not None and time.monotonic()-last_receive > MAX_IMU_RECEIVE_GAP_S:
                 raise ValueError('IMU receive timeout')
             now = time.monotonic()
             if not stats['calibrated'] or last_encoder_poll is None or now-last_encoder_poll >= ENCODER_PERIOD_S:
@@ -389,7 +417,10 @@ def main():
         (a.out/'ready.json').unlink(missing_ok=True)
         stats.update(fault=fault, duration_s=time.monotonic()-started, writer=writer,
                      observe_only=a.observe_only, firmware_quaternion_used=False,
-                     record_all_raw=a.record_all_raw, runtime_raw_log_target_hz=500 if a.record_all_raw else 50,
+                     record_all_raw=a.record_all_raw,
+                     native_point_integration=bool(a.imu_reader and processing),
+                     native_state_target_hz=50 if a.imu_reader and processing else None,
+                     runtime_raw_log_target_hz=50 if a.imu_reader and processing else (500 if a.record_all_raw else 50),
                      diagnostic_calibration=str(a.diagnostic_calibration) if a.diagnostic_calibration else None,
                      stationary_calibration_this_run=stats['calibrated'] and not bool(a.diagnostic_calibration),
                      interval_average=False, point_trapezoid=True, online_zupt=False,

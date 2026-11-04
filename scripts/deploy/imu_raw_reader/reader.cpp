@@ -1,4 +1,6 @@
-// Raw sensor transport only. No attitude fusion, kinematics or motor interfaces.
+// Sensor-only point integration. No firmware attitude, truth or motor interfaces.
+#include "point_integrator.hpp"
+#include <fcntl.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <aimdk_msgs/msg/joint_state_array.hpp>
@@ -16,7 +18,7 @@
 #include <sys/prctl.h>
 #include <signal.h>
 
-constexpr uint64_t MAGIC = 0x5832524157303032ULL;
+constexpr uint64_t MAGIC = 0x5832524157303033ULL;
 struct Frame {
   uint64_t magic = MAGIC;
   int64_t stamp, received;
@@ -26,6 +28,11 @@ struct Frame {
   std::array<int64_t,4> joint_stamps{}, joint_received{};
   std::array<int32_t,4> domains{};
   uint32_t groups = 0, joints = 0;
+  std::array<double,4> quat{}, state{};
+  std::array<double,3> corrected_gyro{};
+  uint64_t samples=0;
+  double max_gap=0;
+  uint64_t integrated=0;
 };
 struct Joints {
   int64_t stamp, received;
@@ -33,7 +40,7 @@ struct Joints {
   uint32_t mask = 0;
   std::array<double,31> q{}, qd{};
 };
-static_assert(sizeof(Frame) == 720, "Raw sensor wire layout mismatch");
+static_assert(sizeof(Frame) == 832, "Raw sensor wire layout mismatch");
 static int64_t wall_ns() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
     std::chrono::system_clock::now().time_since_epoch()).count();
@@ -75,10 +82,24 @@ int main(int argc, char **argv) {
           history[g].push_back(row);if(history[g].size()>128)history[g].pop_front();
         });
     }
+    PointIntegrator integrator;
+    std::deque<Frame> pending;
+    std::string command;
+    int64_t last_output=0, last_raw_stamp=0;
+    if(::fcntl(STDIN_FILENO,F_SETFL,::fcntl(STDIN_FILENO,F_GETFL)|O_NONBLOCK)<0)
+      throw std::runtime_error("Cannot configure calibration input");
+    auto last_input=std::chrono::steady_clock::now();
+    auto watchdog=node->create_wall_timer(std::chrono::milliseconds(5),[&] {
+      if(last_raw_stamp && std::chrono::steady_clock::now()-last_input>std::chrono::milliseconds(50))
+        throw std::runtime_error("Native raw IMU receive timeout");
+    });
+    if(::fcntl(STDOUT_FILENO,F_SETFL,::fcntl(STDOUT_FILENO,F_GETFL)|O_NONBLOCK)<0)
+      throw std::runtime_error("Cannot configure state output");
     auto imu = node->create_subscription<sensor_msgs::msg::Imu>("/aima/hal/imu/torso/state",
       rclcpp::QoS(256).best_effort().durability_volatile(),
       [&](sensor_msgs::msg::Imu::ConstSharedPtr m) {
         if (m->header.frame_id.size() >= 64) throw std::runtime_error("IMU frame name too long");
+        last_input=std::chrono::steady_clock::now();
         Frame f;
         f.stamp = static_cast<int64_t>(m->header.stamp.sec)*1000000000LL+m->header.stamp.nanosec;
         f.received = wall_ns();
@@ -93,8 +114,45 @@ int main(int argc, char **argv) {
           for(int i=0;i<31;++i)if(it->mask&(1u<<i)){f.q[i]=it->q[i];f.qd[i]=it->qd[i];}
           break;
         }
+        if(f.stamp<=last_raw_stamp || (last_raw_stamp && f.stamp-last_raw_stamp>40000000LL))
+          throw std::runtime_error("Raw IMU duplicate/rollback or gap above 40 ms");
+        last_raw_stamp=f.stamp;
+        for(double v:f.values)if(!std::isfinite(v))throw std::runtime_error("Invalid raw IMU");
+        if(!integrator.initialized) {
+          pending.push_back(f);if(pending.size()>4096)pending.pop_front();
+          char buffer[512];ssize_t count;
+          while((count=::read(STDIN_FILENO,buffer,sizeof(buffer)))>0)command.append(buffer,count);
+          if(command.size()>2048)throw std::runtime_error("Oversized calibration command");
+          if(command.find('\n')!=std::string::npos) {
+            std::istringstream input(command);int64_t start;PointIntegrator::V bias;
+            std::array<double,4> quat;
+            if(!(input>>start>>bias[0]>>bias[1]>>bias[2]>>quat[0]>>quat[1]>>quat[2]>>quat[3]))
+              throw std::runtime_error("Invalid calibration command");
+            if(start<=0 || pending.empty() || start<pending.front().stamp || start>f.stamp)
+              throw std::runtime_error("Calibration anchor outside buffered IMU");
+            integrator.initialize(bias,quat);
+            bool found=false;
+            for(const auto& row:pending)if(row.stamp>=start) {
+              if(!found && row.stamp!=start)throw std::runtime_error("Missing calibration anchor");
+              found=true;
+              integrator.update(row.stamp,{row.values[0],row.values[1],row.values[2]},
+                                           {row.values[3],row.values[4],row.values[5]});
+            }
+            pending.clear();command.clear();
+          }
+        } else integrator.update(f.stamp,{f.values[0],f.values[1],f.values[2]},
+                                         {f.values[3],f.values[4],f.values[5]});
+        if(integrator.initialized) {
+          if(last_output && f.stamp-last_output<20000000LL)return;
+          f.quat=integrator.q;f.state=integrator.x;f.corrected_gyro=integrator.gyro;
+          f.samples=integrator.samples;f.max_gap=integrator.max_gap;f.integrated=1;
+          last_output=f.stamp;
+        }
         ssize_t n;
         do { n = ::write(STDOUT_FILENO, &f, sizeof(f)); } while (n < 0 && errno == EINTR);
+        // Full state pipes withhold snapshots; raw propagation must never wait
+        // for the Python consumer. Calibration capture instead fails closed.
+        if(n<0 && errno==EAGAIN && integrator.initialized)return;
         if (n != sizeof(f)) throw std::runtime_error("Raw sensor pipe write failed");
       });
     rclcpp::spin(node);
