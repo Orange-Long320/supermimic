@@ -60,10 +60,10 @@ def run():
  imu_core.fit_static_initialization=timed_fit
  import supermimic.deploy.async_sim_diagnostic_log as logging
  class Log:
-  def __init__(self,out):self.events=[]
+  def __init__(self,out):self.counts={}
   def emit(self,key,row):
    if row.get('event')=='packet_rejected':print('REJECTED',json.dumps(row),flush=True)
-   self.events.append((key,row))
+   self.counts[key]=self.counts.get(key,0)+1
   def close(self):return {'success':True,'replay_in_memory':True}
  logging.AsyncDiagnosticLog=Log
  r=Path(a.release)

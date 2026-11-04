@@ -4,7 +4,7 @@
 
 ## 安装位置与实际调用链
 
-当前容器内版本 `/home/agi/lxh-supermimic/releases/11500_imu_sensor_20261104_r3`，父版本 `11500_imu_sensor_20261104_r2`、`11500_imu_sensor_20261104_r1` 及更早的 `11500_turn_center_20261104_r1` 保留。宿主同名目录与容器项目目录不是自动同步；本次明确用 `podman cp` 传入容器。
+当前容器内版本 `/home/agi/lxh-supermimic/releases/11500_imu_sensor_20261104_r4`，父版本 `11500_imu_sensor_20261104_r3`、`11500_imu_sensor_20261104_r2`、`11500_imu_sensor_20261104_r1` 及更早的 `11500_turn_center_20261104_r1` 保留。宿主同名目录与容器项目目录不是自动同步；本次明确用 `podman cp` 传入容器。
 
 `start-keyboard.sh` → `launcher/start_x2_keyboard_sensor_20261104.sh` → `launcher/run_x2_keyboard_sensor_20261104.sh` → `launcher/publish_pelvis_imu_sensor.py`。后者通过 trial/src 载入 `imu_dead_reckoning.py`，不是旧的 `publish_pelvis_packet_keyboard_20261103.py`。保留转弯入口位置登记和站立 XY 反馈。
 
@@ -21,7 +21,7 @@ PC2 `/home/agi/aimdk/extra/x2_rl_deploy/README.md` 的 IMU 表明确 `torso/stat
 - 操作员必须确认物理静止；连续三秒的 IMU/编码器静止检查通过后才初始化重力方向、陀螺仪零偏和零速先验。20 秒内没有合格窗口则退出。没有用仿真吊挂夹具初始化真机。
 - 航向以静止初始化时的任意本地零方向开始，之后由扣零偏后的原始陀螺仪积分。关闭在线加速度调平和 IMU 阈值零速更新。
 - 真机 ROS 消息按点采样处理：陀螺仪梯形积分，世界系加速度线性插值积分；不伪造两个 1 ms 子帧或宣称设备做了区间平均。设备内部滤波仍未明确。
-- 时间使用原始整数 header（积分时减去固定整数起点），不重打时间戳；重复/回退或间隔超过 30 ms、IMU 过期超过 35 ms、输出超过 50 ms 无新状态均退出。历史记录表明 header 是接收侧语义，尚未证明等于硬件采样时刻。
+- 时间使用原始整数 header（积分时减去固定整数起点），不重打时间戳；重复/回退或间隔超过 40 ms、IMU 过期超过 35 ms、无 IMU 消息超过 50 ms、输出超过 50 ms 无新状态均退出（40/50 ms 为下文 r4 用户要求的调整）。历史记录表明 header 是接收侧语义，尚未证明等于硬件采样时刻。
 - 编码器选择不晚于 IMU 的因果样本，最多滞后 25 ms，使用既有 schema2 原子包校验；高度来自关节 FK 和已声明的平地脚底几何。滑移、悬空和不平地仍有模型局限。
 - runner 等待校准通过及新鲜状态心跳，之后才进入原有硬件发布/准备/接管流程。失败清理本次子进程。心跳不是运动精度、独立急停或电机验收证明。
 - 原有人工试验的未验收控制参数（包含无目标范围裁剪、准备增益和接管方式）未因更换估计器而获得验证。启动入口保留原来的现场保护/急停人工确认，并加入静止校准确认。
@@ -52,7 +52,7 @@ ssh -t x2-robot 'podman exec -it lxh bash'
 source /opt/ros/humble/setup.bash
 source /home/agi/aimdk/install/setup.bash
 B=/home/agi/lxh-supermimic
-R=$B/releases/11500_imu_sensor_20261104_r3
+R=$B/releases/11500_imu_sensor_20261104_r4
 export PYTHONPATH="$R/source/src:$B/python-cpu:$B/vendor-mjlab-math:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 python3 "$R/launcher/publish_pelvis_imu_sensor.py" \
@@ -97,3 +97,28 @@ r3 保持 35 ms 输入/状态包和 50 ms 输出租约：
 - 等待首条指令期间每次检查四个子进程（包含僵尸进程）与状态心跳，死亡或心跳过期立即失败并清理本次进程，不继续无效等待。Ctrl-C 在探针内正常收尾。硬件发布器初始化后、启动 worker 前也检查状态程序是否仍在运行。
 - 在容器中使用本次失败记录做隔离软件回放，显式追加 1 秒保持最后读数的合成消息验证恢复路径，没有真实 ROS 发布、控制器或电机输出。拒绝两张过期候选后输出 96 帧，已发布包最大包龄 26.751 ms、无故障；报告 `r3/reports/runtime-after/{summary,offline-replay}.json`、`runtime-after.log`。合成后续帧不构成实机持续运行或精度证据。
 - 36 项自动测试通过：新增一次编码器延迟可恢复、持续延迟触发输出租约、死亡 worker/过期心跳/用户中断及时结束探针。没有修改动作权重或电机参数，未重启真实控制；r3 的现场连续运行仍待验证。
+
+## r4：按用户要求适度放宽 IMU 断续容忍
+
+12:49 失败 trial：`/home/agi/lxh-supermimic/trials/11500_prep_imu_20261102_r1/run-keyboard-20261104-124852`。静止校准通过，已发布 178 帧，随后原始 header 出现 30.006084 ms 间隔，超过 r3 的 30 ms 上限，状态程序退出。启动脚本检测到心跳消失，及时停止并清理；worker 没有进入接管。
+
+用户明确要求“现在门槛太严了，放宽一点”。本次选择：硬件 IMU 允许间隔 30 → **40 ms**（采样窗口、发布器检查及估计器内部检查保持一致）；无消息等待 35 → **50 ms**。状态包及 IMU header/接收包龄仍须通过 35 ms 检查，持续无有效状态的 50 ms 输出租约保持不变；重复、回退及超过 40 ms 的间隔仍拒绝。不重打时间戳、不伪造补帧，接受间隔中的积分仍是缺测近似，不能消除真实漏帧。共享估计器默认仍为 30 ms，仿真与历史默认不变；硬件显式传入 40 ms。
+
+38 项自动测试通过，包含原 30.006084 ms 间隔在硬件设置下通过、默认设置仍拒绝、超过 40 ms/重复/回退仍拒绝、硬件校准窗口采用同一间隔参数。没有执行真实电机程序或模式切换。
+
+### 为什么上午能启动
+
+上午旧 `publish_pelvis_packet_keyboard_20261103.py` 在 `propagate()` 遇到超过 30 ms 间隔时计数、跳过该段、更新 last 后继续，并使用设备融合姿态；原始积分链采用了主动退出。旧入口能继续并不证明当时无漏帧。
+
+进一步在容器执行 60 秒只读对照：现成 C++ 原始订阅器与当前 Python 五话题订阅器同时接收同一个骨盆 IMU，中间仅做离线固定输入的模型加载/20 次推理模拟启动负载，没有 ROS 控制发布。重叠时段：
+
+| 接收链 | 条数 | header 有效频率 | 最大间隔 | 超过 3 ms 间隔 |
+| --- | ---: | ---: | ---: | ---: |
+| C++ 直接订阅 | 29370 | 500.03 Hz | 2.202 ms | 0 |
+| 当前 Python 状态订阅链（只读模式） | 24942 | 424.64 Hz | 23.999 ms | 2515 |
+
+Python 缺少的 4428 个 header 均被 C++ 收到；Python 独有 header 为 0。因此本次对照明确定位到当前 Python 订阅/处理路径漏读，不能归因于 IMU 传感器本身没有提供数据；具体 Python 调度、解析及日志开销比例尚未分离。放宽 40 ms 是用户要求的容忍调整，不是接收路径根治或精度证明。
+
+对照原始记录及完整统计保留在容器 `/home/agi/lxh-supermimic/trials/imu-transport-audit-20261104-r1/`，其中 `transport-comparison.json` 为统计、`cpp.csv` 和 `python/support-events.jsonl` 为独立原始输入。r4 的真实连续运行和精度仍未验收。
+
+用 12:49 失败记录回放，显式追加 1 秒保持最后读数的合成消息，仅验证时间门槛：r4 接受原来的 30.006084 ms 间隔，输出 228 帧、无故障，报告 `r4/reports/tolerance-after-bounded-log/`。此前两次离线驱动保留所有回调对象的尝试触发 IMU receive timeout，分别保存在 `tolerance-after/` 和 `tolerance-after-repeat/`；离线驱动改为只计数、不无限保留回调对象后通过。不将软件回放当作现场连续控制或运动精度验证。

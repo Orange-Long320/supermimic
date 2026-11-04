@@ -9,7 +9,7 @@ from scipy.spatial.transform import Rotation
 from collections import deque
 
 
-def fit_static_initialization(samples, *, declared_stationary=False, seconds=3.):
+def fit_static_initialization(samples, *, declared_stationary=False, seconds=3., max_gap_seconds=.03):
     """Validate a complete stationary sensor window, then fit tilt and gyro bias.
 
     The declaration must come from the operator/fixture, not the IMU threshold.
@@ -18,6 +18,8 @@ def fit_static_initialization(samples, *, declared_stationary=False, seconds=3.)
     """
     if not declared_stationary:
         raise ValueError('An independently declared stationary window is required')
+    if not np.isfinite(max_gap_seconds) or max_gap_seconds <= 0:
+        raise ValueError("Invalid IMU interval limit")
     if seconds < 1. or len(samples) < 100:
         raise ValueError('Insufficient static calibration samples')
     t = np.array([s['time_s'] for s in samples], dtype=float)
@@ -29,7 +31,7 @@ def fit_static_initialization(samples, *, declared_stationary=False, seconds=3.)
             qd.shape != q.shape or q.shape[0] != len(t) or
             not all(np.isfinite(x).all() for x in (t, gyro, acc, q, qd)) or
             t[-1]-t[0] < seconds-1e-6 or
-            np.any(np.diff(t) <= 0) or np.max(np.diff(t)) > .03):
+            np.any(np.diff(t) <= 0) or np.max(np.diff(t)) > max_gap_seconds):
         raise ValueError('Invalid, incomplete or discontinuous calibration window')
     if (np.max(np.linalg.norm(gyro, axis=1)) > .08 or np.max(gyro.std(axis=0)) > .005 or
             np.max(np.abs(np.linalg.norm(acc, axis=1)-9.81)) > .5 or
@@ -69,7 +71,7 @@ class EncoderQuietWindow:
 
 class ImuDeadReckoning:
     def __init__(self, *, zupt=False, gravity_leveling=False, require_initialization=True,
-                 interval_average=False, point_trapezoid=False):
+                 interval_average=False, point_trapezoid=False, max_gap_seconds=.03):
         # Declared zero-velocity prior, yaw zero is an arbitrary local heading.
         # Neither prior is obtained from simulator state.
         self.rotation = Rotation.identity()
@@ -87,6 +89,9 @@ class ImuDeadReckoning:
         self.initial_rotation = self.rotation
         self.last_world_acceleration = np.zeros(3)
         self.last_zupt = False
+        if not np.isfinite(max_gap_seconds) or max_gap_seconds <= 0:
+            raise ValueError("Invalid IMU interval limit")
+        self.max_gap_seconds = float(max_gap_seconds)
         self.interval_average = interval_average
         self.point_trapezoid = point_trapezoid
         if interval_average and point_trapezoid:
@@ -118,8 +123,8 @@ class ImuDeadReckoning:
             self.samples += 1
             return
         dt = float(stamp-self.stamp)
-        if not 0. < dt <= .03:
-            raise ValueError('IMU duplicate/rollback or gap above 30 ms')
+        if not 0. < dt <= self.max_gap_seconds:
+            raise ValueError(f"IMU duplicate/rollback or gap {dt*1000:.3f} ms exceeds {self.max_gap_seconds*1000:g} ms")
         increment = gyro if self.interval_average else .5*(self.previous_gyro+gyro)
         self.rotation *= Rotation.from_rotvec(increment*dt)
         still = abs(np.linalg.norm(acc)-9.81) <= .5 and np.linalg.norm(gyro) <= .08
@@ -167,11 +172,12 @@ Only immutable mount geometry, a separate FK model, encoder values and raw IMU
 samples are accepted. There is no simulator-data object or truth-pose argument.
 """
     def __init__(self, fk_model_path, joint_names, imu_offset, *, sole_offset=.05,
-                 require_initialization=True, encoder_stationary_gate=True, interval_average=True, point_trapezoid=False):
+                 require_initialization=True, encoder_stationary_gate=True, interval_average=True, point_trapezoid=False, max_gap_seconds=.03):
         import mujoco
         self.mj = mujoco
         self.filter = ImuDeadReckoning(require_initialization=require_initialization,
-                                       interval_average=interval_average, point_trapezoid=point_trapezoid)
+                                       interval_average=interval_average, point_trapezoid=point_trapezoid,
+                                       max_gap_seconds=max_gap_seconds)
         self.model = mujoco.MjModel.from_xml_path(str(fk_model_path))
         self.data = mujoco.MjData(self.model)
         ids = [self.model.joint(name).id for name in joint_names]

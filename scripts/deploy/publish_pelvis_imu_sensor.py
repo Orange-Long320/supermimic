@@ -12,6 +12,9 @@ import uuid
 import xml.etree.ElementTree as ET
 
 GROUPS = ('leg', 'waist', 'head', 'arm')
+# Operator requested modest transport-jitter tolerance on 2026-11-04.
+MAX_IMU_GAP_S = .040
+MAX_IMU_RECEIVE_GAP_S = .050
 
 
 def pelvis_mount(urdf):
@@ -66,7 +69,7 @@ def main():
     log = AsyncDiagnosticLog(a.out)
     estimator = None if a.observe_only else EncoderImuState(
         a.model, names, offset, interval_average=False, point_trapezoid=True,
-        encoder_stationary_gate=False)
+        encoder_stationary_gate=False, max_gap_seconds=MAX_IMU_GAP_S)
     session = 'pelvis-raw-imu-'+uuid.uuid4().hex
     history = {g: deque(maxlen=128) for g in GROUPS}
     window = deque()
@@ -132,8 +135,8 @@ def main():
                 return
             if stamp <= 0 or not np.isfinite(gyro+acc).all() or not 0 <= age <= .035:
                 raise ValueError('Invalid/stale/future IMU input')
-            if gap is not None and not 0 < gap <= .03:
-                raise ValueError('IMU duplicate/rollback or gap above 30 ms; no gap bridging')
+            if gap is not None and not 0 < gap <= MAX_IMU_GAP_S:
+                raise ValueError(f'IMU duplicate/rollback or gap {gap*1000:.3f} ms exceeds {MAX_IMU_GAP_S*1000:g} ms')
             if origin_ns is None:
                 origin_ns = stamp
             sample['time_s'] = (stamp-origin_ns)*1e-9
@@ -149,7 +152,8 @@ def main():
                 if sample['time_s']-window[0]['time_s'] >= 3.:
                     calibration_started = time.monotonic()
                     try:
-                        calibration = fit_static_initialization(list(window), declared_stationary=True)
+                        calibration = fit_static_initialization(list(window), declared_stationary=True,
+                                                                max_gap_seconds=MAX_IMU_GAP_S)
                     except ValueError:
                         return
                     estimator.filter.initialize(calibration)
@@ -232,7 +236,7 @@ def main():
                     raise ValueError('No valid three-second stationary window within 20 seconds')
                 if calibrated_at is not None and last_publish is None and time.monotonic()-calibrated_at > .5:
                     raise ValueError('No fresh post-calibration state within 500 ms')
-                if last_receive is not None and time.monotonic()-last_receive > .035:
+                if last_receive is not None and time.monotonic()-last_receive > MAX_IMU_RECEIVE_GAP_S:
                     raise ValueError('IMU receive timeout')
                 if last_publish is not None and time.time()-last_publish*1e-9 > .05:
                     raise ValueError('Coherent state output timeout')
@@ -252,6 +256,7 @@ def main():
         stats.update(fault=fault, duration_s=time.monotonic()-started, writer=writer,
                      observe_only=a.observe_only, firmware_quaternion_used=False,
                      interval_average=False, point_trapezoid=True, online_zupt=False,
+                     max_imu_gap_s=MAX_IMU_GAP_S, max_imu_receive_gap_s=MAX_IMU_RECEIVE_GAP_S,
                      online_gravity_leveling=False, imu_offset=offset, motor_readiness_approved=False)
         (a.out/'summary.json').write_text(json.dumps(stats, indent=2)+'\n')
         print(json.dumps(stats), flush=True)

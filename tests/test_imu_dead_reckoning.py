@@ -138,3 +138,27 @@ def test_point_trapezoid_integrates_ramp_acceleration_without_interval_mean_clai
 def test_point_and_interval_semantics_cannot_be_mixed():
     with pytest.raises(ValueError):
         ImuDeadReckoning(interval_average=True, point_trapezoid=True)
+
+
+def test_hardware_40ms_interval_tolerance_does_not_relax_default_or_accept_long_gaps():
+    default = ImuDeadReckoning(require_initialization=False)
+    hardware = ImuDeadReckoning(require_initialization=False, max_gap_seconds=.04)
+    for estimator in (default, hardware):
+        estimator.update(0., [0., 0., 0.], [1., 0., 9.81])
+    with pytest.raises(ValueError):
+        default.update(.030006084, [0., 0., 0.], [1., 0., 9.81])
+    hardware.update(.030006084, [0., 0., 0.], [1., 0., 9.81])
+    np.testing.assert_allclose(hardware.x, [.5*.030006084**2, 0., .030006084, 0.])
+    for stamp in (.030006084, .029, .071):
+        with pytest.raises(ValueError):
+            hardware.update(stamp, [0., 0., 0.], [1., 0., 9.81])
+
+
+def test_calibration_uses_explicit_hardware_interval_tolerance():
+    samples = static_samples()
+    for sample in samples[500:]:
+        sample['time_s'] += .028006084
+    with pytest.raises(ValueError):
+        fit_static_initialization(samples, declared_stationary=True)
+    result = fit_static_initialization(samples, declared_stationary=True, max_gap_seconds=.04)
+    assert result['samples'] == 1501
