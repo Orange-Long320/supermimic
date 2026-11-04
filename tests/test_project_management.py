@@ -32,12 +32,12 @@ class ProjectIsolationTests(unittest.TestCase):
         self.git(self.keyboard, "add", ".")
         self.git(self.keyboard, "commit", "-m", "baseline")
         self.baseline = self.git(self.keyboard, "rev-parse", "HEAD")
-        self.git(self.keyboard, "worktree", "add", "-b", "codex/stairs", str(self.stairs))
+        self.git(self.keyboard, "worktree", "add", "-b", "stairs", str(self.stairs))
         (self.keyboard / "projects").mkdir()
         self.entries = {
             "keyboard": dict(path=".", branch="main", baseline=self.baseline,
                              artifact_namespace="keyboard", environment="/envs/keyboard"),
-            "stairs": dict(path="../stairs", branch="codex/stairs", baseline=self.baseline,
+            "stairs": dict(path="../stairs", branch="stairs", baseline=self.baseline,
                            artifact_namespace="stairs", environment="/envs/stairs"),
         }
         self.save_registry()

@@ -12,7 +12,7 @@
     },
     "keyboard-training": {
       "path": "~/.codex/worktrees/x2-velocity-control/supermimic",
-      "branch": "codex/x2-velocity-control",
+      "branch": "x2-velocity-control",
       "baseline": "88242c190ae337ea74f061f5bafb7b9130455805",
       "purpose": "Pinned velocity/keyboard training implementation required by historical launchers",
       "artifact_namespace": "keyboard",
@@ -21,7 +21,7 @@
     },
     "stairs": {
       "path": "../supermimic-stairs",
-      "branch": "codex/x2-stairs",
+      "branch": "x2-stairs",
       "baseline": "4296d93a2967310a2f63b6bb6346688d2cb452af",
       "purpose": "X2 feet-only stairs, ACP-style planning and SuperMimic imagination",
       "artifact_namespace": "stairs",

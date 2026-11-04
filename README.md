@@ -5,8 +5,8 @@
 ## 项目分工
 
 当前目录继续维护 **键盘控制与实机准备**。**ACP 上楼梯**在独立的
-`../supermimic-stairs` 工作区、`codex/x2-stairs` 分支开发；它的源码修改不会改变当前工作区。
-键盘速度训练保留原有 `codex/x2-velocity-control` 工作区，不把它和当前部署版本混为一套源码。
+`../supermimic-stairs` 工作区、`x2-stairs` 分支开发；它的源码修改不会改变当前工作区。
+键盘速度训练保留原有 `x2-velocity-control` 工作区，不把它和当前部署版本混为一套源码。
 
 项目入口、版本、环境与产物隔离规则见 [项目管理](projects/README.md)。
 [键盘项目](projects/keyboard/README.md) · [楼梯项目](projects/stairs/README.md)。
