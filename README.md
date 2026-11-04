@@ -14,6 +14,8 @@
 
 ## 文档入口
 
+- [原始 IMU 估计器 PC2 容器接入与检查指令（2026-11-04）](docs/X2_IMU_HARDWARE_STAGING_20261104.md)：静止校准、零偏扣除、传感器积分；已做只读检查，实机运动精度未验收。
+
 - [使用与训练](docs/USAGE.md) · [数据](docs/DATA.md) · [架构](docs/ARCHITECTURE.md)
 - [本项目实验记录](docs/LOCAL_EXPERIMENT.md) · [历史仿真实验](docs/EXPERIMENTS.md)
 - [X2 部署基础与当前路线](docs/X2_DEPLOYMENT.md) · [500 Hz IMU 状态估计](docs/X2_SHADOW_CONTACT_FUSION_20261102.md) · [PC2 容器准备](docs/X2_LXH_PC2_PREPARATION_20261031.md)

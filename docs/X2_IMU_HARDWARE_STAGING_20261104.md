@@ -1,0 +1,66 @@
+# 2026-11-04：原始 IMU 估计器接入 PC2
+
+状态：已更新 `x2-robot` 的现有 rootless Podman `lxh` 容器；仅执行离线检查与两次 10 秒只读订阅，没有启动电机发布器、策略接管或模式切换。**运动精度与实机控制尚未验收，不能声称真机误差低于 50 cm。**
+
+## 安装位置与实际调用链
+
+新容器内版本 `/home/agi/lxh-supermimic/releases/11500_imu_sensor_20261104_r1`，父版本 `11500_turn_center_20261104_r1` 保留。宿主同名目录与容器项目目录不是自动同步；本次明确用 `podman cp` 传入容器。
+
+`start-keyboard.sh` → `launcher/start_x2_keyboard_sensor_20261104.sh` → `launcher/run_x2_keyboard_sensor_20261104.sh` → `launcher/publish_pelvis_imu_sensor.py`。后者通过 trial/src 载入 `imu_dead_reckoning.py`，不是旧的 `publish_pelvis_packet_keyboard_20261103.py`。保留转弯入口位置登记和站立 XY 反馈。
+
+状态程序只订阅原始 IMU 与四组编码器。正常模式只发布诊断状态，`--observe-only` 不创建任何 ROS 发布器。原始数据与状态通过有界独立写盘队列记录，溢出/写盘失败报错；不读取真值、点云、里程计、设备融合四元数。
+
+## SDK 与几何证据
+
+PC2 `/home/agi/aimdk/extra/x2_rl_deploy/README.md` 的 IMU 表明确 `torso/state` 为髋部、`chest/state` 为胸腔，均标称 500 Hz；`src/examples/src/hal/echo_imu_data.cpp` 及 Python 对应例子称 torso 为 waist IMU，并注明角速度 rad/s、加速度 m/s²。参考项目的原始 xyz 轴直接使用方式作为交叉核对，不继承其运行授权或控制参数。
+
+发布包 `robot-pc2.urdf` 的 `imu_in_pelvis_joint` 是 pelvis 上的固定关节，rpy 全零，位移 `[0.0239464627920677, -0.00022868187247424, 0.0417100000000296]` 米。程序从此关节读取并校验几何，拒绝不明确的非零轴旋转。尚未做真机运动轴向与位置精度验收。
+
+## 估计与启动门槛
+
+- 操作员必须确认物理静止；连续三秒的 IMU/编码器静止检查通过后才初始化重力方向、陀螺仪零偏和零速先验。20 秒内没有合格窗口则退出。没有用仿真吊挂夹具初始化真机。
+- 航向以静止初始化时的任意本地零方向开始，之后由扣零偏后的原始陀螺仪积分。关闭在线加速度调平和 IMU 阈值零速更新。
+- 真机 ROS 消息按点采样处理：陀螺仪梯形积分，世界系加速度线性插值积分；不伪造两个 1 ms 子帧或宣称设备做了区间平均。设备内部滤波仍未明确。
+- 时间使用原始整数 header（积分时减去固定整数起点），不重打时间戳；重复/回退或间隔超过 30 ms、IMU 过期超过 35 ms、输出超过 50 ms 无新状态均退出。历史记录表明 header 是接收侧语义，尚未证明等于硬件采样时刻。
+- 编码器选择不晚于 IMU 的因果样本，最多滞后 25 ms，使用既有 schema2 原子包校验；高度来自关节 FK 和已声明的平地脚底几何。滑移、悬空和不平地仍有模型局限。
+- runner 等待校准通过及新鲜状态心跳，之后才进入原有硬件发布/准备/接管流程。失败清理本次子进程。心跳不是运动精度、独立急停或电机验收证明。
+- 原有人工试验的未验收控制参数（包含无目标范围裁剪、准备增益和接管方式）未因更换估计器而获得验证。启动入口保留原来的现场保护/急停人工确认，并加入静止校准确认。
+
+## 实测与限制
+
+本地：`tests/test_imu_dead_reckoning.py` 与 `tests/test_hardware_imu_sensor.py` 共 22 项通过。包括偏置/静止初始化、点采样线性加速度解析解、非法时间戳、因果编码器选择、固定安装轴检查。没有在本地执行机器人仿真。
+
+容器：合成静止非零偏置测试及 FK 有限值检查通过；11500 策略固定输入最大差 `4.991889e-7`。这是软件检查，不是机器人精度评估。
+
+两次只读实测：
+
+| 订阅队列 | IMU 条数 | header 有效频率 | 延迟中位数 / 最大 | 最大 header 间隔 |
+| --- | ---: | ---: | ---: | ---: |
+| depth32（失败方案，保留日志） | 4311 | 443.90 Hz | 61.24 / 67.05 ms | 18.00 ms |
+| depth3（当前） | 4152 | 432.87 Hz | 3.96 / 8.10 ms | 20.00 ms |
+
+两次观测均未校准或发布策略状态。第二次无超过 35 ms 的消息延迟，无重复/回退/超过 30 ms 的 header 间隔，但有 350 次超过 3 ms 的间隔。标称 500 Hz 不等于实际收到完整 500 Hz，漏帧和运动时接触冲击混叠仍待验证；不静默补造漏帧。
+
+本地原始记录 `outputs/x2_hardware_imu_20261104_r1/`，容器记录 `release/reports/{readonly-sensors,readonly-depth3,offline-imu-check.json}`。可用 `scripts/evaluation/audit_hardware_imu_capture.py` 重新统计。未取得操作员对当前物理静止的确认，所以未将这次只读数据写成正式校准。
+
+## 操作指令
+
+先执行无电机输出的 10 秒检查（每次使用新输出目录）：
+
+```bash
+ssh -t x2-robot 'podman exec -it lxh bash'
+source /opt/ros/humble/setup.bash
+source /home/agi/aimdk/install/setup.bash
+B=/home/agi/lxh-supermimic
+R=$B/releases/11500_imu_sensor_20261104_r1
+export PYTHONPATH="$R/source/src:$B/python-cpu:$B/vendor-mjlab-math:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+python3 "$R/launcher/publish_pelvis_imu_sensor.py" \
+  --profile "$R/fk-only/profile.json" --model "$R/fk-only/fk-only.xml" \
+  --urdf "$R/robot-pc2.urdf" --out "$B/trials/imu-observe-$(date +%Y%m%d-%H%M%S)" \
+  --observe-only --seconds 10
+```
+
+后续现场人工试验入口（**会进入电机控制流程，本次没有执行**）：在同一容器中 `bash "$R/start-keyboard.sh"`。入口要求人工确认当前急停/防跌落等条件，并在最初校准期间保持物理静止。若校准或时序失败查看新 trial 的 `state.log`，不要改成跳过校准、强制归零或放宽时间戳。
+
+回退需要明确指定父版本及范围；本次未回退，未覆盖旧版本。停止 runner 后实际 HAL/电机状态仍需现场核验。

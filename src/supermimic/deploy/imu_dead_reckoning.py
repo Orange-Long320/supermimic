@@ -69,7 +69,7 @@ class EncoderQuietWindow:
 
 class ImuDeadReckoning:
     def __init__(self, *, zupt=False, gravity_leveling=False, require_initialization=True,
-                 interval_average=False):
+                 interval_average=False, point_trapezoid=False):
         # Declared zero-velocity prior, yaw zero is an arbitrary local heading.
         # Neither prior is obtained from simulator state.
         self.rotation = Rotation.identity()
@@ -88,6 +88,9 @@ class ImuDeadReckoning:
         self.last_world_acceleration = np.zeros(3)
         self.last_zupt = False
         self.interval_average = interval_average
+        self.point_trapezoid = point_trapezoid
+        if interval_average and point_trapezoid:
+            raise ValueError("Point integration cannot be combined with interval means")
 
     def initialize(self, calibration):
         if self.samples:
@@ -111,6 +114,7 @@ class ImuDeadReckoning:
         gyro = gyro-self.gyro_bias
         if self.stamp is None:
             self.stamp = float(stamp); self.previous_gyro = gyro.copy(); self.gyro = gyro.copy()
+            self.last_world_acceleration = self.rotation.apply(acc)-[0., 0., 9.81]
             self.samples += 1
             return
         dt = float(stamp-self.stamp)
@@ -132,12 +136,18 @@ class ImuDeadReckoning:
         acceleration_rotation = (self.rotation*Rotation.from_rotvec(-.5*gyro*dt)
                                  if self.interval_average else self.rotation)
         world = acceleration_rotation.apply(acc)-[0., 0., 9.81]
+        previous_world = self.last_world_acceleration.copy()
         self.last_world_acceleration = world.copy()
         self.last_zupt = False
         F = np.eye(4); F[0, 2] = F[1, 3] = dt
         self.x = F@self.x
-        self.x[:2] += .5*world[:2]*dt**2
-        self.x[2:] += world[:2]*dt
+        if self.point_trapezoid:
+            # Exact for linearly varying world acceleration between point samples.
+            self.x[:2] += (2*previous_world[:2]+world[:2])*dt**2/6
+            self.x[2:] += .5*(previous_world[:2]+world[:2])*dt
+        else:
+            self.x[:2] += .5*world[:2]*dt**2
+            self.x[2:] += world[:2]*dt
         self.P = F@self.P@F.T+self.Q*(dt/.02)
         if self.zupt and settled and zupt_static_evidence:
             K = np.linalg.solve(self.H@self.P@self.H.T+self.R, (self.P@self.H.T).T).T
@@ -157,11 +167,11 @@ Only immutable mount geometry, a separate FK model, encoder values and raw IMU
 samples are accepted. There is no simulator-data object or truth-pose argument.
 """
     def __init__(self, fk_model_path, joint_names, imu_offset, *, sole_offset=.05,
-                 require_initialization=True, encoder_stationary_gate=True, interval_average=True):
+                 require_initialization=True, encoder_stationary_gate=True, interval_average=True, point_trapezoid=False):
         import mujoco
         self.mj = mujoco
         self.filter = ImuDeadReckoning(require_initialization=require_initialization,
-                                       interval_average=interval_average)
+                                       interval_average=interval_average, point_trapezoid=point_trapezoid)
         self.model = mujoco.MjModel.from_xml_path(str(fk_model_path))
         self.data = mujoco.MjData(self.model)
         ids = [self.model.joint(name).id for name in joint_names]

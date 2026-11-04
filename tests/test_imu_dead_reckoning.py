@@ -125,3 +125,16 @@ def test_interval_specific_force_uses_midpoint_attitude_without_gravity_leak():
         estimator.update(i*.002, [1., 0., 0.], midpoint.inv().apply([0., 0., 9.81]))
     np.testing.assert_allclose(estimator.rotation.as_rotvec(), [1., 0., 0.], atol=1e-12)
     np.testing.assert_allclose(estimator.x, 0., atol=1e-12)
+
+
+def test_point_trapezoid_integrates_ramp_acceleration_without_interval_mean_claim():
+    estimator = ImuDeadReckoning(require_initialization=False, point_trapezoid=True)
+    for i in range(501):
+        t = i*.002
+        estimator.update(t, [0., 0., 0.], [t, 0., 9.81])
+    np.testing.assert_allclose(estimator.x, [1/6, 0., .5, 0.], atol=1e-12)
+
+
+def test_point_and_interval_semantics_cannot_be_mixed():
+    with pytest.raises(ValueError):
+        ImuDeadReckoning(interval_average=True, point_trapezoid=True)
