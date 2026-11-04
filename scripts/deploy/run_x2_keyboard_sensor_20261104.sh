@@ -8,7 +8,7 @@ release=${1:?release directory}
 trial=${2:?new trial directory}
 base=/home/agi/lxh-supermimic
 script=/home/agi/lxh-supermimic/trials/11500_unvalidated_20261102_r1
-worker_script=${SM_WORKER_SCRIPT:-$script/x2_11500_worker.py}
+worker_script=${SM_WORKER_SCRIPT:-$release/launcher/x2_11500_worker.py}
 recorder_script=${SM_RECORDER_SCRIPT:-$script/record_joints.py}
 publisher_script=${SM_PUBLISHER_SCRIPT:-$script/x2_hardware_publisher.py}
 prep_seconds=${SM_PREP_SECONDS:-20}
@@ -17,7 +17,7 @@ producer_src="$base/producer-keyboard-20261103/src"
 source /opt/ros/humble/setup.bash
 source /home/agi/aimdk/install/setup.bash
 export CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-export PYTHONPATH_RELEASE="$trial/src:$base/python-cpu:$base/vendor-mjlab-math:${PYTHONPATH:-}"
+export PYTHONPATH_RELEASE="$trial/src:$base/python-cpu:$base/vendor-mjlab-math:$script:${PYTHONPATH:-}"
 export SM_ROBOT=x2_ultra SM_ROBOT_SPEC="$release/fk-only/profile.json"
 
 if [ ! -d "$trial/src" ]; then
@@ -56,6 +56,39 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+stamp "warm policy worker before starting IMU integration"
+nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$worker_script" \
+  --plan "$plan" --consent "$consent" --keyboard-port "$keyboard_port" \
+  --startup-ready-file "$trial/worker-warm.json" > "$trial/worker.log" 2>&1 &
+worker_pid=$!
+if ! /usr/bin/python3 - "$trial/worker-warm.json" "$worker_pid" <<'WARMPY'
+import json,sys,time
+from pathlib import Path
+path,pid=Path(sys.argv[1]),sys.argv[2]
+end=time.monotonic()+30
+while time.monotonic()<end:
+    try:
+        state=Path('/proc',pid,'stat').read_text().rsplit(')',1)[1].split()[0]
+        if state in ('Z','X'):raise ProcessLookupError()
+        if path.exists() and json.loads(path.read_text())['model_warm']:break
+    except (OSError,IndexError):raise SystemExit('Policy worker exited during warmup')
+    except (ValueError,KeyError):pass
+    time.sleep(.05)
+else:raise SystemExit('Policy model warmup timed out')
+WARMPY
+then
+  tail -15 "$trial/worker.log" >&2
+  exit 1
+fi
+
+stamp "record joint states (read only)"
+# The continuous recorder writes through a bounded queue rather than retaining
+# the full trajectory in RAM.
+nohup env PYTHONPATH="$producer_src:$PYTHONPATH_RELEASE" python3 "$recorder_script" \
+  --startup "$trial/contract/startup.json" --out "$trial/joints" \
+  > "$trial/joints.log" 2>&1 &
+monitor_pid=$!
+
 stamp "start raw pelvis IMU state producer; keep robot physically stationary"
 nohup flock -n -F "$base/online-pelvis.lock" env PYTHONPATH="$PYTHONPATH_RELEASE" /usr/bin/python3 \
   "$release/launcher/publish_pelvis_imu_sensor.py" --profile "$release/fk-only/profile.json" \
@@ -99,19 +132,6 @@ if ! kill -0 "$state_pid" 2>/dev/null || [ ! -f "$trial/state/ready.json" ]; the
   tail -12 "$trial/state.log" >&2
   exit 1
 fi
-
-stamp "record joint states (read only)"
-# The continuous recorder writes through a bounded queue rather than retaining
-# the full trajectory in RAM.
-nohup env PYTHONPATH="$producer_src:$PYTHONPATH_RELEASE" python3 "$recorder_script" \
-  --startup "$trial/contract/startup.json" --out "$trial/joints" \
-  > "$trial/joints.log" 2>&1 &
-monitor_pid=$!
-
-stamp "start policy worker"
-nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$worker_script" \
-  --plan "$plan" --consent "$consent" --keyboard-port "$keyboard_port" > "$trial/worker.log" 2>&1 &
-worker_pid=$!
 
 # Anchor on the first command the worker actually issues instead of a fixed
 # delay: worker setup and any calibration retry both shift it. The preparation

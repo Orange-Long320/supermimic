@@ -24,9 +24,18 @@ def run():
  class Clock:
   def time(self):return base+time.monotonic()-clock
   def monotonic(self):return time.monotonic()
+ class Handle:
+  def __init__(self):self.message=None;self.pointer=id(self)
+  def __enter__(self):return self
+  def __exit__(self,*args):pass
+  def take_message(self,*args):
+   message,self.message=self.message,None
+   return None if message is None else (message,None)
  class Node:
-  def __init__(self,*x,**kw):pass
-  def create_subscription(self,kind,topic,cb,qos):callbacks[topic]=cb
+  def __init__(self,name,**kw):self.context=NS(handle=None)
+  def create_subscription(self,kind,topic,cb,qos):
+   handle=Handle();callbacks[topic]=lambda msg:setattr(handle,'message',msg)
+   return NS(handle=handle,msg_type=kind,raw=False)
   def create_publisher(self,*x):return NS(publish=lambda msg:emitted.append(json.loads(msg.data)))
   def destroy_node(self):pass
  def spin(node,timeout_sec):
@@ -41,11 +50,13 @@ def run():
   else:
    msg=NS(header=header,state=NS(value=r['domain']),joints=[NS(name=n,position=v,velocity=r['velocity'][n]) for n,v in r['position'].items()])
    callbacks['/aima/hal/joint/'+r['group']+'/state'](msg)
- class Executor:
-  def add_node(self,node):self.node=node
-  def spin_once(self,timeout_sec):sys.modules['rclpy'].spin_once(self.node,timeout_sec=timeout_sec)
-  def shutdown(self):pass
- modules={'rclpy.executors':dict(SingleThreadedExecutor=Executor),'rclpy':dict(init=lambda:None,ok=lambda:True,spin_once=spin,try_shutdown=lambda:None),
+ class WaitSet:
+  def __init__(self,*args):pass
+  def clear_entities(self):pass
+  def add_subscription(self,handle):self.handle=handle
+  def wait(self,timeout):sys.modules['rclpy'].spin_once(None,timeout_sec=timeout*.000000001)
+  def get_ready_entities(self,kind):return [self.handle.pointer] if self.handle.message is not None else []
+ modules={'rclpy.impl':{},'rclpy.impl.implementation_singleton':dict(rclpy_implementation=NS(WaitSet=WaitSet)),'rclpy':dict(init=lambda:None,ok=lambda:True,spin_once=spin,try_shutdown=lambda:None),
           'rclpy.node':dict(Node=Node),'rclpy.qos':dict(QoSProfile=lambda **kw:kw,ReliabilityPolicy=NS(BEST_EFFORT=1),DurabilityPolicy=NS(VOLATILE=1)),
           'sensor_msgs.msg':dict(Imu=object),'std_msgs.msg':dict(String=lambda **kw:NS(**kw)),
           'aimdk_msgs.msg':dict(JointStateArray=object)}

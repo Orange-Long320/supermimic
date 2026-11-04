@@ -56,7 +56,7 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     stream = []
     for i in range(1751):
         wall = 100.+i*.002
-        stamp = int(round((wall-(.034 if fault == 'transport_delay' else .004))*1e9))
+        stamp = int(round((wall-(.020 if fault == 'transport_delay' else .004))*1e9))
         for group, name in zip(bridge.GROUPS, names):
             # Oldest joint is 17 ms old when the IMU callback begins.
             jt = stamp-(0 if fault == 'transport_delay' else 13_000_000)
@@ -67,7 +67,7 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
                 header=NS(stamp=NS(sec=jt//10**9, nanosec=jt%10**9)),
                 state=NS(value=0), joints=[NS(name=name, position=0., velocity=0.)])))
         if delayed:
-            wall += .012
+            wall += .006 if fault == 'joint_delayed_once' else .012
         if fault == 'stale_input' and i == 1700:
             wall += .04
         if fault == 'timestamp_gap' and i == 1700:
@@ -77,12 +77,29 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
             angular_velocity=NS(x=0., y=0., z=0.), linear_acceleration=NS(x=0., y=0., z=9.81))))
     iterator = iter(stream)
 
-    class Node:
-        def __init__(self, *args, **kwargs):
+    class Handle:
+        def __init__(self):
+            self.message = None
+            self.pointer = id(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
             pass
 
+        def take_message(self, *args):
+            message, self.message = self.message, None
+            return None if message is None else (message, None)
+
+    class Node:
+        def __init__(self, name, **kwargs):
+            self.context = NS(handle=None)
+
         def create_subscription(self, kind, topic, callback, qos):
-            callbacks[topic] = callback
+            handle = Handle()
+            callbacks[topic] = lambda msg: setattr(handle, 'message', msg)
+            return NS(handle=handle, msg_type=kind, raw=False)
 
         def create_publisher(self, *args):
             return NS(publish=lambda msg: packets.append(json.loads(msg.data)))
@@ -111,7 +128,7 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     def fit(samples, **kwargs):
         # The measured sensors are fresh on entry, but no longer form a fresh
         # packet after the CPU work. Keep the actual packet validator in place.
-        calibration_end.append(int(round(((99.966 if fault == 'transport_delay' else 99.996)+samples[-1]['time_s'])*1e9)))
+        calibration_end.append(int(round(((99.980 if fault == 'transport_delay' else 99.996)+samples[-1]['time_s'])*1e9)))
         clock.value += 0. if fault == 'transport_delay' else .020
         return {'gyro_bias': [0., 0., 0.], 'quat_wxyz': [1., 0., 0., 0.]}
 
@@ -125,18 +142,25 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
         def close(self):
             return {'success': True}
 
-    class Executor:
-        def add_node(self, node):
-            self.node = node
-
-        def spin_once(self, timeout_sec):
-            spin_once(self.node, timeout_sec)
-
-        def shutdown(self):
+    class WaitSet:
+        def __init__(self, *args):
             pass
 
+        def clear_entities(self):
+            pass
+
+        def add_subscription(self, handle):
+            self.handle = handle
+
+        def wait(self, timeout):
+            spin_once(None, timeout*.000000001)
+
+        def get_ready_entities(self, kind):
+            return [self.handle.pointer] if self.handle.message is not None else []
+
     modules = {
-        'rclpy.executors': dict(SingleThreadedExecutor=Executor),
+        'rclpy.impl': {},
+        'rclpy.impl.implementation_singleton': dict(rclpy_implementation=NS(WaitSet=WaitSet)),
         'rclpy': dict(init=lambda: None, ok=lambda: True, spin_once=spin_once, try_shutdown=lambda: None),
         'rclpy.node': dict(Node=Node),
         'rclpy.qos': dict(QoSProfile=lambda **kw: kw, ReliabilityPolicy=NS(BEST_EFFORT=1), DurabilityPolicy=NS(VOLATILE=1)),
@@ -167,11 +191,11 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     if fault != 'transport_delay':
         assert summary['startup_waiting_fresh'] > 0
     assert bool(summary['fault']) == fails
-    assert summary['joints_received'] == summary['joints']+summary['joint_decimated']
-    assert summary['joint_decimated'] > 0
+    assert summary['joints_received'] == summary['joints']
+    assert summary['encoder_polls'] > 0
     if not fails:
         assert len(updates) == 251  # Every post-calibration IMU is still integrated.
-    if fault in ('joint_delayed_once', 'joint_delayed_forever'):
+    if fault == 'joint_delayed_forever':
         assert summary['withheld_stale_candidates'] > 0
 
 

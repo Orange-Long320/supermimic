@@ -20,7 +20,9 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--plan',type=Path,required=True)
     p.add_argument('--consent',type=Path,required=True);p.add_argument('--request-policy',action='store_true')
     p.add_argument('--keyboard-port',type=int,help='Loopback-only keyboard page; no motor failsafe')
-    p.add_argument('--isolated-prefix');a=p.parse_args()
+    p.add_argument('--isolated-prefix');p.add_argument('--startup-ready-file',type=Path);a=p.parse_args()
+    if a.request_policy and a.startup_ready_file:
+        raise ValueError('Warmup marker is only valid for the preparation worker')
     if a.keyboard_port is not None and (a.request_policy or not 1024<=a.keyboard_port<=65535):
         raise ValueError('Invalid keyboard listener configuration')
     if a.isolated_prefix:
@@ -92,8 +94,18 @@ def main():
         policy.infer(np.zeros(990,dtype=np.float32),warm_goal)
     target_topic=(a.isolated_prefix+'/control_target' if a.isolated_prefix else '/supermimic/x2/control_target')
     state_topic=(a.isolated_prefix+'/policy_state' if a.isolated_prefix else '/supermimic/x2_online_lio/policy_state')
-    deadline=time.monotonic()+2.
-    while time.monotonic()<deadline:rclpy.spin_once(node,timeout_sec=.05)
+    if a.startup_ready_file:
+        # Models are warm, but no target publisher has been created yet.
+        with a.startup_ready_file.open('x') as ready:
+            json.dump({'model_warm':True,'backend':plan['policy_backend'],
+                       'wall':time.time(),'target_publisher_created':False},ready)
+        deadline=time.monotonic()+30.
+        while time.monotonic()<deadline:
+            if node.count_publishers(state_topic)==1 and node.count_subscribers(target_topic)==1:break
+            rclpy.spin_once(node,timeout_sec=.05)
+    else:
+        deadline=time.monotonic()+2.
+        while time.monotonic()<deadline:rclpy.spin_once(node,timeout_sec=.05)
     if node.count_publishers(target_topic):raise ValueError('Another policy worker exists')
     state_publishers=node.count_publishers(state_topic);target_subscribers=node.count_subscribers(target_topic)
     if state_publishers!=1 or target_subscribers!=1:

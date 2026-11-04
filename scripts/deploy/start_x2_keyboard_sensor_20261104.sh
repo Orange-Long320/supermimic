@@ -89,7 +89,7 @@ echo "   in the first second because the body starts ~19 deg forward."
 echo "== stand anchor x/y feedback enabled (original reference position hold)"
 echo "== all joint position targets are not range-clipped; downstream behavior is unverified"
 echo "== preparation ${PREP}s, then keyboard policy until interrupted"
-SM_PREP_SECONDS="$PREP" SM_KEYBOARD_PORT="$KEYBOARD_PORT" SM_WORKER_SCRIPT="$LIB/x2_11500_worker_keyboard_20261103.py" \
+SM_PREP_SECONDS="$PREP" SM_KEYBOARD_PORT="$KEYBOARD_PORT" SM_WORKER_SCRIPT="$REL/launcher/x2_11500_worker.py" \
   SM_PUBLISHER_SCRIPT="$LIB/x2_hardware_publisher_unclipped_all_20261103.py" \
   SM_RECORDER_SCRIPT="$LIB/record_x2_joint_stream_20261103.py" \
   bash "$REL/launcher/run_x2_keyboard_sensor_20261104.sh" "$REL" "$TRIAL"

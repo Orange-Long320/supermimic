@@ -16,7 +16,7 @@ GROUPS = ('leg', 'waist', 'head', 'arm')
 # Operator requested modest transport-jitter tolerance on 2026-11-04.
 MAX_IMU_GAP_S = .040
 MAX_IMU_RECEIVE_GAP_S = .050
-ENCODER_PERIOD_NS = 10_000_000  # 100 Hz encoders for 50 Hz policy states.
+ENCODER_PERIOD_S = .010  # 100 Hz encoder reads for 50 Hz policy states.
 
 
 def pelvis_mount(urdf):
@@ -62,7 +62,7 @@ def main():
     import numpy as np
     import rclpy
     from rclpy.node import Node
-    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.impl.implementation_singleton import rclpy_implementation as ros_impl
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
     from sensor_msgs.msg import Imu
     from std_msgs.msg import String
@@ -88,7 +88,7 @@ def main():
              'calibration_compute_ms': None, 'startup_waiting_fresh': 0,
              'withheld_stale_candidates': 0, 'max_imu_callback_ms': 0.,
              'max_joint_callback_ms': 0., 'max_heartbeat_work_ms': 0., 'alignment_checks': 0,
-             'startup_stale_imu': 0, 'joints_received': 0, 'joint_decimated': 0}
+             'startup_stale_imu': 0, 'joints_received': 0, 'encoder_polls': 0}
     last_stamp = None
     origin_ns = None
     last_publish = None
@@ -99,7 +99,6 @@ def main():
     calibrated_at = None
     fault = None
     node = None
-    executor = None
     if a.diagnostic_calibration:
         calibration = json.loads(a.diagnostic_calibration.read_text())
         estimator.filter.initialize(calibration)
@@ -119,11 +118,6 @@ def main():
             joint_seen_stamps[group] = stamp
             if int(msg.state.value) != 0:
                 raise ValueError('Joint state domain is not position')
-            # IMU propagation remains full rate. Encoder parsing/logging only
-            # needs two observations per 50 Hz state; keep causal header times.
-            if stats['calibrated'] and history[group] and stamp-history[group][-1]['stamp_ns'] < ENCODER_PERIOD_NS:
-                stats['joint_decimated'] += 1
-                return
             row = {'event': 'joint', 'group': group, 'stamp_ns': stamp, 'recv': time.time(),
                    'domain': int(msg.state.value),
                    'position': {j.name: float(j.position) for j in msg.joints},
@@ -283,15 +277,38 @@ def main():
                     stats[key] = max(stats[key], (time.monotonic()-begin)*1000)
             return invoke
 
-        subscriptions = [node.create_subscription(Imu, '/aima/hal/imu/torso/state',
-                         timed_callback(on_imu, 'max_imu_callback_ms'), qos)]
-        subscriptions += [node.create_subscription(JointStateArray, '/aima/hal/joint/'+g+'/state',
-                           timed_callback(lambda msg, group=g: on_joint(group, msg),
-                                          'max_joint_callback_ms'), qos) for g in GROUPS]
-        executor = SingleThreadedExecutor()
-        executor.add_node(node)
+        # Use Humble's wait_for_message take/wait API directly. A general
+        # executor rebuilds task/waitable machinery for each high-rate packet.
+        imu_subscription = node.create_subscription(Imu, '/aima/hal/imu/torso/state',
+                                                     lambda msg: None, qos)
+        receive_imu = timed_callback(on_imu, 'max_imu_callback_ms')
+        encoder_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
+                                 durability=DurabilityPolicy.VOLATILE)
+        encoder_subscriptions = {g: node.create_subscription(
+            JointStateArray, '/aima/hal/joint/'+g+'/state', lambda msg: None, encoder_qos)
+            for g in GROUPS}
+        encoder_callbacks = {g: timed_callback(lambda msg, group=g: on_joint(group, msg),
+                                               'max_joint_callback_ms') for g in GROUPS}
+        wait_set = ros_impl.WaitSet(1, 0, 0, 0, 0, 0, node.context.handle)
+        last_encoder_poll = None
         while rclpy.ok() and (a.seconds <= 0 or time.monotonic()-started < a.seconds):
-            executor.spin_once(timeout_sec=.005)
+            wait_set.clear_entities()
+            wait_set.add_subscription(imu_subscription.handle)
+            wait_set.wait(5_000_000)
+            if imu_subscription.handle.pointer in wait_set.get_ready_entities('subscription'):
+                with imu_subscription.handle:
+                    received = imu_subscription.handle.take_message(imu_subscription.msg_type, imu_subscription.raw)
+                if received is not None:
+                    receive_imu(received[0])
+            now = time.monotonic()
+            if not stats['calibrated'] or last_encoder_poll is None or now-last_encoder_poll >= ENCODER_PERIOD_S:
+                last_encoder_poll = now
+                stats['encoder_polls'] += 1
+                for group, subscription in encoder_subscriptions.items():
+                    with subscription.handle:
+                        received = subscription.handle.take_message(subscription.msg_type, subscription.raw)
+                    if received is not None:
+                        encoder_callbacks[group](received[0])
             if processing and (not a.diagnostic_calibration or origin_ns is not None):
                 if time.monotonic()-started > 20 and not stats['calibrated']:
                     raise ValueError('No valid three-second stationary window within 20 seconds')
@@ -310,8 +327,6 @@ def main():
         (a.out/'ready.json').unlink(missing_ok=True)
         if calibration is not None:
             (a.out/'calibration.json').write_text(json.dumps(calibration, indent=2)+'\n')
-        if executor is not None:
-            executor.shutdown()
         if node is not None:
             node.destroy_node()
         rclpy.try_shutdown()
