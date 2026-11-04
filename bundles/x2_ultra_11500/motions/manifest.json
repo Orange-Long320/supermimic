@@ -1,0 +1,163 @@
+{
+  "clips": [
+    {
+      "name": "walk",
+      "sha256": "cbf6101c263533dccc18b45f2e5a7e5af218b27b83bf3d517370d0d62bf21011",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/walk.npz",
+      "type": "prior_reference"
+    },
+    {
+      "name": "walk_stop",
+      "sha256": "89d9925c087f2d8aae1bbacdb2a3a991082b04a658619479e9bf890faf843121",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/walk.npz",
+      "source_sha256": "cbf6101c263533dccc18b45f2e5a7e5af218b27b83bf3d517370d0d62bf21011",
+      "release_frame": 102,
+      "audit": {
+        "brake_seconds": 0.6,
+        "entry_joint_velocity_change_rms": 0.29642712834353724,
+        "brake_max_speed_ratio": 0.14378652572631836,
+        "brake_max_hard_excess_rad": 4.0193176271685616e-06,
+        "brake_max_step_rms_rad": 0.022946923971176147,
+        "brake_min_foot_height_m": [
+          0.006262628256667711,
+          1.0743297175486166e-08
+        ],
+        "brake_yaw_range_deg": 0.0015502733159760377,
+        "max_ankle_target_error_m": 0.008544114229853232,
+        "scope": "Kinematic screen only; no contact force or dynamics proof",
+        "entry_root_height_step_m": -0.0006881356239318848,
+        "previous_root_height_step_m": -1.7881393432617188e-07,
+        "brake_max_root_height_step_m": 0.0006881356239318848
+      },
+      "type": "exploratory_stop"
+    },
+    {
+      "name": "backward",
+      "sha256": "77d0c1351f7443a6aed66b2314ffad8abafc482bfb004c6eb8cd759e068dd03b",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/backward.npz",
+      "type": "prior_reference"
+    },
+    {
+      "name": "backward_stop",
+      "sha256": "0194f09811f7785b194c83202b16d2d03cdc01e4e4a29f268ebb87e80aab68ff",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/backward.npz",
+      "source_sha256": "77d0c1351f7443a6aed66b2314ffad8abafc482bfb004c6eb8cd759e068dd03b",
+      "release_frame": 102,
+      "audit": {
+        "brake_seconds": 0.6,
+        "entry_joint_velocity_change_rms": 0.2551152077135025,
+        "brake_max_speed_ratio": 0.1342641830444336,
+        "brake_max_hard_excess_rad": 4.0193176271685616e-06,
+        "brake_max_step_rms_rad": 0.01947602815926075,
+        "brake_min_foot_height_m": [
+          0.006262628256667711,
+          1.0743297175486166e-08
+        ],
+        "brake_yaw_range_deg": 0.0015502733159760377,
+        "max_ankle_target_error_m": 0.00900606785181637,
+        "scope": "Kinematic screen only; no contact force or dynamics proof",
+        "entry_root_height_step_m": -0.0006590485572814941,
+        "previous_root_height_step_m": -4.76837158203125e-07,
+        "brake_max_root_height_step_m": 0.0006590485572814941
+      },
+      "type": "exploratory_stop"
+    },
+    {
+      "name": "turn_left_inplace",
+      "sha256": "580605e38a7987d1205953dd6e2f145cd619db15d1fcfce5812789d8e5b5092b",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/turn_left_inplace.npz",
+      "type": "prior_reference"
+    },
+    {
+      "name": "turn_left_inplace_stop",
+      "sha256": "1e084a18f452941e5c0337a26afe17195ce1eaff790b78513c32a12df70ed62f",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/turn_left_inplace.npz",
+      "source_sha256": "580605e38a7987d1205953dd6e2f145cd619db15d1fcfce5812789d8e5b5092b",
+      "release_frame": 102,
+      "audit": {
+        "brake_seconds": 0.6,
+        "entry_joint_velocity_change_rms": 0.23827113003228337,
+        "brake_max_speed_ratio": 0.138393767674764,
+        "brake_max_hard_excess_rad": 4.0193176271685616e-06,
+        "brake_max_step_rms_rad": 0.020083077251911163,
+        "brake_min_foot_height_m": [
+          0.006262627950603162,
+          -0.0006900906501621992
+        ],
+        "brake_yaw_range_deg": 0.0015469710113279783,
+        "max_ankle_target_error_m": 0.01072259336978092,
+        "scope": "Kinematic screen only; no contact force or dynamics proof",
+        "entry_root_height_step_m": -0.0006199479103088379,
+        "previous_root_height_step_m": -0.0005714297294616699,
+        "brake_max_root_height_step_m": 0.0007761716842651367
+      },
+      "type": "exploratory_stop"
+    },
+    {
+      "name": "jog",
+      "sha256": "456d9d14d08ff6245dcfb57b393c9e8b0bb05004f5fd68fcb424cab567879511",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/jog.npz",
+      "type": "prior_reference"
+    },
+    {
+      "name": "jog_stop",
+      "sha256": "4ffa783b3cedc0d730a7dc992a0a59e13c7e1b8fe843c0ee61150831f5f37783",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/jog.npz",
+      "source_sha256": "456d9d14d08ff6245dcfb57b393c9e8b0bb05004f5fd68fcb424cab567879511",
+      "release_frame": 65,
+      "audit": {
+        "brake_seconds": 0.6,
+        "entry_joint_velocity_change_rms": 0.2471227943829262,
+        "brake_max_speed_ratio": 0.14953681627909343,
+        "brake_max_hard_excess_rad": 4.0193176271685616e-06,
+        "brake_max_step_rms_rad": 0.024235188961029053,
+        "brake_min_foot_height_m": [
+          -0.007807158831731852,
+          1.1121829804339178e-08
+        ],
+        "brake_yaw_range_deg": 0.01216126267724768,
+        "max_ankle_target_error_m": 0.012021394370003666,
+        "scope": "Kinematic screen only; no contact force or dynamics proof",
+        "entry_root_height_step_m": -0.00027555227279663086,
+        "previous_root_height_step_m": -0.001972794532775879,
+        "brake_max_root_height_step_m": 0.0014098882675170898
+      },
+      "type": "exploratory_stop"
+    },
+    {
+      "name": "turn_right_inplace",
+      "sha256": "ccfb704d86da32b454aec97f598342dc6542d3157c34a58deed0e9b90101ca4c",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/turn_right_inplace.npz",
+      "type": "prior_reference"
+    },
+    {
+      "name": "turn_right_inplace_stop",
+      "sha256": "e156fcc14c9fe1d7edbf7c26dd2e213c1bc217fe947f0e4cf9ee22d52161cdfb",
+      "source": "/home/2025-Long.xh/HHD/data/supermimic/logs/five_gait_stops_5h_20261030_r1/grounded/turn_right_inplace.npz",
+      "source_sha256": "ccfb704d86da32b454aec97f598342dc6542d3157c34a58deed0e9b90101ca4c",
+      "release_frame": 102,
+      "audit": {
+        "brake_seconds": 0.6,
+        "entry_joint_velocity_change_rms": 0.23611015610984445,
+        "brake_max_speed_ratio": 0.14003651936848957,
+        "brake_max_hard_excess_rad": 4.0193176271685616e-06,
+        "brake_max_step_rms_rad": 0.019946403801441193,
+        "brake_min_foot_height_m": [
+          0.006262628073232478,
+          -0.0006900890287644609
+        ],
+        "brake_yaw_range_deg": 0.0015504578045592247,
+        "max_ankle_target_error_m": 0.012132536538324499,
+        "scope": "Kinematic screen only; no contact force or dynamics proof",
+        "entry_root_height_step_m": -0.0006174445152282715,
+        "previous_root_height_step_m": -0.0005715489387512207,
+        "brake_max_root_height_step_m": 0.0007796883583068848
+      },
+      "type": "exploratory_stop"
+    }
+  ],
+  "initial_checkpoint_sha256": "1cdf90f2942ec35e1f9ea971cb9a8f01622e8fd43c3ddc16babf57a5a27000cb",
+  "initial_checkpoint_iteration": 1580,
+  "pose_sha256": "724e614ab0434c565e03f6f4cded709597d024ca46f893d9601b1730c26b2288",
+  "scope": "Kinematic references; contact forces and physical stop stability not validated"
+}

@@ -2,3 +2,6 @@
 *.png binary
 *.gif binary
 *.mp4 binary
+bundles/x2_ultra_11500/checkpoint/*.pt filter=lfs diff=lfs merge=lfs -text
+bundles/x2_ultra_11500/model/meshes/*.stl filter=lfs diff=lfs merge=lfs -text
+bundles/x2_ultra_11500/motions/*.npz filter=lfs diff=lfs merge=lfs -text

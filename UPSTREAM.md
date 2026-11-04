@@ -15,7 +15,7 @@ We added embodiment-dependent dimensions, robot profiles, LAFAN skeleton/frame/p
 
 Original paper: **SuperMimic: Scaling Humanoid Whole-Body Control with One Differentiable World Model**, [arXiv:2610.28480](https://arxiv.org/abs/2610.28480).
 
-Robot descriptions, meshes, datasets and third-party model weights are not redistributed here. Fetch them from the original projects and retain their licenses/notices; this repository's MIT license does not replace those terms. X2 reference files are fetched externally rather than relicensed as our own code.
+The selected X2 Ultra model, meshes, trained checkpoint and five-gait reference set are distributed in `bundles/x2_ultra_11500/`; see its README and bundled third-party licenses. Other robot descriptions, datasets and third-party model weights are not redistributed here. This repository's MIT license does not replace the terms of third-party materials.
 
 `scripts/setup/build_robot_assets.py` imports the installed mjlab G1 XML and mesh bundle into ignored `assets/robots/g1/`, retaining the distribution's license under `licenses/mjlab/` and recording source/version/file hashes in `source.json`. Runtime geometry comes from this local copy; G1 control and collision configuration still comes from the pinned mjlab package. Rebuilding preserves existing local G1 assets.
 
