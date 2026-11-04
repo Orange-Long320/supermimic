@@ -34,6 +34,9 @@ def main():
     p.add_argument('--headless', action='store_true')
     p.add_argument('--state-source', choices=('imu', 'truth-diagnostic'), default='imu',
                    help='Sensor-only IMU by default; truth is an explicit diagnostic comparison')
+    p.add_argument('--imu-initialization', choices=('static', 'legacy-diagnostic'), default='static')
+    p.add_argument('--imu-no-zupt', action='store_true')
+    p.add_argument('--imu-no-gravity-leveling', action='store_true')
     p.add_argument('--schedule', type=Path, help='Headless-only JSON [seconds, mode] pairs')
     a = p.parse_args()
     if a.out.exists() or a.seconds <= 0 or (a.schedule and not a.headless):
@@ -93,9 +96,15 @@ def main():
         raise ValueError('Policy fixture mismatch')
     a.out.mkdir(parents=True)
     imu_log = (a.out/'imu.jsonl').open('x')
+    truth_log = (a.out/'truth-imu.jsonl').open('x')
     data = mujoco.MjData(model)
     history = deque(maxlen=10); previous = np.zeros(n); target = initial_q.copy()
     tracker = None; observer = None; resets = 0; failed = None; paused = False
+    calibration = None
+    if a.state_source == 'imu' and a.imu_initialization == 'static':
+        from supermimic.deploy.native_static_calibration import collect_native_static_calibration
+        calibration = collect_native_static_calibration(assets/'model_info/scene.xml', spec,
+                                                         initial_pos, initial_rot, initial_q, a.out)
 
     def sample_imu():
         # Sensor adapter: no framequat, framepos, root velocity, contact or body
@@ -104,7 +113,13 @@ def main():
         acc = data.sensordata[accel_adr:accel_adr+3].copy()
         observer.update(float(data.time), gyro, acc)
         imu_log.write(json.dumps({'time_s': float(data.time), 'gyro': gyro.tolist(),
-                                  'acceleration': acc.tolist(), 'resets': resets})+'\n')
+                                  'acceleration': acc.tolist(), 'joint_pos': data.qpos[qadr].tolist(),
+                                  'joint_vel': data.qvel[vadr].tolist(), 'resets': resets})+'\n')
+        # Separate, write-only oracle recorder. Never read by the state observer
+        # or controller; used after the run to score individual error sources.
+        truth_log.write(json.dumps({'time_s': float(data.time), 'position': data.qpos[:3].tolist(),
+                                    'quat_wxyz': data.qpos[3:7].tolist(),
+                                    'velocity': data.qvel[:3].tolist(), 'resets': resets})+'\n')
 
     def reset():
         nonlocal tracker, observer, previous, target, failed
@@ -115,7 +130,12 @@ def main():
         mujoco.mj_forward(model, data)
         history.clear(); previous = np.zeros(n); target = initial_q.copy(); failed = None
         if a.state_source == 'imu':
-            observer = EncoderImuState(assets/'fk-only/fk-only.xml', names, model.site_pos[site])
+            observer = EncoderImuState(assets/'fk-only/fk-only.xml', names, model.site_pos[site],
+                                      require_initialization=calibration is not None)
+            if calibration is not None:
+                observer.filter.initialize(calibration)
+            observer.filter.zupt = not a.imu_no_zupt
+            observer.filter.gravity_leveling = not a.imu_no_gravity_leveling
             sample_imu()
             estimated_pos, estimated_quat, _, _ = observer.state(data.qpos[qadr])
             tracker = SkillGoal(assets/'dataset', profile, estimated_pos, estimated_quat)
@@ -217,7 +237,7 @@ def main():
                 with snapshot_lock:
                     snapshot_qpos = data.qpos.copy(); snapshot_qvel = data.qvel.copy(); snapshot_time = float(data.time)
                 tick_times.append(time.monotonic()-tick)
-                if frames and frames % 100 == 0: log.flush(); imu_log.flush()
+                if frames and frames % 100 == 0: log.flush(); imu_log.flush(); truth_log.flush()
                 if failed and a.headless: break
                 deadline += .02
                 if time.monotonic()-deadline > .5: deadline = time.monotonic()
@@ -274,12 +294,16 @@ def main():
     finally:
         stop.set(); worker.join(timeout=5.)
         if worker.is_alive(): raise RuntimeError("Physics worker did not stop")
-        log.close(); imu_log.close(); tracker.close()
+        log.close(); imu_log.close(); truth_log.close(); tracker.close()
         if window is not None:
             context.free(); glfw.destroy_window(window); glfw.terminate()
         result = {'scope': 'native MuJoCo CPU policy diagnostic; not official ROS pipeline or hardware validation',
                   'mujoco': mujoco.__version__, 'frames': frames, 'sim_seconds': float(data.time),
                   'state_source': a.state_source,
+                  'imu_initialization': a.imu_initialization,
+                  'gyro_bias': observer.filter.gyro_bias.tolist() if observer is not None else None,
+                  'gravity_leveling': not a.imu_no_gravity_leveling,
+                  'zupt': not a.imu_no_zupt,
                   'imu_samples': observer.filter.samples if observer is not None else 0,
                   'zupt_updates': observer.filter.zupt_updates if observer is not None else 0,
                   'wall_seconds': time.monotonic()-started, 'resets': resets, 'failure': failed,
