@@ -20,6 +20,7 @@ from scipy.spatial.transform import Rotation
 
 from supermimic.deploy.numpy_policy import NumpyPolicy
 from supermimic.deploy.skill_goal import SkillGoal
+from supermimic.deploy.imu_dead_reckoning import EncoderImuState
 
 
 POLICY_ARCHIVE_SHA = 'd59809cb544e70c775bf0180174f5f57b3e5572a6639fe0821697639cf798063'
@@ -31,6 +32,8 @@ def main():
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--seconds', type=float, default=3600.)
     p.add_argument('--headless', action='store_true')
+    p.add_argument('--state-source', choices=('imu', 'truth-diagnostic'), default='imu',
+                   help='Sensor-only IMU by default; truth is an explicit diagnostic comparison')
     p.add_argument('--schedule', type=Path, help='Headless-only JSON [seconds, mode] pairs')
     a = p.parse_args()
     if a.out.exists() or a.seconds <= 0 or (a.schedule and not a.headless):
@@ -64,6 +67,17 @@ def main():
     kd = np.array([spec['damping'][name] for name in names])
     # The official bridge uses pelvis IMU, with pelvis odometry for the goal.
     imu_body = model.body('pelvis').id
+    gyro_sensor = model.sensor('body-angular-velocity').id
+    accel_sensor = model.sensor('body-linear-acceleration').id
+    gyro_adr = int(model.sensor_adr[gyro_sensor]); accel_adr = int(model.sensor_adr[accel_sensor])
+    site = model.site('imu_0').id
+    if (model.site_bodyid[site] != imu_body or
+            not np.allclose(model.site_quat[site], [1., 0., 0., 0.]) or
+            model.sensor_objid[gyro_sensor] != site or model.sensor_objid[accel_sensor] != site):
+        raise ValueError('Expected the declared fixed pelvis IMU mount')
+    if abs(round(.002/model.opt.timestep)*model.opt.timestep-.002) > 1e-9:
+        raise ValueError('Scene timestep must represent 500 Hz IMU acquisitions')
+    imu_substeps = round(.002/model.opt.timestep)
     with np.load(assets/'dataset/walk_stop.npz', allow_pickle=False) as z:
         if list(z['joint_names']) != names:
             raise ValueError('Reference joint order mismatch')
@@ -80,31 +94,49 @@ def main():
     a.out.mkdir(parents=True)
     data = mujoco.MjData(model)
     history = deque(maxlen=10); previous = np.zeros(n); target = initial_q.copy()
-    tracker = None; resets = 0; failed = None; paused = False
+    tracker = None; observer = None; resets = 0; failed = None; paused = False
+
+    def sample_imu():
+        # Sensor adapter: no framequat, framepos, root velocity, contact or body
+        # pose reads. mj_forward has generated these physical IMU channels.
+        observer.update(float(data.time), data.sensordata[gyro_adr:gyro_adr+3].copy(),
+                        data.sensordata[accel_adr:accel_adr+3].copy())
 
     def reset():
-        nonlocal tracker, previous, target, failed
+        nonlocal tracker, observer, previous, target, failed
         if tracker is not None:
             tracker.close()
         mujoco.mj_resetData(model, data)
         data.qpos[:7] = np.r_[initial_pos, initial_rot]; data.qpos[qadr] = initial_q
         mujoco.mj_forward(model, data)
         history.clear(); previous = np.zeros(n); target = initial_q.copy(); failed = None
-        tracker = SkillGoal(assets/'dataset', profile, initial_pos, initial_rot)
+        if a.state_source == 'imu':
+            observer = EncoderImuState(assets/'fk-only/fk-only.xml', names, model.site_pos[site])
+            sample_imu()
+            estimated_pos, estimated_quat, _, _ = observer.state(data.qpos[qadr])
+            tracker = SkillGoal(assets/'dataset', profile, estimated_pos, estimated_quat)
+        else:
+            tracker = SkillGoal(assets/'dataset', profile, initial_pos, initial_rot)
 
     reset()
     def control_step(current_mode, tick):
         nonlocal failed, previous, target, frames
         mode = current_mode
         q = data.qpos[qadr].copy(); velocity = data.qvel[vadr].copy()
-        w, x, y, z = data.xquat[imu_body]
-        gravity = np.array([2*(w*y-x*z), -2*(w*x+y*z), -1+2*(x*x+y*y)])
-        spatial = np.zeros(6)
-        mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, imu_body, spatial, 1)
-        history.append((q-default, velocity, spatial[:3].copy(), gravity, previous.copy()))
+        if observer is not None:
+            position, quat, omega, gravity = observer.state(q)
+        else:
+            # Explicit oracle diagnostic only; never the default policy path.
+            position, quat = data.qpos[:3].copy(), data.qpos[3:7].copy()
+            w, x, y, z = data.xquat[imu_body]
+            gravity = np.array([2*(w*y-x*z), -2*(w*x+y*z), -1+2*(x*x+y*y)])
+            spatial = np.zeros(6)
+            mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, imu_body, spatial, 1)
+            omega = spatial[:3].copy()
+        history.append((q-default, velocity, omega, gravity, previous.copy()))
         if len(history) == 10:
-            goal = tracker.goal(data.qpos[:3].copy(), data.qpos[3:7].copy(), q, mode)
-            if abs(float(goal[2*n+9])-data.qpos[2]) > .25 or abs(float(goal[2*n+2])-gravity[2]) > .8:
+            goal = tracker.goal(position, quat, q, mode)
+            if abs(float(goal[2*n+9])-position[2]) > .25 or abs(float(goal[2*n+2])-gravity[2]) > .8:
                 failed = {'time_s': float(data.time), 'reason': 'root height or tilt termination'}
             else:
                 obs = np.concatenate([frame[term] for term in range(5) for frame in history])
@@ -112,13 +144,21 @@ def main():
                 inference_times.append(time.perf_counter()-before)
                 target = default+scale*action; previous = action; tracker.advance()
         if failed is None:
-            for _ in range(substeps):
+            for substep in range(substeps):
                 torque = kp*(target-data.qpos[qadr])-kd*data.qvel[vadr]
                 data.ctrl[motors] = np.clip(torque, limits[:, 0], limits[:, 1])
                 mujoco.mj_step(model, data)
+                if observer is not None and (substep+1) % imu_substeps == 0:
+                    # Recompute sensors at their acquisition timestamp so their
+                    # values are not paired with the previous integration step.
+                    mujoco.mj_forward(model, data)
+                    sample_imu()
             mujoco.mj_forward(model, data)
+            estimated = observer.state(data.qpos[qadr])[0] if observer is not None else position
             log.write(json.dumps({'wall_s': tick-started, 'time_s': float(data.time), 'mode': mode,
                                   'root': data.qpos[:3].tolist(), 'reference': tracker.position.tolist(),
+                                  'estimated_root': estimated.tolist(), 'state_source': a.state_source,
+                                  'truth_scope': 'rendering and offline scoring only',
                                   'resets': resets})+'\n')
             frames += 1
 
@@ -154,7 +194,7 @@ def main():
     inference_times = []; tick_times = deque(maxlen=100)
     started = time.monotonic(); frames = 0; mode = 'stand'; screenshot_written = False
     next_render = started
-    print(json.dumps({'event': 'ready', 'local': True, 'policy_fixture_error': fixture_error,
+    print(json.dumps({'event': 'ready', 'local': True, 'state_source': a.state_source, 'policy_fixture_error': fixture_error,
                       'mujoco': mujoco.__version__, 'keyboard': 'W/S/A/D, Shift+W, space pause, R reset, Esc close'}), flush=True)
     log = (a.out/'frames.jsonl').open('x')
     def control_loop():
@@ -208,7 +248,7 @@ def main():
             mujoco.mjr_render(viewport, scene, context)
             status = 'FAILED - R to reset' if failed else 'PAUSED' if paused else mode
             mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                               viewport, 'LOCAL X2 - '+status, 'W/S walk | A/D turn | Shift+W jog\nSpace pause | R reset | Esc exit', context)
+                               viewport, 'LOCAL X2 '+a.state_source+' - '+status, 'W/S walk | A/D turn | Shift+W jog\nSpace pause | R reset | Esc exit', context)
             if not screenshot_written:
                 pixels = np.zeros((height, width, 3), dtype=np.uint8)
                 mujoco.mjr_readPixels(pixels, None, viewport, context)
@@ -234,6 +274,9 @@ def main():
             context.free(); glfw.destroy_window(window); glfw.terminate()
         result = {'scope': 'native MuJoCo CPU policy diagnostic; not official ROS pipeline or hardware validation',
                   'mujoco': mujoco.__version__, 'frames': frames, 'sim_seconds': float(data.time),
+                  'state_source': a.state_source,
+                  'imu_samples': observer.filter.samples if observer is not None else 0,
+                  'zupt_updates': observer.filter.zupt_updates if observer is not None else 0,
                   'wall_seconds': time.monotonic()-started, 'resets': resets, 'failure': failed,
                   'policy_fixture_max_error': fixture_error,
                   'inference_median_ms': float(np.median(inference_times)*1000) if inference_times else None,

@@ -11,6 +11,11 @@ python="$runtime/venv/bin/python"
 export PYTHONPATH="$runtime/runtime-src:$runtime/vendor-mjlab-math"
 export SM_ROBOT=x2_ultra SM_ROBOT_SPEC="$runtime/assets/fk-only/profile.json"
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+# Refresh our dedicated inference namespace from this checkout; the sole shim
+# prevents loading the unrelated full mjlab training environment on the Mac.
+cp -R "$root/src/supermimic/." "$runtime/runtime-src/supermimic/"
+printf '%s\n' '"""Inference-only namespace; no training environment imports."""' \
+  > "$runtime/runtime-src/supermimic/envs/__init__.py"
 out="$root/outputs/x2_local_keyboard_$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$root/outputs"
 exec "$python" "$root/scripts/evaluation/play_native_keyboard.py" \
