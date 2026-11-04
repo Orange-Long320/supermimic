@@ -2,6 +2,16 @@
 
 本项目基于 SuperMimic，面向 X2 Ultra 旗舰版开展动作重定向、世界模型训练、仿真评测和实机部署准备。参考实现及固定版本见 [UPSTREAM.md](UPSTREAM.md)；机器人资产与上游说明见 [上游 README](docs/upstream/README.md)。
 
+## 项目分工
+
+当前目录继续维护 **键盘控制与实机准备**。**ACP 上楼梯**在独立的
+`../supermimic-stairs` 工作区、`codex/x2-stairs` 分支开发；它的源码修改不会改变当前工作区。
+键盘速度训练保留原有 `codex/x2-velocity-control` 工作区，不把它和当前部署版本混为一套源码。
+
+项目入口、版本、环境与产物隔离规则见 [项目管理](projects/README.md)。
+[键盘项目](projects/keyboard/README.md) · [楼梯项目](projects/stairs/README.md)。
+历史实验目录保留，不批量搬迁运行入口；新任务按项目归属进入对应工作区。
+
 ## 项目状态
 
 - 用户反馈 2026-11-03 的 11500 实机部署成功，策略接管与五类键盘动作请求已有运行日志；该次同时出现状态租约故障和异常大的策略目标，尚未通过连续控制或安全验收。见 [实机部署记录](docs/X2_HARDWARE_DEPLOYMENT_20261103.md)。

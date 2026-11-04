@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "workspaces": {
+    "keyboard": {
+      "path": ".",
+      "branch": "main",
+      "baseline": "4296d93a2967310a2f63b6bb6346688d2cb452af",
+      "purpose": "X2 keyboard reference control and hardware preparation",
+      "artifact_namespace": "keyboard",
+      "environment": "/home/2025-Long.xh/HHD/venvs/supermimic",
+      "status": "existing implementation; hardware acceptance remains incomplete"
+    },
+    "keyboard-training": {
+      "path": "~/.codex/worktrees/x2-velocity-control/supermimic",
+      "branch": "codex/x2-velocity-control",
+      "baseline": "88242c190ae337ea74f061f5bafb7b9130455805",
+      "purpose": "Pinned velocity/keyboard training implementation required by historical launchers",
+      "artifact_namespace": "keyboard",
+      "environment": "/home/2025-Long.xh/HHD/venvs/supermimic",
+      "status": "preserved existing worktree; not merged into main"
+    },
+    "stairs": {
+      "path": "../supermimic-stairs",
+      "branch": "codex/x2-stairs",
+      "baseline": "4296d93a2967310a2f63b6bb6346688d2cb452af",
+      "purpose": "X2 feet-only stairs, ACP-style planning and SuperMimic imagination",
+      "artifact_namespace": "stairs",
+      "environment": "/home/2025-Long.xh/HHD/venvs/supermimic-stairs",
+      "status": "development; no stairs policy or training acceptance yet"
+    }
+  }
+}
