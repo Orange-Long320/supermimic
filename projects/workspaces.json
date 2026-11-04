@@ -2,7 +2,7 @@
   "schema_version": 1,
   "workspaces": {
     "keyboard": {
-      "path": ".",
+      "path": "../supermimic",
       "branch": "main",
       "baseline": "4296d93a2967310a2f63b6bb6346688d2cb452af",
       "purpose": "X2 keyboard reference control and hardware preparation",
