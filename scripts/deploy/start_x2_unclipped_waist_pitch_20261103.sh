@@ -57,7 +57,7 @@ echo "== contract (simulator semantics)"
   --max-tilt 3.0 --max-tilt-delta 3.0 --max-angular-speed 100 \
   --max-tick-gap 0.6 --max-state-age 0.05 \
   --blend-seconds 0.001 --max-target-step 10 \
-  --prep-leg-kp-scale 3.5 --unbounded --zero-stand-anchor-xy --unclipped-waist-pitch-target --operator-confirms-support-and-estop \
+  --prep-leg-kp-scale 3.5 --unbounded --unclipped-waist-pitch-target --operator-confirms-support-and-estop \
   --out "$TRIAL/contract" --max-trial-seconds 30 --prep-seconds "$PREP" > /dev/null
 /usr/bin/python3 - "$TRIAL/contract/plan.json" <<'PY'
 import json, sys
@@ -77,7 +77,7 @@ echo
 echo "== operator: hold the emergency stop. No attitude guard, no ramp,"
 echo "   no step limit: this is the simulator's law. The policy may move fast"
 echo "   in the first second because the body starts ~19 deg forward."
-echo "== stand anchor x/y zeroed; this removes horizontal position hold"
+echo "== stand anchor x/y feedback enabled (original reference position hold)"
 echo "== waist pitch command target is not range-clipped; downstream behavior is unverified"
 echo "== preparation ${PREP}s, then policy up to ${ACTIVE}s"
 SM_PREP_SECONDS="$PREP" SM_ACTIVE_SECONDS="$ACTIVE" SM_WORKER_SCRIPT="$LIB/x2_11500_worker_unclipped_waist_20261103.py" \
