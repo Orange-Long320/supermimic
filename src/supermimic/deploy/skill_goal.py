@@ -143,6 +143,13 @@ class SkillGoal:
             self.scheduler.set_context(np.asarray(joints)-self.default, joint_velocity)
         if self.foot_idle is not None:
             self.foot_idle.prepare(self,position,quat_wxyz,joints,joint_velocity,base_angular_velocity,sample_time,mode)
+        if (self.anchor_obs and mode in ('turn_left_inplace', 'turn_right_inplace')
+                and mode != self.scheduler.requested):
+            # A new in-place turn holds its entry location, rather than chasing
+            # translation error accumulated by earlier walking. Register once:
+            # following measured XY every tick would remove position feedback.
+            # Keep heading and the committed transition window unchanged.
+            self.position[:2] = np.asarray(position, dtype=float)[:2]
         self.scheduler.select(mode)
         window = self.scheduler.window()
         if not self.anchor_obs:

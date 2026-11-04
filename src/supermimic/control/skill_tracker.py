@@ -75,6 +75,10 @@ class SkillTracker:
         self.yaw = Rotation.from_quat(q[[4, 5, 6, 3]]).as_euler('xyz')[2]
 
     def goal(self, mode):
+        if (self.anchor_obs and mode in ('turn_left_inplace', 'turn_right_inplace')
+                and mode != self.scheduler.requested):
+            # Match the deployment scheduler: a new turn holds its entry XY.
+            self.pos[:2] = self.env.sim.data.qpos[0, :2].cpu().numpy()-self.origin[:2]
         self.scheduler.select(mode)
         window = self.scheduler.window()
         if not self.anchor_obs:
