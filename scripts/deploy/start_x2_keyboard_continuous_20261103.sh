@@ -17,7 +17,7 @@ source /opt/ros/humble/setup.bash
 source /home/agi/aimdk/install/setup.bash
 
 B=/home/agi/lxh-supermimic
-REL=$B/releases/11500_candidate_20261102_r3
+REL=${SM_RELEASE:-$B/releases/11500_candidate_20261102_r3}
 LIB=$B/trials/11500_unvalidated_20261102_r1
 TRIAL=$B/trials/11500_prep_imu_20261102_r1/run-keyboard-$(date +%Y%m%d-%H%M%S)
 PREP=${SM_PREP_SECONDS:-20}

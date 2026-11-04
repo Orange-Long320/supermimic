@@ -97,3 +97,34 @@ env CUDA_VISIBLE_DEVICES=0 bash source/scripts/deploy/run_official_trial.sh \
 仿真使用 odometry 真值，没有验证实机 IMU 积分准确性，也不构成严格原地转向
 或实机部署验收。下一阶段若修复剩余转向跟踪偏置，需先定位细分根因，再评估
 参考或原生世界模型策略更新；不能直接堆叠位置增益或用改目标抵消轨迹。
+
+## PC2 容器更新（用户随后授权）
+
+用户要求更新容器内代码并提供部署指令。已核验 PC2 主机 `agi`、rootless `lxh`，
+项目路径没有宿主绑定挂载。容器原先停止，启动配置为 `tini -- sleep infinity`，
+为执行离线检查启动容器；未启动 ROS 订阅、状态生产器、策略 worker 或电机发布器。
+
+在容器内新建完整版本
+`/home/agi/lxh-supermimic/releases/11500_turn_center_20261104_r1`，
+旧版本 `11500_candidate_20261102_r3` 和旧运行记录完整保留，作为回退点。
+新版本以旧版本为基底，更新 `source/src/supermimic/deploy/skill_goal.py` 为
+`a13c2b0` 的实现，SHA256
+`d268fd536f4342e409bfcd4a774cd896478493897b0be7958b6844120f3dbf54`。
+新增 `start-keyboard.sh` 明确选择这个新版本，再调用更新后的连续键盘启动脚本。
+通用启动脚本增加 `SM_RELEASE` 覆盖项，默认值仍为原版本。
+新启动脚本不传 `--zero-stand-anchor-xy`，其他既有未验收实机试验参数保留。
+
+容器内完成：4 项目标回归测试、600 帧真实数据集参考计算、188 项文件哈希核对；
+转向入口登记 XY 误差为 0，NumPy 策略固定输入最大输出误差约 `4.99e-7`。
+入口及连续启动脚本通过 `bash -n`。结果位于新版本
+`turn-update-offline-check.json`，未执行准备、接管或控制命令。
+新版 manifest 明确本次只授权文件更新和提供指令，不继承旧版本的实机执行授权。
+
+在本地终端执行以下命令，会进入既有实机试验启动流程，并转发键盘网页端口：
+
+```bash
+ssh -t -L 19181:127.0.0.1:19181 x2-robot 'podman exec -it lxh bash /home/agi/lxh-supermimic/releases/11500_turn_center_20261104_r1/start-keyboard.sh'
+```
+
+启动脚本会要求现场确认后输入 `YES`，随后执行准备并请求策略接管。
+键盘地址为 `http://127.0.0.1:19181`。本记录提供指令，不代表已执行。
