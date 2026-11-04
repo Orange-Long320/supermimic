@@ -424,7 +424,9 @@ def main():
                      diagnostic_calibration=str(a.diagnostic_calibration) if a.diagnostic_calibration else None,
                      stationary_calibration_this_run=stats['calibrated'] and not bool(a.diagnostic_calibration),
                      interval_average=False, point_trapezoid=True, online_zupt=False,
-                     max_imu_gap_s=MAX_IMU_GAP_S, max_imu_receive_gap_s=MAX_IMU_RECEIVE_GAP_S,
+                     max_imu_gap_s=MAX_IMU_GAP_S,
+                     max_imu_receive_gap_s=None if a.imu_reader else MAX_IMU_RECEIVE_GAP_S,
+                     native_callback_timeout_enforced=False if a.imu_reader else None,
                      max_buffered_imu_age_s=None,
                      output_progress_timeout_s=None,
                      online_gravity_leveling=False, imu_offset=offset, motor_readiness_approved=False)

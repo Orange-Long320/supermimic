@@ -88,18 +88,15 @@ int main(int argc, char **argv) {
     int64_t last_output=0, last_raw_stamp=0;
     if(::fcntl(STDIN_FILENO,F_SETFL,::fcntl(STDIN_FILENO,F_GETFL)|O_NONBLOCK)<0)
       throw std::runtime_error("Cannot configure calibration input");
-    auto last_input=std::chrono::steady_clock::now();
-    auto watchdog=node->create_wall_timer(std::chrono::milliseconds(5),[&] {
-      if(last_raw_stamp && std::chrono::steady_clock::now()-last_input>std::chrono::milliseconds(50))
-        throw std::runtime_error("Native raw IMU receive timeout");
-    });
+    uint64_t withheld_stale=0,withheld_incomplete=0,withheld_full=0;
+    // Consumer freshness owns control stopping. A callback pause is not a
+    // missing sensor sample: original header continuity is checked below.
     if(::fcntl(STDOUT_FILENO,F_SETFL,::fcntl(STDOUT_FILENO,F_GETFL)|O_NONBLOCK)<0)
       throw std::runtime_error("Cannot configure state output");
     auto imu = node->create_subscription<sensor_msgs::msg::Imu>("/aima/hal/imu/torso/state",
       rclcpp::QoS(256).best_effort().durability_volatile(),
       [&](sensor_msgs::msg::Imu::ConstSharedPtr m) {
         if (m->header.frame_id.size() >= 64) throw std::runtime_error("IMU frame name too long");
-        last_input=std::chrono::steady_clock::now();
         Frame f;
         f.stamp = static_cast<int64_t>(m->header.stamp.sec)*1000000000LL+m->header.stamp.nanosec;
         f.received = wall_ns();
@@ -148,14 +145,25 @@ int main(int argc, char **argv) {
           f.samples=integrator.samples;f.max_gap=integrator.max_gap;f.integrated=1;
           last_output=f.stamp;
         }
+        if(!integrator.initialized) {
+          // Startup discovery may deliver an IMU backlog before encoders.
+          // These cannot calibrate Python, but remain in the anchor replay FIFO.
+          if(f.groups!=15 || f.joints!=0x7fffffff){++withheld_incomplete;return;}
+          int64_t age=wall_ns()-f.stamp;
+          if(age>35000000LL){++withheld_stale;return;}
+          if(age<0)throw std::runtime_error("Future raw IMU timestamp");
+        }
         ssize_t n;
         do { n = ::write(STDOUT_FILENO, &f, sizeof(f)); } while (n < 0 && errno == EINTR);
-        // Full state pipes withhold snapshots; raw propagation must never wait
-        // for the Python consumer. Calibration capture instead fails closed.
-        if(n<0 && errno==EAGAIN && integrator.initialized)return;
-        if (n != sizeof(f)) throw std::runtime_error("Raw sensor pipe write failed");
+        // A full pipe withholds a transport snapshot, not a raw propagation
+        // sample. Before initialization pending retains the exact future anchor;
+        // afterwards the integrator has already consumed every raw IMU sample.
+        if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)){++withheld_full;return;}
+        if (n != sizeof(f)) throw std::runtime_error(std::string("Raw sensor pipe write failed: ")+std::strerror(errno));
       });
     rclcpp::spin(node);
+    std::cerr<<"withheld calibration snapshots: stale="<<withheld_stale
+             <<" incomplete="<<withheld_incomplete<<" pipe_full="<<withheld_full<<std::endl;
     rclcpp::shutdown();
   } catch (const std::exception &e) {
     std::cerr << e.what() << std::endl;
