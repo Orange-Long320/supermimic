@@ -72,11 +72,15 @@ def main():
     window = deque()
     started = time.monotonic()
     stats = {'imu': 0, 'packets': 0, 'joints': 0, 'calibrated': False,
-             'max_header_gap_s': 0., 'max_receive_age_s': 0., 'aligned_imu': 0}
+             'max_header_gap_s': 0., 'max_receive_age_s': 0., 'aligned_imu': 0,
+             'calibration_compute_ms': None, 'startup_waiting_fresh': 0}
     last_stamp = None
     origin_ns = None
     last_publish = None
     last_receive = None
+    calibration = None
+    calibration_stamp = None
+    calibrated_at = None
     fault = None
     node = None
     rclpy.init()
@@ -104,6 +108,7 @@ def main():
 
         def on_imu(msg):
             nonlocal last_stamp, origin_ns, last_publish, last_receive
+            nonlocal calibration, calibration_stamp, calibrated_at
             stamp = msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
             gyro = [msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z]
             acc = [msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z]
@@ -141,14 +146,26 @@ def main():
                 while len(window) > 1 and window[1]['time_s'] <= sample['time_s']-3.:
                     window.popleft()
                 if sample['time_s']-window[0]['time_s'] >= 3.:
+                    calibration_started = time.monotonic()
                     try:
                         calibration = fit_static_initialization(list(window), declared_stationary=True)
                     except ValueError:
                         return
                     estimator.filter.initialize(calibration)
-                    (a.out/'calibration.json').write_text(json.dumps(calibration, indent=2)+'\n')
+                    stats['calibration_compute_ms'] = (time.monotonic()-calibration_started)*1000
+                    calibration_stamp = stamp
+                    calibrated_at = time.monotonic()
+                    log.emit('support-events', {'event': 'calibration', 'stamp_ns': stamp,
+                                               'fit_ms': stats['calibration_compute_ms'],
+                                               'calibration': calibration})
                     stats['calibrated'] = True
                     print('Stationary initialization passed; gyro bias:', calibration['gyro_bias'], flush=True)
+                    # Bootstrap at the exact end of the measured rest window.
+                    # Fitting takes wall time: this observation must never become
+                    # the first live packet. Drain subsequent sensor callbacks and
+                    # wait for all four encoder groups to advance past this point.
+                    estimator.update(sample['time_s'], gyro, acc)
+                    return
                 else:
                     return
             estimator.update(sample['time_s'], gyro, acc)
@@ -157,6 +174,9 @@ def main():
             if aligned is None:
                 return
             rows, q, qd = aligned
+            if last_publish is None and any(r['stamp_ns'] <= calibration_stamp for r in rows):
+                stats['startup_waiting_fresh'] += 1
+                return
             pos, quat, omega, gravity = estimator.state(q)
             packet = {'schema': 2, 'session_id': session, 'joint_names': names,
                       'motor_output_enabled': False, 'position': pos.tolist(),
@@ -167,7 +187,17 @@ def main():
                       'joint_stamps': [r['stamp_ns']*1e-9 for r in rows],
                       'joint_received_wall': [r['recv'] for r in rows],
                       'state_stamp_ns': stamp, 'state_stamp': stamp*1e-9, 'published_wall': time.time()}
-            validate_policy_packet(packet, names, time.time(), max_age=.035)
+            try:
+                validate_policy_packet(packet, names, time.time(), max_age=.035)
+            except ValueError:
+                now = time.time()
+                log.emit('support-events', {'event': 'packet_rejected',
+                    'stamp_ns': stamp, 'calibration_compute_ms': stats['calibration_compute_ms'],
+                    'ages_ms': {
+                        'imu_header': (now-stamp*1e-9)*1000,
+                        **{g+'_header': (now-r['stamp_ns']*1e-9)*1000 for g, r in zip(GROUPS, rows)},
+                        **{g+'_receive': (now-r['recv'])*1000 for g, r in zip(GROUPS, rows)}}})
+                raise
             log.emit('packets', packet)
             pub.publish(String(data=json.dumps(packet, allow_nan=False)))
             last_publish = stamp
@@ -188,6 +218,8 @@ def main():
             if not a.observe_only:
                 if time.monotonic()-started > 20 and not stats['calibrated']:
                     raise ValueError('No valid three-second stationary window within 20 seconds')
+                if calibrated_at is not None and last_publish is None and time.monotonic()-calibrated_at > .5:
+                    raise ValueError('No fresh post-calibration state within 500 ms')
                 if last_receive is not None and time.monotonic()-last_receive > .035:
                     raise ValueError('IMU receive timeout')
                 if last_publish is not None and time.time()-last_publish*1e-9 > .05:
@@ -199,6 +231,8 @@ def main():
         raise
     finally:
         (a.out/'ready.json').unlink(missing_ok=True)
+        if calibration is not None:
+            (a.out/'calibration.json').write_text(json.dumps(calibration, indent=2)+'\n')
         if node is not None:
             node.destroy_node()
         rclpy.try_shutdown()

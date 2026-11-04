@@ -4,7 +4,7 @@
 
 ## 安装位置与实际调用链
 
-新容器内版本 `/home/agi/lxh-supermimic/releases/11500_imu_sensor_20261104_r1`，父版本 `11500_turn_center_20261104_r1` 保留。宿主同名目录与容器项目目录不是自动同步；本次明确用 `podman cp` 传入容器。
+当前容器内版本 `/home/agi/lxh-supermimic/releases/11500_imu_sensor_20261104_r2`，父版本 `11500_imu_sensor_20261104_r1` 及更早的 `11500_turn_center_20261104_r1` 保留。宿主同名目录与容器项目目录不是自动同步；本次明确用 `podman cp` 传入容器。
 
 `start-keyboard.sh` → `launcher/start_x2_keyboard_sensor_20261104.sh` → `launcher/run_x2_keyboard_sensor_20261104.sh` → `launcher/publish_pelvis_imu_sensor.py`。后者通过 trial/src 载入 `imu_dead_reckoning.py`，不是旧的 `publish_pelvis_packet_keyboard_20261103.py`。保留转弯入口位置登记和站立 XY 反馈。
 
@@ -52,7 +52,7 @@ ssh -t x2-robot 'podman exec -it lxh bash'
 source /opt/ros/humble/setup.bash
 source /home/agi/aimdk/install/setup.bash
 B=/home/agi/lxh-supermimic
-R=$B/releases/11500_imu_sensor_20261104_r1
+R=$B/releases/11500_imu_sensor_20261104_r2
 export PYTHONPATH="$R/source/src:$B/python-cpu:$B/vendor-mjlab-math:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 python3 "$R/launcher/publish_pelvis_imu_sensor.py" \
@@ -64,3 +64,23 @@ python3 "$R/launcher/publish_pelvis_imu_sensor.py" \
 后续现场人工试验入口（**会进入电机控制流程，本次没有执行**）：在同一容器中 `bash "$R/start-keyboard.sh"`。入口要求人工确认当前急停/防跌落等条件，并在最初校准期间保持物理静止。若校准或时序失败查看新 trial 的 `state.log`，不要改成跳过校准、强制归零或放宽时间戳。
 
 回退需要明确指定父版本及范围；本次未回退，未覆盖旧版本。停止 runner 后实际 HAL/电机状态仍需现场核验。
+
+## 12:36 首包过期故障与 r2 修复
+
+失败 trial：`/home/agi/lxh-supermimic/trials/11500_prep_imu_20261102_r1/run-keyboard-20261104-123618`。原始记录和旧版本未修改。summary 显示静止校准通过（1191 条、3.0038 秒），状态包发布数为 0，失败原因 `policy packet stale or future`；目录中没有硬件 publisher/worker 日志，runner 在状态准备阶段退出。
+
+这次最后一个 IMU 到达时包龄 6.205 ms，四组编码器 header 包龄分别 17.262、13.260、13.260、9.259 ms。r1 在同一个订阅回调内拟合整个校准窗口、初始化、同步写 JSON，接着尝试发布这张旧快照；在 PC2 上单次拟合测得约 16.1 ms，加上其余处理即可耗尽 35 ms 预算。原始故障没有逐字段包龄日志，无法还原当时每一步的精确耗时。
+
+r2 把“校准结束”与“可以发布新鲜实时状态”分开：
+
+1. 校准成功后，只在校准窗口最后的真实 IMU 时间初始化积分，不发布这一帧。
+2. 继续处理后续真实 IMU，等四组编码器的 header 均超过校准结束时间，再尝试首包；没有把积分时间起点挪到等待结束，没有丢弃这期间的已接收 IMU。
+3. 校准数据先进入有界异步日志；`calibration.json` 在退出收尾时保存，实时回调不再同步写该文件。
+4. 500 ms 内没有新鲜首包就失败。现有输入 35 ms、状态包 35 ms、运行输出 50 ms、IMU 间隔 30 ms 等门槛保持原值。校验失败额外记录 IMU/每组编码器的 header 和接收包龄。
+
+验证不是再次控制机器人：
+
+- 使用失败记录，隔离模拟 ROS 回调与发布器，在 PC2 容器内做离线软件回放。为检验时间预算，将拟合计算的总耗时下限设为 20 ms。原始失败记录恰好在校准末尾停止，因此显式附加 1 秒“保持最后原始读数”的合成消息，仅测试启动时序，不能作为运动/精度测试。
+- 同样条件下，旧版失败且输出 0 帧；r2 输出 50 帧，最大状态包龄 28.987 ms，无故障。报告 `r2/reports/startup-{before,after}-fit20/`，完整日志 `r2/reports/startup-{before,after}-fit20.log`。不加耗时下限时旧版的一次原始记录回放能够通过，说明它是时间预算相关问题，而非每次必现的输入格式错误。
+- 新增确定性自动测试，模拟耗时校准和积压的四组编码器，验证首包必须晚于校准，且等待期间持续积分；真实过期 IMU 和时间戳大间隔仍拒绝。连同估计器/状态包测试共 31 项通过。
+- 尚未执行 r2 的现场运动或重新静止校准；没有启动任何真实 ROS 发布器、电机程序或接管。本次修复不能证明运动精度达标。
