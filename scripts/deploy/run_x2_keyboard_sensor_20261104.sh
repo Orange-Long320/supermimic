@@ -94,6 +94,11 @@ nohup env PYTHONPATH="$PYTHONPATH_RELEASE" python3 "$publisher_script" \
   --plan "$plan" --consent "$consent" > "$trial/publisher.log" 2>&1 &
 publisher_pid=$!
 sleep 3
+if ! kill -0 "$state_pid" 2>/dev/null || [ ! -f "$trial/state/ready.json" ]; then
+  stamp "state producer exited during publisher initialization; aborting"
+  tail -12 "$trial/state.log" >&2
+  exit 1
+fi
 
 stamp "record joint states (read only)"
 # The continuous recorder writes through a bounded queue rather than retaining
@@ -116,8 +121,9 @@ worker_pid=$!
 # must not subscribe there: it watches the joint command stream instead, which
 # only carries traffic once the publisher has accepted a target.
 stamp "wait for the first joint command"
-if ! python3 - <<'WAITPY'
-import time, rclpy
+if ! python3 - "$state_pid" "$publisher_pid" "$worker_pid" "$monitor_pid" "$trial/state/ready.json" <<'WAITPY'
+import json, sys, time, rclpy
+from pathlib import Path
 from rclpy.node import Node
 from aimdk_msgs.msg import JointCommandArray
 rclpy.init()
@@ -126,15 +132,39 @@ seen = []
 node.create_subscription(JointCommandArray, "/aima/hal/joint/leg/command",
                          lambda m: seen.append(time.monotonic()), 10)
 end = time.monotonic() + 60.
-while not seen and time.monotonic() < end:
-    rclpy.spin_once(node, timeout_sec=.05)
-print("first command seen:", bool(seen), flush=True)
-node.destroy_node(); rclpy.try_shutdown()
+failure = None
+try:
+    while not seen and time.monotonic() < end:
+        for label, pid in zip(('state producer', 'hardware publisher', 'policy worker', 'joint recorder'), sys.argv[1:5]):
+            try:
+                status = Path('/proc', pid, 'stat').read_text().rsplit(')', 1)[1].split()[0]
+                if status in ('Z', 'X'):
+                    raise ProcessLookupError()
+            except (OSError, IndexError):
+                failure = label+' exited; inspect '+str(Path(sys.argv[5]).parent.parent)
+                break
+        if failure:
+            break
+        try:
+            heartbeat = json.loads(Path(sys.argv[5]).read_text())
+            if not 0 <= time.time()-heartbeat['wall'] <= .3:
+                failure = 'State heartbeat expired while waiting for first command'
+        except (OSError, ValueError, KeyError):
+            failure = 'State heartbeat missing while waiting for first command'
+        if failure:
+            break
+        rclpy.spin_once(node, timeout_sec=.05)
+except KeyboardInterrupt:
+    failure = 'Operator interrupted startup'
+finally:
+    print(failure or ('first command seen: '+str(bool(seen))), flush=True)
+    node.destroy_node(); rclpy.try_shutdown()
 if not seen:
     raise SystemExit(1)
 WAITPY
 then
-  stamp "no joint command observed; aborting before handover"
+  stamp "startup failed; aborting before handover"
+  for log in state worker publisher; do tail -8 "$trial/$log.log" >&2; done
   exit 1
 fi
 stamp "wait ${prep_seconds}s for the preparation path"

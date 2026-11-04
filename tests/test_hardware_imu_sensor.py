@@ -32,7 +32,7 @@ def test_mount_requires_fixed_pelvis_and_known_axes(tmp_path):
         bridge.pelvis_mount(path)
 
 
-@pytest.mark.parametrize('fault', [None, 'stale_input', 'timestamp_gap'])
+@pytest.mark.parametrize('fault', [None, 'stale_input', 'timestamp_gap', 'joint_delayed_once', 'joint_delayed_forever'])
 def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_path, monkeypatch, fault):
     """A 20 ms fit must not publish its aged window as the first live frame."""
     import sys
@@ -60,9 +60,14 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
         for group, name in zip(bridge.GROUPS, names):
             # Oldest joint is 17 ms old when the IMU callback begins.
             jt = stamp-13_000_000
+            delayed = fault in ('joint_delayed_once', 'joint_delayed_forever') and i >= 1700 and (fault == 'joint_delayed_forever' or i < 1708)
+            if fault in ('joint_delayed_once', 'joint_delayed_forever') and group == 'leg':
+                jt -= 8_000_000
             stream.append((wall, '/aima/hal/joint/'+group+'/state', NS(
                 header=NS(stamp=NS(sec=jt//10**9, nanosec=jt%10**9)),
                 state=NS(value=0), joints=[NS(name=name, position=0., velocity=0.)])))
+        if delayed:
+            wall += .012
         if fault == 'stale_input' and i == 1700:
             wall += .04
         if fault == 'timestamp_gap' and i == 1700:
@@ -136,8 +141,9 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     monkeypatch.setattr(diagnostic, 'AsyncDiagnosticLog', Log)
     monkeypatch.setattr(sys, 'argv', ['bridge', '--profile', str(profile), '--model', 'fake-model',
                                     '--urdf', str(urdf), '--out', str(out), '--assume-initial-rest'])
-    if fault:
-        with pytest.raises(ValueError, match='IMU'):
+    fails = fault in ('stale_input', 'timestamp_gap', 'joint_delayed_forever')
+    if fails:
+        with pytest.raises(ValueError, match='IMU|output timeout'):
             bridge.main()
     else:
         bridge.main()
@@ -148,4 +154,59 @@ def test_startup_waits_for_post_calibration_encoders_and_keeps_time_guards(tmp_p
     assert all(b > a for a, b in zip(updates, updates[1:]))
     summary = json.loads((out/'summary.json').read_text())
     assert summary['startup_waiting_fresh'] > 0
-    assert bool(summary['fault']) == bool(fault)
+    assert bool(summary['fault']) == fails
+    if fault in ('joint_delayed_once', 'joint_delayed_forever'):
+        assert summary['withheld_stale_candidates'] > 0
+
+
+@pytest.mark.parametrize('failure', ['dead_worker', 'stale_heartbeat', 'interrupt'])
+def test_first_command_probe_exits_when_children_or_state_fail(tmp_path, monkeypatch, capsys, failure):
+    import sys
+    import time
+    import json
+    import types
+    from types import SimpleNamespace as NS
+    runner = Path(__file__).resolve().parents[1]/'scripts/deploy/run_x2_keyboard_sensor_20261104.sh'
+    code = runner.read_text().split("<<'WAITPY'\n", 1)[1].split('\nWAITPY', 1)[0]
+    # Inject process/heartbeat reads; execute the runner's actual probe body.
+    code = code.replace('from pathlib import Path', '')
+    ready = tmp_path/'state'/'ready.json'
+    ready.parent.mkdir()
+    ready.write_text(json.dumps({'wall': time.time()-(1 if failure == 'stale_heartbeat' else 0)}))
+    spins = []
+
+    def path(*parts):
+        if str(parts[0]) == '/proc':
+            state = 'Z' if failure == 'dead_worker' and parts[1] == '3' else 'S'
+            return NS(read_text=lambda: '3 (python) '+state+' 1 2 3')
+        return Path(*parts)
+
+    def spin(*args, **kwargs):
+        spins.append(True)
+        raise KeyboardInterrupt()
+
+    class Node:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def create_subscription(self, *args):
+            pass
+
+        def destroy_node(self):
+            pass
+
+    for name, attrs in {
+        'rclpy': dict(init=lambda: None, spin_once=spin, try_shutdown=lambda: None),
+        'rclpy.node': dict(Node=Node), 'aimdk_msgs.msg': dict(JointCommandArray=object),
+    }.items():
+        module = types.ModuleType(name)
+        module.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(sys, 'argv', ['wait', '1', '2', '3', '4', str(ready)])
+    with pytest.raises(SystemExit) as result:
+        exec(compile(code, '<first-command-probe>', 'exec'), {'Path': path})
+    assert result.value.code == 1
+    text = capsys.readouterr().out
+    assert {'dead_worker': 'policy worker exited', 'stale_heartbeat': 'heartbeat expired',
+            'interrupt': 'Operator interrupted startup'}[failure] in text
+    assert bool(spins) == (failure == 'interrupt')

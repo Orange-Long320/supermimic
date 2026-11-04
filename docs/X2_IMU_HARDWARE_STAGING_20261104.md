@@ -4,7 +4,7 @@
 
 ## 安装位置与实际调用链
 
-当前容器内版本 `/home/agi/lxh-supermimic/releases/11500_imu_sensor_20261104_r2`，父版本 `11500_imu_sensor_20261104_r1` 及更早的 `11500_turn_center_20261104_r1` 保留。宿主同名目录与容器项目目录不是自动同步；本次明确用 `podman cp` 传入容器。
+当前容器内版本 `/home/agi/lxh-supermimic/releases/11500_imu_sensor_20261104_r3`，父版本 `11500_imu_sensor_20261104_r2`、`11500_imu_sensor_20261104_r1` 及更早的 `11500_turn_center_20261104_r1` 保留。宿主同名目录与容器项目目录不是自动同步；本次明确用 `podman cp` 传入容器。
 
 `start-keyboard.sh` → `launcher/start_x2_keyboard_sensor_20261104.sh` → `launcher/run_x2_keyboard_sensor_20261104.sh` → `launcher/publish_pelvis_imu_sensor.py`。后者通过 trial/src 载入 `imu_dead_reckoning.py`，不是旧的 `publish_pelvis_packet_keyboard_20261103.py`。保留转弯入口位置登记和站立 XY 反馈。
 
@@ -52,7 +52,7 @@ ssh -t x2-robot 'podman exec -it lxh bash'
 source /opt/ros/humble/setup.bash
 source /home/agi/aimdk/install/setup.bash
 B=/home/agi/lxh-supermimic
-R=$B/releases/11500_imu_sensor_20261104_r2
+R=$B/releases/11500_imu_sensor_20261104_r3
 export PYTHONPATH="$R/source/src:$B/python-cpu:$B/vendor-mjlab-math:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 python3 "$R/launcher/publish_pelvis_imu_sensor.py" \
@@ -84,3 +84,16 @@ r2 把“校准结束”与“可以发布新鲜实时状态”分开：
 - 同样条件下，旧版失败且输出 0 帧；r2 输出 50 帧，最大状态包龄 28.987 ms，无故障。报告 `r2/reports/startup-{before,after}-fit20/`，完整日志 `r2/reports/startup-{before,after}-fit20.log`。不加耗时下限时旧版的一次原始记录回放能够通过，说明它是时间预算相关问题，而非每次必现的输入格式错误。
 - 新增确定性自动测试，模拟耗时校准和积压的四组编码器，验证首包必须晚于校准，且等待期间持续积分；真实过期 IMU 和时间戳大间隔仍拒绝。连同估计器/状态包测试共 31 项通过。
 - 尚未执行 r2 的现场运动或重新静止校准；没有启动任何真实 ROS 发布器、电机程序或接管。本次修复不能证明运动精度达标。
+
+## 12:44 等待首条指令未及时退出与 r3 修复
+
+失败 trial：`/home/agi/lxh-supermimic/trials/11500_prep_imu_20261102_r1/run-keyboard-20261104-124357`。这次静止校准与首包就绪检查通过，发布 46 帧后，运行期间某张组合状态的腿部 header 包龄达到 38.169 ms（IMU 16.482 ms），超过状态包 35 ms 门槛，状态进程退出。r2 的首包修复已生效；此处是运行期间编码器与 IMU 新鲜度组合的问题。
+
+策略 worker 随后报 `Expected one state producer and one motor publisher; got state publishers 0 and target subscribers 1` 并退出。启动脚本的首条指令探针只等话题消息、最长 60 秒，没有检查子进程状态，因此用户看到它停在 wait 行，Ctrl-C 才退出。该 worker 没有进入策略接管；不能仅凭这些日志推断其他控制器或最终 HAL 的电机状态。检查时未发现本项目状态/worker/电机发布进程。
+
+r3 保持 35 ms 输入/状态包和 50 ms 输出租约：
+
+- 持续积分每条已接收且通过输入时间检查的 IMU；一张组合状态仅因过去的编码器数据太旧时，拒绝发布该候选，等待更新的因果组合。没有把旧状态改时间戳，也没有用真值或归零代替。等待超过原有 50 ms 输出租约仍退出；未来时间戳、格式错误、输入过期和大间隔仍直接报错。
+- 等待首条指令期间每次检查四个子进程（包含僵尸进程）与状态心跳，死亡或心跳过期立即失败并清理本次进程，不继续无效等待。Ctrl-C 在探针内正常收尾。硬件发布器初始化后、启动 worker 前也检查状态程序是否仍在运行。
+- 在容器中使用本次失败记录做隔离软件回放，显式追加 1 秒保持最后读数的合成消息验证恢复路径，没有真实 ROS 发布、控制器或电机输出。拒绝两张过期候选后输出 96 帧，已发布包最大包龄 26.751 ms、无故障；报告 `r3/reports/runtime-after/{summary,offline-replay}.json`、`runtime-after.log`。合成后续帧不构成实机持续运行或精度证据。
+- 36 项自动测试通过：新增一次编码器延迟可恢复、持续延迟触发输出租约、死亡 worker/过期心跳/用户中断及时结束探针。没有修改动作权重或电机参数，未重启真实控制；r3 的现场连续运行仍待验证。

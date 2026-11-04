@@ -73,7 +73,8 @@ def main():
     started = time.monotonic()
     stats = {'imu': 0, 'packets': 0, 'joints': 0, 'calibrated': False,
              'max_header_gap_s': 0., 'max_receive_age_s': 0., 'aligned_imu': 0,
-             'calibration_compute_ms': None, 'startup_waiting_fresh': 0}
+             'calibration_compute_ms': None, 'startup_waiting_fresh': 0,
+             'withheld_stale_candidates': 0}
     last_stamp = None
     origin_ns = None
     last_publish = None
@@ -187,16 +188,27 @@ def main():
                       'joint_stamps': [r['stamp_ns']*1e-9 for r in rows],
                       'joint_received_wall': [r['recv'] for r in rows],
                       'state_stamp_ns': stamp, 'state_stamp': stamp*1e-9, 'published_wall': time.time()}
+            checked_at = time.time()
             try:
-                validate_policy_packet(packet, names, time.time(), max_age=.035)
-            except ValueError:
-                now = time.time()
-                log.emit('support-events', {'event': 'packet_rejected',
+                validate_policy_packet(packet, names, checked_at, max_age=.035)
+            except ValueError as exc:
+                now = checked_at
+                log.emit('support-events', {'event': 'packet_rejected', 'reason': str(exc),
                     'stamp_ns': stamp, 'calibration_compute_ms': stats['calibration_compute_ms'],
                     'ages_ms': {
                         'imu_header': (now-stamp*1e-9)*1000,
                         **{g+'_header': (now-r['stamp_ns']*1e-9)*1000 for g, r in zip(GROUPS, rows)},
                         **{g+'_receive': (now-r['recv'])*1000 for g, r in zip(GROUPS, rows)}}})
+                # A stale combination can be replaced by the next causal
+                # encoder/IMU snapshot. Propagation above is never skipped.
+                # Published packets still pass the unchanged 35 ms validator;
+                # the existing 50 ms output lease bounds any wait for freshness.
+                if str(exc) == 'policy packet stale or future':
+                    values = [packet['state_stamp'], *packet['joint_stamps'],
+                              packet['published_wall'], *packet['joint_received_wall']]
+                    if all(t <= now for t in values):
+                        stats['withheld_stale_candidates'] += 1
+                        return
                 raise
             log.emit('packets', packet)
             pub.publish(String(data=json.dumps(packet, allow_nan=False)))
